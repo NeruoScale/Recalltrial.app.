@@ -114,6 +114,27 @@ export default function Landing() {
           </div>
         </section>
 
+        <section className="py-16 px-4" data-testid="section-founder-story">
+          <div className="max-w-[680px] mx-auto">
+            <h2 className="text-2xl font-bold text-center mb-8">Why I Built RecallTrial</h2>
+            <div className="bg-muted/40 rounded-md p-8 md:p-10">
+              <div className="border-l-2 border-primary/30 pl-6 space-y-4">
+                <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
+                  I kept forgetting to cancel free trials and got charged more than once.
+                </p>
+                <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
+                  It wasn't about the money — it was about losing control over something avoidable.
+                </p>
+                <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
+                  So I built RecallTrial to make sure that never happens again — for me or anyone else.
+                </p>
+                <p className="text-base md:text-lg font-medium text-foreground mt-6">— Founder</p>
+                <p className="text-xs text-muted-foreground">Operated by SKAHM LTD (UK).</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="py-16 px-4 bg-muted/30">
           <div className="max-w-2xl mx-auto">
             <h2 className="text-2xl font-bold text-center mb-8">Built on trust</h2>
