@@ -37,3 +37,9 @@ author = "agent"
 task = "shell.exec"
 args = "npm run dev"
 waitForPort = 5000
+
+[userenv]
+
+[userenv.shared]
+CRON_KEY = "recalltrial-cron-secret-2026"
+APP_URL = "https://recalltrial.replit.app"
