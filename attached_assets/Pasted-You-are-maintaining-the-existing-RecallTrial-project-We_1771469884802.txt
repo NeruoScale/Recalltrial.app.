@@ -1,0 +1,187 @@
+You are maintaining the existing RecallTrial project.
+
+We are launching RecallTrial as a serious long-term SaaS in FREE Early Access mode.
+
+DO NOT REMOVE STRIPE CODE.
+Freeze billing completely.
+Implement deep service search (80% platform coverage).
+Improve onboarding and analytics.
+
+==============================
+PHASE 1 — FREE ONLY (FREEZE BILLING)
+==============================
+
+1) Freeze Stripe without deleting it
+- Add env var: BILLING_ENABLED=false (default).
+- When BILLING_ENABLED !== "true":
+  - All /api/billing/* routes return 404.
+  - /api/stripe/webhook returns 404.
+  - Hide pricing page, upgrade modal, plan badges, billing success page.
+  - Ignore user.plan completely in logic.
+- Do NOT delete Stripe files or DB columns.
+
+2) Enforce Free limit = 3 active trials
+- ACTIVE_TRIAL_LIMIT = 3 for all users.
+- In POST /api/trials:
+   If active trials >= 3:
+      return 403 with:
+      {
+        "error": "TRIAL_LIMIT_REACHED",
+        "message": "Free Early Access allows up to 3 active trials."
+      }
+- GET /api/auth/me must return:
+   - activeTrialCount
+   - trialLimit: 3
+   - billingEnabled: false
+- Dashboard must show:
+   "X of 3 active trials used"
+
+3) Landing Page Update
+- Remove pricing tiers.
+- Add section:
+   "100% Free during Early Access."
+- Keep trust bullets:
+   - No bank access required
+   - Email scanning optional (coming later)
+   - You control your data
+
+==============================
+PHASE 2 — DEEP SERVICE SEARCH (80% COVERAGE)
+==============================
+
+Replace static service list with intelligent search.
+
+4) Create services_catalog.json
+- Add a catalog with at least 500 services.
+- Each entry:
+{
+  "name": "Netflix",
+  "aliases": ["netflix", "netflix.com"],
+  "domain": "netflix.com",
+  "cancelUrl": "https://www.netflix.com/YourAccount"
+}
+
+- Cover categories:
+  - Streaming (Netflix, Disney+, Max, Hulu, Prime Video)
+  - Music (Spotify, Apple Music)
+  - SaaS (Notion, Canva, Adobe, Figma, ChatGPT, Microsoft 365)
+  - AI tools
+  - Cloud (AWS, GCP, DigitalOcean)
+  - Fitness apps
+  - Gaming subscriptions
+  - Delivery apps
+  - VPNs
+  - Common productivity apps
+
+Target: realistic 500+ global services.
+
+5) Implement fuzzy search
+- Install fuse.js
+- Search keys:
+   - name
+   - aliases
+   - domain
+- Threshold ~0.35
+- Normalize input:
+   - lowercase
+   - remove punctuation
+   - trim spaces
+
+6) Backend endpoint
+Create:
+GET /api/services/search?q=term
+
+- Return top 10 matches sorted by score.
+
+7) Frontend UX
+- Replace static list with dynamic search dropdown.
+- Placeholder:
+   "Search service (Netflix, Spotify, Adobe…)"
+- On selection:
+   Auto-fill:
+     - serviceName
+     - serviceUrl (https://domain)
+     - cancelUrl
+     - icon via favicon system
+
+8) If no match found
+- Show:
+   "Can't find it? Paste the service website URL."
+- Allow manual entry.
+- Domain extraction still fetches icon.
+- cancelUrl defaults to serviceUrl if empty.
+
+==============================
+PHASE 3 — ONBOARDING IMPROVEMENTS
+==============================
+
+9) After signup:
+- If user has 0 trials → redirect to /trials/new
+- Show onboarding card:
+   1. Add a trial
+   2. We email you before renewal
+   3. Tap cancel link instantly
+
+10) Dashboard empty state:
+- Friendly illustration
+- CTA: "Add your first trial"
+- Short text:
+   "Add a trial in 20 seconds. We'll remind you before renewal."
+
+11) Trial detail page:
+- Show:
+   - Next reminder date
+   - Reminders sent to: user email
+   - Calendar export button
+
+==============================
+PHASE 4 — BASIC ANALYTICS
+==============================
+
+12) Create analytics_events table:
+- id (uuid)
+- userId (nullable)
+- eventName (string)
+- eventData (jsonb)
+- createdAt
+
+13) Log events:
+- user_signed_up
+- user_logged_in
+- trial_created
+- trial_canceled
+- calendar_exported
+- reminder_sent
+- cancel_link_clicked
+
+14) Cancel click tracking:
+Replace direct cancel link with:
+GET /api/trials/:id/cancel-click
+- Verify ownership
+- Log cancel_link_clicked
+- Redirect to cancelUrl
+
+15) Admin metrics endpoint:
+GET /api/admin/metrics
+(protected by ADMIN_KEY env var)
+Return:
+- total users
+- users with >=1 trial
+- trials created last 7 days
+- reminders sent last 7 days
+- cancel link clicks last 7 days
+
+==============================
+QUALITY REQUIREMENTS
+==============================
+
+- No mention of Pro or Premium in UI.
+- Stripe unreachable when BILLING_ENABLED=false.
+- Trial limit strictly 3.
+- Deep search covers majority of common platforms.
+- Clean code.
+- Update README explaining:
+   - BILLING_ENABLED
+   - trial limit 3
+   - analytics endpoint
+   - service catalog system
