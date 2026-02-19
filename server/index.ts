@@ -2,10 +2,6 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
-import { runMigrations } from 'stripe-replit-sync';
-import { getStripeSync } from "./stripeClient";
-import { WebhookHandlers } from "./webhookHandlers";
-import { syncUserSubscriptionFromStripe, syncUserSubscriptionByUserId } from "./stripeWebhookHandler";
 
 const app = express();
 const httpServer = createServer(app);
@@ -26,7 +22,14 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
-async function initStripe() {
+const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
+
+if (BILLING_ENABLED) {
+  const { runMigrations } = await import('stripe-replit-sync');
+  const { getStripeSync } = await import("./stripeClient");
+  const { WebhookHandlers } = await import("./webhookHandlers");
+  const { syncUserSubscriptionFromStripe, syncUserSubscriptionByUserId } = await import("./stripeWebhookHandler");
+
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
     throw new Error('DATABASE_URL required for Stripe integration');
@@ -57,54 +60,57 @@ async function initStripe() {
   } catch (error) {
     console.error('Failed to initialize Stripe:', error);
   }
-}
 
-await initStripe();
-
-app.post(
-  '/api/stripe/webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    const signature = req.headers['stripe-signature'];
-    if (!signature) {
-      return res.status(400).json({ error: 'Missing stripe-signature' });
-    }
-
-    try {
-      const sig = Array.isArray(signature) ? signature[0] : signature;
-
-      if (!Buffer.isBuffer(req.body)) {
-        console.error('STRIPE WEBHOOK ERROR: req.body is not a Buffer');
-        return res.status(500).json({ error: 'Webhook processing error' });
+  app.post(
+    '/api/stripe/webhook',
+    express.raw({ type: 'application/json' }),
+    async (req, res) => {
+      const signature = req.headers['stripe-signature'];
+      if (!signature) {
+        return res.status(400).json({ error: 'Missing stripe-signature' });
       }
-
-      await WebhookHandlers.processWebhook(req.body as Buffer, sig);
 
       try {
-        const event = JSON.parse(req.body.toString());
-        const eventData = event.data?.object;
+        const sig = Array.isArray(signature) ? signature[0] : signature;
 
-        if (event.type === 'checkout.session.completed') {
-          const userId = eventData?.metadata?.userId;
-          if (userId) {
-            setTimeout(() => syncUserSubscriptionByUserId(userId), 2000);
-          }
-        } else if (event.type?.startsWith('customer.subscription.')) {
-          const customerId = eventData?.customer;
-          if (customerId) {
-            setTimeout(() => syncUserSubscriptionFromStripe(customerId), 2000);
-          }
+        if (!Buffer.isBuffer(req.body)) {
+          console.error('STRIPE WEBHOOK ERROR: req.body is not a Buffer');
+          return res.status(500).json({ error: 'Webhook processing error' });
         }
-      } catch {
-      }
 
-      res.status(200).json({ received: true });
-    } catch (error: any) {
-      console.error('Webhook error:', error.message);
-      res.status(400).json({ error: 'Webhook processing error' });
+        await WebhookHandlers.processWebhook(req.body as Buffer, sig);
+
+        try {
+          const event = JSON.parse(req.body.toString());
+          const eventData = event.data?.object;
+
+          if (event.type === 'checkout.session.completed') {
+            const userId = eventData?.metadata?.userId;
+            if (userId) {
+              setTimeout(() => syncUserSubscriptionByUserId(userId), 2000);
+            }
+          } else if (event.type?.startsWith('customer.subscription.')) {
+            const customerId = eventData?.customer;
+            if (customerId) {
+              setTimeout(() => syncUserSubscriptionFromStripe(customerId), 2000);
+            }
+          }
+        } catch {
+        }
+
+        res.status(200).json({ received: true });
+      } catch (error: any) {
+        console.error('Webhook error:', error.message);
+        res.status(400).json({ error: 'Webhook processing error' });
+      }
     }
-  }
-);
+  );
+} else {
+  console.log('Billing disabled (BILLING_ENABLED=false). Stripe initialization skipped.');
+  app.post('/api/stripe/webhook', (_req, res) => {
+    return res.status(404).json({ message: "Not found" });
+  });
+}
 
 app.use(
   express.json({

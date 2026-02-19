@@ -83,6 +83,14 @@ export const insertTrialSchema = createInsertSchema(trials).omit({
   currency: z.string().default("USD"),
 });
 
+export const analyticsEvents = pgTable("analytics_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").references(() => users.id),
+  event: text("event").notNull(),
+  metadata: text("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const insertReminderSchema = createInsertSchema(reminders).omit({
   id: true,
   status: true,

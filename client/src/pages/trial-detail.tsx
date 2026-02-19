@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient, getQueryFn } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -7,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X } from "lucide-react";
+import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X, Mail } from "lucide-react";
 import type { Trial, Reminder } from "@shared/schema";
 import { format, parseISO, differenceInDays } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -35,14 +36,16 @@ export default function TrialDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/trials"] });
       queryClient.invalidateQueries({ queryKey: ["/api/trials", params.id] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       toast({ title: "Trial marked as canceled" });
     },
   });
 
-  if (!user) {
-    setLocation("/auth/login");
-    return null;
-  }
+  useEffect(() => {
+    if (!user) setLocation("/auth/login");
+  }, [user, setLocation]);
+
+  if (!user) return null;
 
   if (isLoading) {
     return (
@@ -74,6 +77,8 @@ export default function TrialDetail() {
   const daysLeft = differenceInDays(parseISO(trial.endDate), new Date());
   const cancelLink = trial.cancelUrl || trial.serviceUrl;
   const initial = trial.serviceName.charAt(0).toUpperCase();
+
+  const nextPendingReminder = reminders?.find((r) => r.status === "PENDING");
 
   return (
     <div className="min-h-screen bg-background">
@@ -141,6 +146,22 @@ export default function TrialDetail() {
                 </div>
               </div>
             )}
+            {nextPendingReminder && (
+              <div className="flex items-center gap-3 text-sm">
+                <Bell className="h-4 w-4 text-muted-foreground shrink-0" />
+                <div>
+                  <span className="text-muted-foreground">Next reminder: </span>
+                  <span className="font-medium">{format(new Date(nextPendingReminder.remindAt), "MMM d, yyyy 'at' h:mm a")}</span>
+                </div>
+              </div>
+            )}
+            <div className="flex items-center gap-3 text-sm">
+              <Mail className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div>
+                <span className="text-muted-foreground">Reminders sent to: </span>
+                <span className="font-medium">{user.email}</span>
+              </div>
+            </div>
           </CardContent>
         </Card>
 

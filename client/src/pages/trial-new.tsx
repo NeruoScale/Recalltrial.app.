@@ -1,6 +1,6 @@
-import { useState, useMemo } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useState, useEffect } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { apiRequest, queryClient, getQueryFn } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -10,20 +10,24 @@ import { Label } from "@/components/ui/label";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { Bell, ArrowLeft, CalendarIcon, Loader2, Info, Check } from "lucide-react";
+import { Bell, ArrowLeft, CalendarIcon, Loader2, Info, Check, Search, Globe } from "lucide-react";
 import { format, addDays, differenceInDays } from "date-fns";
-import { CURRENCIES, POPULAR_SERVICES } from "@shared/schema";
+import { CURRENCIES } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { UpgradeModal } from "@/components/upgrade-modal";
+
+type ServiceResult = {
+  name: string;
+  domain: string;
+  cancelUrl: string;
+  aliases: string[];
+};
 
 export default function TrialNew() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
 
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [serviceName, setServiceName] = useState("");
   const [serviceUrl, setServiceUrl] = useState("");
   const [cancelUrl, setCancelUrl] = useState("");
@@ -31,21 +35,28 @@ export default function TrialNew() {
   const [endDate, setEndDate] = useState<Date | undefined>(addDays(new Date(), 14));
   const [renewalPrice, setRenewalPrice] = useState("");
   const [currency, setCurrency] = useState("USD");
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showDropdown, setShowDropdown] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
   const [endOpen, setEndOpen] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
 
-  if (!user) {
-    setLocation("/auth/login");
-    return null;
-  }
+  useEffect(() => {
+    if (!user) setLocation("/auth/login");
+  }, [user, setLocation]);
 
-  const filteredServices = useMemo(() => {
-    if (!serviceName) return POPULAR_SERVICES;
-    return POPULAR_SERVICES.filter(
-      (s) => s.name.toLowerCase().includes(serviceName.toLowerCase())
-    );
-  }, [serviceName]);
+  if (!user) return null;
+
+  const { data: searchResults } = useQuery<ServiceResult[]>({
+    queryKey: ["/api/services/search", searchQuery],
+    queryFn: async () => {
+      if (!searchQuery || searchQuery.length < 2) return [];
+      const res = await fetch(`/api/services/search?q=${encodeURIComponent(searchQuery)}`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: searchQuery.length >= 2 && !manualMode,
+  });
 
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -54,12 +65,17 @@ export default function TrialNew() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/trials"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       toast({ title: "Trial added successfully" });
       setLocation("/dashboard");
     },
     onError: (err: any) => {
-      if (err.message?.includes("free limit") || err.message?.includes("PLAN_LIMIT")) {
-        setUpgradeOpen(true);
+      if (err.message?.includes("TRIAL_LIMIT_REACHED") || err.message?.includes("Early Access")) {
+        toast({
+          title: "Trial limit reached",
+          description: "Free Early Access allows up to 3 active trials.",
+          variant: "destructive",
+        });
       } else {
         toast({ title: "Failed to add trial", description: err.message, variant: "destructive" });
       }
@@ -96,14 +112,29 @@ export default function TrialNew() {
     });
   };
 
-  const selectService = (svc: typeof POPULAR_SERVICES[0]) => {
+  const selectService = (svc: ServiceResult) => {
     setServiceName(svc.name);
-    setServiceUrl(svc.url);
-    setCancelUrl(svc.cancelUrl);
-    setShowSuggestions(false);
+    setServiceUrl(`https://${svc.domain}`);
+    setCancelUrl(svc.cancelUrl || "");
+    setShowDropdown(false);
+    setManualMode(false);
+    setSearchQuery("");
+  };
+
+  const handleSearchInput = (val: string) => {
+    setSearchQuery(val);
+    setServiceName(val);
+    setShowDropdown(true);
+    setManualMode(false);
+  };
+
+  const switchToManual = () => {
+    setManualMode(true);
+    setShowDropdown(false);
   };
 
   const daysLeft = startDate && endDate ? differenceInDays(endDate, startDate) : null;
+  const results = searchResults || [];
 
   return (
     <div className="min-h-screen bg-background">
@@ -129,37 +160,59 @@ export default function TrialNew() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2 relative">
                 <Label htmlFor="serviceName">Service name</Label>
-                <Input
-                  id="serviceName"
-                  placeholder="e.g. Netflix, Spotify..."
-                  value={serviceName}
-                  onChange={(e) => {
-                    setServiceName(e.target.value);
-                    setShowSuggestions(true);
-                  }}
-                  onFocus={() => setShowSuggestions(true)}
-                  required
-                  data-testid="input-service-name"
-                />
-                {showSuggestions && filteredServices.length > 0 && (
-                  <Card className="absolute z-10 w-full mt-1 max-h-48 overflow-y-auto">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    id="serviceName"
+                    placeholder="Search service (Netflix, Spotify, Adobe...)"
+                    value={manualMode ? serviceName : (searchQuery || serviceName)}
+                    onChange={(e) => {
+                      if (manualMode) {
+                        setServiceName(e.target.value);
+                      } else {
+                        handleSearchInput(e.target.value);
+                      }
+                    }}
+                    onFocus={() => {
+                      if (!manualMode && searchQuery.length >= 2) setShowDropdown(true);
+                    }}
+                    onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
+                    required
+                    className="pl-9"
+                    data-testid="input-service-name"
+                  />
+                </div>
+                {showDropdown && !manualMode && searchQuery.length >= 2 && (
+                  <Card className="absolute z-10 w-full mt-1 max-h-64 overflow-y-auto">
                     <CardContent className="p-1">
-                      {filteredServices.slice(0, 8).map((svc) => (
-                        <button
-                          key={svc.name}
-                          type="button"
-                          className="w-full text-left px-3 py-2 text-sm rounded-md hover-elevate flex items-center gap-2"
-                          onClick={() => selectService(svc)}
-                          data-testid={`suggestion-${svc.name.toLowerCase().replace(/\s+/g, "-")}`}
-                        >
-                          <img
-                            src={`https://www.google.com/s2/favicons?domain=${new URL(svc.url).hostname}&sz=32`}
-                            alt=""
-                            className="w-4 h-4 rounded-sm"
-                          />
-                          <span>{svc.name}</span>
-                        </button>
-                      ))}
+                      {results.length > 0 ? (
+                        results.map((svc) => (
+                          <button
+                            key={svc.domain}
+                            type="button"
+                            className="w-full text-left px-3 py-2 text-sm rounded-md hover-elevate flex items-center gap-2"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => selectService(svc)}
+                            data-testid={`suggestion-${svc.name.toLowerCase().replace(/\s+/g, "-")}`}
+                          >
+                            <img
+                              src={`https://www.google.com/s2/favicons?domain=${svc.domain}&sz=32`}
+                              alt=""
+                              className="w-4 h-4 rounded-sm"
+                            />
+                            <span className="flex-1">{svc.name}</span>
+                            <span className="text-xs text-muted-foreground">{svc.domain}</span>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="px-3 py-3 text-sm text-center space-y-2">
+                          <p className="text-muted-foreground">No matching services found.</p>
+                          <Button type="button" variant="outline" size="sm" onClick={switchToManual} data-testid="button-manual-entry">
+                            <Globe className="h-3 w-3 mr-1" />
+                            Paste the service website URL
+                          </Button>
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                 )}
@@ -312,7 +365,6 @@ export default function TrialNew() {
           </CardContent>
         </Card>
       </main>
-      <UpgradeModal open={upgradeOpen} onOpenChange={setUpgradeOpen} />
     </div>
   );
 }

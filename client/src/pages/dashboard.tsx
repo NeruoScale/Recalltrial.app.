@@ -1,14 +1,13 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrialCard } from "@/components/trial-card";
-import { UpgradeModal } from "@/components/upgrade-modal";
-import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Sparkles } from "lucide-react";
+import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Zap, ArrowRight } from "lucide-react";
 import type { Trial } from "@shared/schema";
 import { differenceInDays, parseISO } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -17,7 +16,6 @@ export default function Dashboard() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
 
   const { data: trials, isLoading } = useQuery<Trial[]>({
     queryKey: ["/api/trials"],
@@ -38,10 +36,11 @@ export default function Dashboard() {
     },
   });
 
-  if (!user) {
-    setLocation("/auth/login");
-    return null;
-  }
+  useEffect(() => {
+    if (!user) setLocation("/auth/login");
+  }, [user, setLocation]);
+
+  if (!user) return null;
 
   const allTrials = trials || [];
   const now = new Date();
@@ -58,14 +57,17 @@ export default function Dashboard() {
     (t) => t.status === "ACTIVE" && differenceInDays(parseISO(t.endDate), now) < 0
   );
 
-  const isPaid = user.plan !== "FREE";
   const activeCount = user.activeTrialCount ?? 0;
   const limit = user.trialLimit;
-  const atLimit = !isPaid && limit !== null && activeCount >= limit;
+  const atLimit = limit !== null && activeCount >= limit;
 
   const handleAddTrial = () => {
     if (atLimit) {
-      setUpgradeOpen(true);
+      toast({
+        title: "Trial limit reached",
+        description: "Free Early Access allows up to 3 active trials. Cancel an existing trial to add a new one.",
+        variant: "destructive",
+      });
     } else {
       setLocation("/trials/new");
     }
@@ -80,23 +82,6 @@ export default function Dashboard() {
             <span className="font-bold" data-testid="text-brand">RecallTrial</span>
           </div>
           <div className="flex items-center gap-1">
-            {!isPaid && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setLocation("/pricing")}
-                data-testid="button-upgrade"
-              >
-                <Sparkles className="h-4 w-4 mr-1" />
-                Upgrade
-              </Button>
-            )}
-            {user.plan === "PRO" && (
-              <Badge data-testid="badge-pro">Pro</Badge>
-            )}
-            {user.plan === "PREMIUM" && (
-              <Badge data-testid="badge-premium">Premium</Badge>
-            )}
             <Button
               size="icon"
               variant="ghost"
@@ -122,27 +107,20 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold" data-testid="text-page-title">Your Trials</h1>
             <p className="text-sm text-muted-foreground" data-testid="text-trial-count">
-              {activeCount} active trial{activeCount !== 1 ? "s" : ""}
-              {!isPaid && limit !== null && ` of ${limit}`}
+              {activeCount} of {limit} active trial{activeCount !== 1 ? "s" : ""} used
             </p>
           </div>
-          <Button onClick={handleAddTrial} data-testid="button-add-trial">
+          <Button onClick={handleAddTrial} disabled={atLimit} data-testid="button-add-trial">
             <Plus className="h-4 w-4 mr-2" />
             Add Trial
           </Button>
         </div>
 
-        {!isPaid && limit !== null && activeCount >= limit - 1 && activeCount > 0 && (
+        {atLimit && (
           <div className="mb-6 p-3 rounded-md border bg-muted/50 flex items-center justify-between gap-3 flex-wrap" data-testid="banner-limit-warning">
             <p className="text-sm">
-              {atLimit
-                ? "You've reached the free limit. Upgrade to Pro for unlimited trials."
-                : `You have ${limit - activeCount} trial slot${limit - activeCount !== 1 ? "s" : ""} remaining on your free plan.`}
+              You've reached the Early Access limit of 3 active trials. Cancel an existing trial to add a new one.
             </p>
-            <Button variant="outline" size="sm" onClick={() => setLocation("/pricing")} data-testid="button-banner-upgrade">
-              <Sparkles className="h-4 w-4 mr-1" />
-              Upgrade
-            </Button>
           </div>
         )}
 
@@ -153,17 +131,36 @@ export default function Dashboard() {
             ))}
           </div>
         ) : allTrials.length === 0 ? (
-          <div className="text-center py-20">
-            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
-              <Bell className="h-8 w-8 text-muted-foreground" />
+          <div className="text-center py-16">
+            <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-6">
+              <Bell className="h-10 w-10 text-primary" />
             </div>
-            <h2 className="text-lg font-semibold mb-2">No trials yet</h2>
-            <p className="text-muted-foreground mb-6">
-              Add your first free trial and we'll remind you before it renews.
+            <h2 className="text-xl font-semibold mb-2" data-testid="text-empty-title">Add your first trial</h2>
+            <p className="text-muted-foreground mb-2 max-w-sm mx-auto">
+              Add a trial in 20 seconds. We'll remind you before renewal.
             </p>
+            <div className="flex flex-col items-center gap-3 my-6 text-sm text-muted-foreground">
+              <Card className="w-full max-w-sm">
+                <CardContent className="py-4 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0 text-xs font-bold text-primary">1</div>
+                    <span>Add a trial (service, dates, cancel link)</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0 text-xs font-bold text-primary">2</div>
+                    <span>We email you before renewal</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0 text-xs font-bold text-primary">3</div>
+                    <span>Tap cancel link instantly</span>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
             <Button onClick={() => setLocation("/trials/new")} data-testid="button-add-first-trial">
               <Plus className="h-4 w-4 mr-2" />
               Add your first trial
+              <ArrowRight className="h-4 w-4 ml-2" />
             </Button>
           </div>
         ) : (
@@ -228,8 +225,6 @@ export default function Dashboard() {
           </div>
         )}
       </main>
-
-      <UpgradeModal open={upgradeOpen} onOpenChange={setUpgradeOpen} />
     </div>
   );
 }

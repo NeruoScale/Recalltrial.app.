@@ -1,17 +1,20 @@
+import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
-import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight } from "lucide-react";
+import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap } from "lucide-react";
 
 export default function Landing() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
 
-  if (user) {
-    setLocation("/dashboard");
-    return null;
-  }
+  useEffect(() => {
+    if (user) setLocation("/dashboard");
+  }, [user, setLocation]);
+
+  if (user) return null;
 
   return (
     <div className="min-h-screen bg-background">
@@ -22,9 +25,6 @@ export default function Landing() {
             <span className="font-bold text-lg" data-testid="text-brand">RecallTrial</span>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={() => setLocation("/pricing")} data-testid="link-pricing">
-              Pricing
-            </Button>
             <Button variant="ghost" onClick={() => setLocation("/auth/login")} data-testid="link-login">
               Log in
             </Button>
@@ -38,10 +38,10 @@ export default function Landing() {
       <main>
         <section className="py-20 md:py-32 px-4">
           <div className="max-w-3xl mx-auto text-center">
-            <div className="inline-flex items-center gap-2 bg-primary/10 text-primary rounded-full px-4 py-1.5 text-sm font-medium mb-6">
-              <Shield className="h-4 w-4" />
-              No bank access required
-            </div>
+            <Badge variant="secondary" className="mb-6">
+              <Zap className="h-3 w-3 mr-1" />
+              100% Free during Early Access
+            </Badge>
             <h1 className="text-4xl md:text-6xl font-bold tracking-tight mb-6" data-testid="text-headline">
               Never get charged for a free trial again.
             </h1>
@@ -71,7 +71,7 @@ export default function Landing() {
                   </div>
                   <h3 className="font-semibold mb-2">Add a trial</h3>
                   <p className="text-sm text-muted-foreground">
-                    Enter the service, dates, and optional cancel link. Takes 20 seconds.
+                    Search for the service, pick dates, and we'll auto-fill the cancel link. Takes 20 seconds.
                   </p>
                 </CardContent>
               </Card>
@@ -102,6 +102,19 @@ export default function Landing() {
         </section>
 
         <section className="py-16 px-4">
+          <div className="max-w-2xl mx-auto text-center mb-10">
+            <Badge variant="secondary" className="mb-4">
+              <Zap className="h-3 w-3 mr-1" />
+              Early Access
+            </Badge>
+            <h2 className="text-2xl font-bold mb-3">100% Free during Early Access</h2>
+            <p className="text-muted-foreground">
+              Track up to 3 active trials completely free. No credit card required.
+            </p>
+          </div>
+        </section>
+
+        <section className="py-16 px-4 bg-muted/30">
           <div className="max-w-2xl mx-auto">
             <h2 className="text-2xl font-bold text-center mb-8">Built on trust</h2>
             <div className="space-y-4">

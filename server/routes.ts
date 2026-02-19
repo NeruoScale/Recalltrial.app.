@@ -5,12 +5,13 @@ import { storage } from "./storage";
 import { signupSchema, loginSchema, insertTrialSchema } from "@shared/schema";
 import { extractDomain, getIconUrl } from "./icon";
 import { sendReminderEmail } from "./email";
-import { getUncachableStripeClient } from "./stripeClient";
 import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
+import { searchServices } from "./serviceSearch";
 
-const FREE_TRIAL_LIMIT = 5;
+const ACTIVE_TRIAL_LIMIT = 3;
+const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
 
 declare module "express-session" {
   interface SessionData {
@@ -21,6 +22,13 @@ declare module "express-session" {
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (!req.session.userId) {
     return res.status(401).json({ message: "Not authenticated" });
+  }
+  next();
+}
+
+function requireBilling(_req: Request, res: Response, next: NextFunction) {
+  if (!BILLING_ENABLED) {
+    return res.status(404).json({ message: "Not found" });
   }
   next();
 }
@@ -91,7 +99,8 @@ export async function registerRoutes(
       const passwordHash = await bcrypt.hash(password, 12);
       const user = await storage.createUser(email, passwordHash);
       req.session.userId = user.id;
-      return res.json({ id: user.id, email: user.email, timezone: user.timezone, plan: user.plan });
+      storage.logEvent(user.id, "signup", { email });
+      return res.json({ id: user.id, email: user.email, timezone: user.timezone });
     } catch (err) {
       console.error("Signup error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -114,7 +123,8 @@ export async function registerRoutes(
         return res.status(401).json({ message: "Invalid email or password" });
       }
       req.session.userId = user.id;
-      return res.json({ id: user.id, email: user.email, timezone: user.timezone, plan: user.plan });
+      storage.logEvent(user.id, "login", { email });
+      return res.json({ id: user.id, email: user.email, timezone: user.timezone });
     } catch (err) {
       console.error("Login error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -135,9 +145,9 @@ export async function registerRoutes(
       id: user.id,
       email: user.email,
       timezone: user.timezone,
-      plan: user.plan,
       activeTrialCount: activeCount,
-      trialLimit: user.plan === "FREE" ? FREE_TRIAL_LIMIT : null,
+      trialLimit: ACTIVE_TRIAL_LIMIT,
+      billingEnabled: BILLING_ENABLED,
       createdAt: user.createdAt,
     });
   });
@@ -149,7 +159,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid timezone" });
       }
       const user = await storage.updateUserTimezone(req.session.userId!, timezone);
-      return res.json({ id: user.id, email: user.email, timezone: user.timezone, plan: user.plan });
+      return res.json({ id: user.id, email: user.email, timezone: user.timezone });
     } catch (err) {
       console.error("Settings error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -221,14 +231,12 @@ export async function registerRoutes(
       const user = await storage.getUserById(req.session.userId!);
       if (!user) return res.status(401).json({ message: "User not found" });
 
-      if (user.plan === "FREE") {
-        const activeCount = await storage.countActiveTrials(user.id);
-        if (activeCount >= FREE_TRIAL_LIMIT) {
-          return res.status(403).json({
-            message: "You've reached the free limit (3 active trials). Upgrade to Pro for unlimited trials.",
-            code: "PLAN_LIMIT_REACHED",
-          });
-        }
+      const activeCount = await storage.countActiveTrials(user.id);
+      if (activeCount >= ACTIVE_TRIAL_LIMIT) {
+        return res.status(403).json({
+          error: "TRIAL_LIMIT_REACHED",
+          message: "Free Early Access allows up to 3 active trials.",
+        });
       }
 
       const data = parsed.data;
@@ -272,6 +280,7 @@ export async function registerRoutes(
         });
       }
 
+      storage.logEvent(req.session.userId!, "trial_created", { trialId: trial.id, serviceName: data.serviceName });
       return res.json(trial);
     } catch (err) {
       console.error("Create trial error:", err);
@@ -284,6 +293,7 @@ export async function registerRoutes(
       const trial = await storage.cancelTrial(req.params.id, req.session.userId!);
       if (!trial) return res.status(404).json({ message: "Trial not found" });
       await storage.skipRemindersByTrial(trial.id);
+      storage.logEvent(req.session.userId!, "trial_canceled", { trialId: trial.id, serviceName: trial.serviceName });
       return res.json(trial);
     } catch (err) {
       console.error("Cancel trial error:", err);
@@ -291,7 +301,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/billing/create-checkout-session", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/billing/create-checkout-session", requireBilling, requireAuth, async (req: Request, res: Response) => {
     try {
       const { priceId } = req.body;
       if (!priceId || typeof priceId !== "string") {
@@ -301,10 +311,7 @@ export async function registerRoutes(
       const user = await storage.getUserById(req.session.userId!);
       if (!user) return res.status(401).json({ message: "User not found" });
 
-      if (user.plan === "PRO") {
-        return res.status(400).json({ message: "You are already on Pro" });
-      }
-
+      const { getUncachableStripeClient } = await import("./stripeClient");
       const stripe = await getUncachableStripeClient();
 
       let customerId = user.stripeCustomerId;
@@ -319,7 +326,7 @@ export async function registerRoutes(
 
       const appUrl = process.env.APP_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
 
-      const session = await stripe.checkout.sessions.create({
+      const checkoutSession = await stripe.checkout.sessions.create({
         customer: customerId,
         payment_method_types: ["card"],
         line_items: [{ price: priceId, quantity: 1 }],
@@ -332,14 +339,14 @@ export async function registerRoutes(
         },
       });
 
-      return res.json({ url: session.url });
+      return res.json({ url: checkoutSession.url });
     } catch (err) {
       console.error("Checkout error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });
 
-  app.post("/api/billing/sync", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/billing/sync", requireBilling, requireAuth, async (req: Request, res: Response) => {
     try {
       const { syncUserSubscriptionByUserId } = await import("./stripeWebhookHandler");
       await syncUserSubscriptionByUserId(req.session.userId!);
@@ -352,7 +359,7 @@ export async function registerRoutes(
         timezone: user.timezone,
         plan: user.plan,
         activeTrialCount: activeCount,
-        trialLimit: user.plan === "FREE" ? FREE_TRIAL_LIMIT : null,
+        trialLimit: ACTIVE_TRIAL_LIMIT,
       });
     } catch (err) {
       console.error("Billing sync error:", err);
@@ -360,7 +367,44 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/billing/prices", async (_req: Request, res: Response) => {
+  app.get("/api/trials/:id/cancel-click", async (req: Request, res: Response) => {
+    try {
+      const trial = await storage.getTrialByIdPublic(req.params.id);
+      if (!trial) {
+        return res.redirect("/dashboard");
+      }
+      storage.logEvent(trial.userId, "cancel_link_clicked", { trialId: trial.id, serviceName: trial.serviceName });
+      const cancelLink = trial.cancelUrl || trial.serviceUrl;
+      return res.redirect(cancelLink);
+    } catch {
+      return res.redirect("/dashboard");
+    }
+  });
+
+  app.get("/api/admin/metrics", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const metrics = await storage.getMetrics();
+      return res.json(metrics);
+    } catch (err) {
+      console.error("Metrics error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.get("/api/services/search", (req: Request, res: Response) => {
+    const q = (req.query.q as string || "").trim();
+    if (!q || q.length < 2) {
+      return res.json([]);
+    }
+    const results = searchServices(q, 10);
+    return res.json(results);
+  });
+
+  app.get("/api/billing/prices", requireBilling, async (_req: Request, res: Response) => {
     return res.json({
       pro: {
         monthly: {

@@ -1,6 +1,6 @@
-import { eq, and, lte, sql } from "drizzle-orm";
+import { eq, and, lte, sql, count } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, type User, type Trial, type Reminder } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, type User, type Trial, type Reminder } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -13,6 +13,7 @@ export interface IStorage {
 
   getTrialsByUser(userId: string): Promise<Trial[]>;
   getTrialById(trialId: string, userId: string): Promise<Trial | undefined>;
+  getTrialByIdPublic(trialId: string): Promise<Trial | undefined>;
   createTrial(data: Omit<Trial, "id" | "createdAt" | "canceledAt">): Promise<Trial>;
   cancelTrial(trialId: string, userId: string): Promise<Trial | undefined>;
 
@@ -24,6 +25,17 @@ export interface IStorage {
 
   getSubscription(subscriptionId: string): Promise<any>;
   getStripePrices(): Promise<any[]>;
+
+  logEvent(userId: string | null, event: string, metadata?: Record<string, any>): Promise<void>;
+  getMetrics(): Promise<{
+    totalUsers: number;
+    totalTrials: number;
+    activeTrials: number;
+    canceledTrials: number;
+    totalReminders: number;
+    sentReminders: number;
+    recentEvents: { event: string; count: number }[];
+  }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -70,6 +82,13 @@ export class DatabaseStorage implements IStorage {
   async getTrialById(trialId: string, userId: string): Promise<Trial | undefined> {
     const [trial] = await db.select().from(trials)
       .where(and(eq(trials.id, trialId), eq(trials.userId, userId)))
+      .limit(1);
+    return trial;
+  }
+
+  async getTrialByIdPublic(trialId: string): Promise<Trial | undefined> {
+    const [trial] = await db.select().from(trials)
+      .where(eq(trials.id, trialId))
       .limit(1);
     return trial;
   }
@@ -140,6 +159,51 @@ export class DatabaseStorage implements IStorage {
       sql`SELECT * FROM stripe.prices WHERE active = true ORDER BY unit_amount ASC`
     );
     return result.rows;
+  }
+
+  async logEvent(userId: string | null, event: string, metadata?: Record<string, any>): Promise<void> {
+    try {
+      await db.insert(analyticsEvents).values({
+        userId: userId ?? undefined,
+        event,
+        metadata: metadata ? JSON.stringify(metadata) : null,
+      });
+    } catch (err) {
+      console.error("Failed to log analytics event:", err);
+    }
+  }
+
+  async getMetrics(): Promise<{
+    totalUsers: number;
+    totalTrials: number;
+    activeTrials: number;
+    canceledTrials: number;
+    totalReminders: number;
+    sentReminders: number;
+    recentEvents: { event: string; count: number }[];
+  }> {
+    const [userCount] = await db.select({ count: sql<number>`count(*)::int` }).from(users);
+    const [trialCount] = await db.select({ count: sql<number>`count(*)::int` }).from(trials);
+    const [activeCount] = await db.select({ count: sql<number>`count(*)::int` }).from(trials).where(eq(trials.status, "ACTIVE"));
+    const [canceledCount] = await db.select({ count: sql<number>`count(*)::int` }).from(trials).where(eq(trials.status, "CANCELED"));
+    const [reminderCount] = await db.select({ count: sql<number>`count(*)::int` }).from(reminders);
+    const [sentCount] = await db.select({ count: sql<number>`count(*)::int` }).from(reminders).where(eq(reminders.status, "SENT"));
+
+    const eventCounts = await db
+      .select({ event: analyticsEvents.event, count: sql<number>`count(*)::int` })
+      .from(analyticsEvents)
+      .groupBy(analyticsEvents.event)
+      .orderBy(sql`count(*) desc`);
+
+    return {
+      totalUsers: userCount?.count ?? 0,
+      totalTrials: trialCount?.count ?? 0,
+      activeTrials: activeCount?.count ?? 0,
+      canceledTrials: canceledCount?.count ?? 0,
+      totalReminders: reminderCount?.count ?? 0,
+      sentReminders: sentCount?.count ?? 0,
+      recentEvents: eventCounts.map((r) => ({ event: r.event, count: r.count })),
+    };
   }
 }
 

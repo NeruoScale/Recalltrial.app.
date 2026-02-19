@@ -7,9 +7,9 @@ type AuthUser = {
   id: string;
   email: string;
   timezone: string;
-  plan: "FREE" | "PRO" | "PREMIUM";
   activeTrialCount: number;
-  trialLimit: number | null;
+  trialLimit: number;
+  billingEnabled: boolean;
   createdAt: string;
 };
 
