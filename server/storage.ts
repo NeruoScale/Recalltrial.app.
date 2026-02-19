@@ -1,12 +1,15 @@
-import { eq, and, lte } from "drizzle-orm";
+import { eq, and, lte, sql } from "drizzle-orm";
 import { db } from "./db";
 import { users, trials, reminders, type User, type Trial, type Reminder } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
+  getUserByStripeCustomerId(stripeCustomerId: string): Promise<User | undefined>;
   createUser(email: string, passwordHash: string): Promise<User>;
   updateUserTimezone(userId: string, timezone: string): Promise<User>;
+  updateUserStripeInfo(userId: string, data: Partial<Pick<User, "plan" | "stripeCustomerId" | "stripeSubscriptionId" | "subscriptionStatus" | "currentPeriodEnd">>): Promise<User>;
+  countActiveTrials(userId: string): Promise<number>;
 
   getTrialsByUser(userId: string): Promise<Trial[]>;
   getTrialById(trialId: string, userId: string): Promise<Trial | undefined>;
@@ -18,6 +21,9 @@ export interface IStorage {
   getDueReminders(now: Date): Promise<(Reminder & { trial: Trial; user: User })[]>;
   claimAndSendReminder(reminderId: string): Promise<boolean>;
   skipRemindersByTrial(trialId: string): Promise<void>;
+
+  getSubscription(subscriptionId: string): Promise<any>;
+  getStripePrices(): Promise<any[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -31,6 +37,11 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
+  async getUserByStripeCustomerId(stripeCustomerId: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.stripeCustomerId, stripeCustomerId)).limit(1);
+    return user;
+  }
+
   async createUser(email: string, passwordHash: string): Promise<User> {
     const [user] = await db.insert(users).values({ email, passwordHash }).returning();
     return user;
@@ -39,6 +50,17 @@ export class DatabaseStorage implements IStorage {
   async updateUserTimezone(userId: string, timezone: string): Promise<User> {
     const [user] = await db.update(users).set({ timezone }).where(eq(users.id, userId)).returning();
     return user;
+  }
+
+  async updateUserStripeInfo(userId: string, data: Partial<Pick<User, "plan" | "stripeCustomerId" | "stripeSubscriptionId" | "subscriptionStatus" | "currentPeriodEnd">>): Promise<User> {
+    const [user] = await db.update(users).set(data).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  async countActiveTrials(userId: string): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)::int` }).from(trials)
+      .where(and(eq(trials.userId, userId), eq(trials.status, "ACTIVE")));
+    return result[0]?.count ?? 0;
   }
 
   async getTrialsByUser(userId: string): Promise<Trial[]> {
@@ -83,27 +105,13 @@ export class DatabaseStorage implements IStorage {
 
   async getDueReminders(now: Date): Promise<(Reminder & { trial: Trial; user: User })[]> {
     const results = await db
-      .select({
-        reminder: reminders,
-        trial: trials,
-        user: users,
-      })
+      .select({ reminder: reminders, trial: trials, user: users })
       .from(reminders)
       .innerJoin(trials, eq(reminders.trialId, trials.id))
       .innerJoin(users, eq(reminders.userId, users.id))
-      .where(
-        and(
-          eq(reminders.status, "PENDING"),
-          lte(reminders.remindAt, now),
-          eq(trials.status, "ACTIVE")
-        )
-      );
+      .where(and(eq(reminders.status, "PENDING"), lte(reminders.remindAt, now), eq(trials.status, "ACTIVE")));
 
-    return results.map((r) => ({
-      ...r.reminder,
-      trial: r.trial,
-      user: r.user,
-    }));
+    return results.map((r) => ({ ...r.reminder, trial: r.trial, user: r.user }));
   }
 
   async claimAndSendReminder(reminderId: string): Promise<boolean> {
@@ -111,7 +119,6 @@ export class DatabaseStorage implements IStorage {
       .set({ status: "SENT", sentAt: new Date() })
       .where(and(eq(reminders.id, reminderId), eq(reminders.status, "PENDING")))
       .returning();
-
     return result.length > 0;
   }
 
@@ -119,6 +126,20 @@ export class DatabaseStorage implements IStorage {
     await db.update(reminders)
       .set({ status: "SKIPPED" })
       .where(and(eq(reminders.trialId, trialId), eq(reminders.status, "PENDING")));
+  }
+
+  async getSubscription(subscriptionId: string): Promise<any> {
+    const result = await db.execute(
+      sql`SELECT * FROM stripe.subscriptions WHERE id = ${subscriptionId}`
+    );
+    return result.rows[0] || null;
+  }
+
+  async getStripePrices(): Promise<any[]> {
+    const result = await db.execute(
+      sql`SELECT * FROM stripe.prices WHERE active = true ORDER BY unit_amount ASC`
+    );
+    return result.rows;
   }
 }
 

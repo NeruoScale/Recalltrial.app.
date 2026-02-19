@@ -22,6 +22,9 @@ export default function Landing() {
             <span className="font-bold text-lg" data-testid="text-brand">RecallTrial</span>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => setLocation("/pricing")} data-testid="link-pricing">
+              Pricing
+            </Button>
             <Button variant="ghost" onClick={() => setLocation("/auth/login")} data-testid="link-login">
               Log in
             </Button>

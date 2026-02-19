@@ -11,6 +11,8 @@ import Dashboard from "@/pages/dashboard";
 import TrialNew from "@/pages/trial-new";
 import TrialDetail from "@/pages/trial-detail";
 import SettingsPage from "@/pages/settings";
+import Pricing from "@/pages/pricing";
+import BillingSuccess from "@/pages/billing-success";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -23,6 +25,8 @@ function Router() {
       <Route path="/trials/new" component={TrialNew} />
       <Route path="/trials/:id" component={TrialDetail} />
       <Route path="/settings" component={SettingsPage} />
+      <Route path="/pricing" component={Pricing} />
+      <Route path="/billing/success" component={BillingSuccess} />
       <Route component={NotFound} />
     </Switch>
   );

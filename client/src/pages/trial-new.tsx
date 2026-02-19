@@ -16,12 +16,14 @@ import { format, addDays, differenceInDays } from "date-fns";
 import { CURRENCIES, POPULAR_SERVICES } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { UpgradeModal } from "@/components/upgrade-modal";
 
 export default function TrialNew() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
 
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [serviceName, setServiceName] = useState("");
   const [serviceUrl, setServiceUrl] = useState("");
   const [cancelUrl, setCancelUrl] = useState("");
@@ -56,7 +58,11 @@ export default function TrialNew() {
       setLocation("/dashboard");
     },
     onError: (err: any) => {
-      toast({ title: "Failed to add trial", description: err.message, variant: "destructive" });
+      if (err.message?.includes("free limit") || err.message?.includes("PLAN_LIMIT")) {
+        setUpgradeOpen(true);
+      } else {
+        toast({ title: "Failed to add trial", description: err.message, variant: "destructive" });
+      }
     },
   });
 
@@ -306,6 +312,7 @@ export default function TrialNew() {
           </CardContent>
         </Card>
       </main>
+      <UpgradeModal open={upgradeOpen} onOpenChange={setUpgradeOpen} />
     </div>
   );
 }

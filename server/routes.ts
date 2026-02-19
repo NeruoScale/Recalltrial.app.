@@ -5,9 +5,12 @@ import { storage } from "./storage";
 import { signupSchema, loginSchema, insertTrialSchema } from "@shared/schema";
 import { extractDomain, getIconUrl } from "./icon";
 import { sendReminderEmail } from "./email";
+import { getUncachableStripeClient } from "./stripeClient";
 import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
+
+const FREE_TRIAL_LIMIT = 5;
 
 declare module "express-session" {
   interface SessionData {
@@ -23,11 +26,6 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 function computeReminderTimeInUTC(endDateStr: string, daysBefore: number, timezone: string): Date {
-  const [year, month, day] = endDateStr.split("-").map(Number);
-  const reminderDay = day - daysBefore;
-
-  const localDateStr = `${year}-${String(month).padStart(2, "0")}-${String(reminderDay).padStart(2, "0")}T10:00:00`;
-
   try {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: timezone,
@@ -46,12 +44,10 @@ function computeReminderTimeInUTC(endDateStr: string, daysBefore: number, timezo
     const utcEstimate = new Date(targetDate);
     const parts = formatter.formatToParts(utcEstimate);
     const localHour = parseInt(parts.find((p) => p.type === "hour")?.value || "0");
-
     const offsetHours = localHour - utcEstimate.getUTCHours();
 
     const result = new Date(targetDate);
     result.setUTCHours(10 - offsetHours, 0, 0, 0);
-
     return result;
   } catch {
     const fallback = new Date(endDateStr + "T10:00:00Z");
@@ -68,10 +64,7 @@ export async function registerRoutes(
 
   app.use(
     session({
-      store: new PgStore({
-        pool: pool,
-        createTableIfMissing: true,
-      }),
+      store: new PgStore({ pool: pool, createTableIfMissing: true }),
       secret: process.env.SESSION_SECRET || "recalltrial-dev-secret",
       resave: false,
       saveUninitialized: false,
@@ -90,18 +83,15 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.errors[0].message });
       }
-
       const { email, password } = parsed.data;
       const existing = await storage.getUserByEmail(email);
       if (existing) {
         return res.status(409).json({ message: "Email already registered" });
       }
-
       const passwordHash = await bcrypt.hash(password, 12);
       const user = await storage.createUser(email, passwordHash);
       req.session.userId = user.id;
-
-      return res.json({ id: user.id, email: user.email, timezone: user.timezone });
+      return res.json({ id: user.id, email: user.email, timezone: user.timezone, plan: user.plan });
     } catch (err) {
       console.error("Signup error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -114,20 +104,17 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.errors[0].message });
       }
-
       const { email, password } = parsed.data;
       const user = await storage.getUserByEmail(email);
       if (!user) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
-
       const valid = await bcrypt.compare(password, user.passwordHash);
       if (!valid) {
         return res.status(401).json({ message: "Invalid email or password" });
       }
-
       req.session.userId = user.id;
-      return res.json({ id: user.id, email: user.email, timezone: user.timezone });
+      return res.json({ id: user.id, email: user.email, timezone: user.timezone, plan: user.plan });
     } catch (err) {
       console.error("Login error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -143,7 +130,16 @@ export async function registerRoutes(
   app.get("/api/auth/me", requireAuth, async (req: Request, res: Response) => {
     const user = await storage.getUserById(req.session.userId!);
     if (!user) return res.status(401).json({ message: "User not found" });
-    return res.json({ id: user.id, email: user.email, timezone: user.timezone, createdAt: user.createdAt });
+    const activeCount = await storage.countActiveTrials(user.id);
+    return res.json({
+      id: user.id,
+      email: user.email,
+      timezone: user.timezone,
+      plan: user.plan,
+      activeTrialCount: activeCount,
+      trialLimit: user.plan === "FREE" ? FREE_TRIAL_LIMIT : null,
+      createdAt: user.createdAt,
+    });
   });
 
   app.patch("/api/auth/settings", requireAuth, async (req: Request, res: Response) => {
@@ -153,7 +149,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid timezone" });
       }
       const user = await storage.updateUserTimezone(req.session.userId!, timezone);
-      return res.json({ id: user.id, email: user.email, timezone: user.timezone });
+      return res.json({ id: user.id, email: user.email, timezone: user.timezone, plan: user.plan });
     } catch (err) {
       console.error("Settings error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -188,47 +184,21 @@ export async function registerRoutes(
 
       const now = new Date();
       const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-
       const cancelUrl = trial.cancelUrl || trial.serviceUrl;
       const description = `Your free trial for ${trial.serviceName} ends today. Cancel now to avoid being charged.\\n\\nCancel here: ${cancelUrl}`;
-
       const uid = `recalltrial-${trial.id}@recalltrial.app`;
 
-      const threeDaysBefore = new Date(trial.endDate + "T00:00:00Z");
-      threeDaysBefore.setUTCDate(threeDaysBefore.getUTCDate() - 3);
-      const alarmTrigger3 = "-P3D";
-
-      const oneDayBefore = new Date(trial.endDate + "T00:00:00Z");
-      oneDayBefore.setUTCDate(oneDayBefore.getUTCDate() - 1);
-      const alarmTrigger1 = "-P1D";
-
       const ics = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//RecallTrial//EN",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        "BEGIN:VEVENT",
-        `UID:${uid}`,
-        `DTSTAMP:${stamp}`,
-        `DTSTART;VALUE=DATE:${endDate}`,
-        `DTEND;VALUE=DATE:${dtEnd}`,
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//RecallTrial//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+        "BEGIN:VEVENT", `UID:${uid}`, `DTSTAMP:${stamp}`,
+        `DTSTART;VALUE=DATE:${endDate}`, `DTEND;VALUE=DATE:${dtEnd}`,
         `SUMMARY:Cancel ${trial.serviceName} - Free Trial Ends`,
-        `DESCRIPTION:${description}`,
-        `URL:${cancelUrl}`,
-        "STATUS:CONFIRMED",
-        "BEGIN:VALARM",
-        "TRIGGER:" + alarmTrigger3,
-        "ACTION:DISPLAY",
-        `DESCRIPTION:${trial.serviceName} free trial ends in 3 days - cancel now!`,
-        "END:VALARM",
-        "BEGIN:VALARM",
-        "TRIGGER:" + alarmTrigger1,
-        "ACTION:DISPLAY",
-        `DESCRIPTION:${trial.serviceName} free trial ends tomorrow - cancel now!`,
-        "END:VALARM",
-        "END:VEVENT",
-        "END:VCALENDAR",
+        `DESCRIPTION:${description}`, `URL:${cancelUrl}`, "STATUS:CONFIRMED",
+        "BEGIN:VALARM", "TRIGGER:-P3D", "ACTION:DISPLAY",
+        `DESCRIPTION:${trial.serviceName} free trial ends in 3 days - cancel now!`, "END:VALARM",
+        "BEGIN:VALARM", "TRIGGER:-P1D", "ACTION:DISPLAY",
+        `DESCRIPTION:${trial.serviceName} free trial ends tomorrow - cancel now!`, "END:VALARM",
+        "END:VEVENT", "END:VCALENDAR",
       ].join("\r\n");
 
       const filename = `cancel-${trial.serviceName.toLowerCase().replace(/[^a-z0-9]/g, "-")}.ics`;
@@ -246,6 +216,19 @@ export async function registerRoutes(
       const parsed = insertTrialSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.errors[0].message });
+      }
+
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+
+      if (user.plan === "FREE") {
+        const activeCount = await storage.countActiveTrials(user.id);
+        if (activeCount >= FREE_TRIAL_LIMIT) {
+          return res.status(403).json({
+            message: "You've reached the free limit (3 active trials). Upgrade to Pro for unlimited trials.",
+            code: "PLAN_LIMIT_REACHED",
+          });
+        }
       }
 
       const data = parsed.data;
@@ -272,27 +255,20 @@ export async function registerRoutes(
         status: "ACTIVE",
       });
 
-      const user = await storage.getUserById(req.session.userId!);
       const now = new Date();
-      const tz = user?.timezone || "Asia/Qatar";
+      const tz = user.timezone || "Asia/Qatar";
 
       const threeDayRemind = computeReminderTimeInUTC(data.endDate, 3, tz);
       if (threeDayRemind > now) {
         await storage.createReminder({
-          trialId: trial.id,
-          userId: req.session.userId!,
-          remindAt: threeDayRemind,
-          type: "THREE_DAYS",
+          trialId: trial.id, userId: req.session.userId!, remindAt: threeDayRemind, type: "THREE_DAYS",
         });
       }
 
       const oneDayRemind = computeReminderTimeInUTC(data.endDate, 1, tz);
       if (oneDayRemind > now) {
         await storage.createReminder({
-          trialId: trial.id,
-          userId: req.session.userId!,
-          remindAt: oneDayRemind,
-          type: "ONE_DAY",
+          trialId: trial.id, userId: req.session.userId!, remindAt: oneDayRemind, type: "ONE_DAY",
         });
       }
 
@@ -315,6 +291,108 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/billing/create-checkout-session", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { priceId } = req.body;
+      if (!priceId || typeof priceId !== "string") {
+        return res.status(400).json({ message: "Price ID is required" });
+      }
+
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+
+      if (user.plan === "PRO") {
+        return res.status(400).json({ message: "You are already on Pro" });
+      }
+
+      const stripe = await getUncachableStripeClient();
+
+      let customerId = user.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripe.customers.create({
+          email: user.email,
+          metadata: { userId: user.id },
+        });
+        await storage.updateUserStripeInfo(user.id, { stripeCustomerId: customer.id });
+        customerId = customer.id;
+      }
+
+      const appUrl = process.env.APP_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+
+      const session = await stripe.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ["card"],
+        line_items: [{ price: priceId, quantity: 1 }],
+        mode: "subscription",
+        success_url: `${appUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${appUrl}/pricing`,
+        metadata: { userId: user.id },
+        subscription_data: {
+          metadata: { userId: user.id },
+        },
+      });
+
+      return res.json({ url: session.url });
+    } catch (err) {
+      console.error("Checkout error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.post("/api/billing/sync", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { syncUserSubscriptionByUserId } = await import("./stripeWebhookHandler");
+      await syncUserSubscriptionByUserId(req.session.userId!);
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+      const activeCount = await storage.countActiveTrials(user.id);
+      return res.json({
+        id: user.id,
+        email: user.email,
+        timezone: user.timezone,
+        plan: user.plan,
+        activeTrialCount: activeCount,
+        trialLimit: user.plan === "FREE" ? FREE_TRIAL_LIMIT : null,
+      });
+    } catch (err) {
+      console.error("Billing sync error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.get("/api/billing/prices", async (_req: Request, res: Response) => {
+    return res.json({
+      pro: {
+        monthly: {
+          priceId: process.env.STRIPE_PRO_MONTHLY_PRICE_ID,
+          amount: 499,
+          currency: "usd",
+          interval: "month",
+        },
+        yearly: {
+          priceId: process.env.STRIPE_PRO_YEARLY_PRICE_ID,
+          amount: 4990,
+          currency: "usd",
+          interval: "year",
+        },
+      },
+      premium: {
+        monthly: {
+          priceId: process.env.STRIPE_PREMIUM_MONTHLY_PRICE_ID,
+          amount: 999,
+          currency: "usd",
+          interval: "month",
+        },
+        yearly: {
+          priceId: process.env.STRIPE_PREMIUM_YEARLY_PRICE_ID,
+          amount: 9990,
+          currency: "usd",
+          interval: "year",
+        },
+      },
+    });
+  });
+
   app.post("/api/cron/reminders", async (req: Request, res: Response) => {
     const cronKey = req.headers["x-cron-key"];
     if (cronKey !== process.env.CRON_KEY) {
@@ -324,22 +402,15 @@ export async function registerRoutes(
     try {
       const now = new Date();
       const dueReminders = await storage.getDueReminders(now);
-
       let sent = 0;
       let failed = 0;
 
       for (const reminder of dueReminders) {
         const marked = await storage.claimAndSendReminder(reminder.id);
-        if (!marked) {
-          continue;
-        }
+        if (!marked) continue;
 
         const success = await sendReminderEmail(reminder.trial, reminder.user, reminder.type);
-        if (success) {
-          sent++;
-        } else {
-          failed++;
-        }
+        if (success) { sent++; } else { failed++; }
       }
 
       return res.json({ processed: dueReminders.length, sent, failed });

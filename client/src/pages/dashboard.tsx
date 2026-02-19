@@ -1,11 +1,14 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrialCard } from "@/components/trial-card";
-import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive } from "lucide-react";
+import { UpgradeModal } from "@/components/upgrade-modal";
+import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Sparkles } from "lucide-react";
 import type { Trial } from "@shared/schema";
 import { differenceInDays, parseISO } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -14,6 +17,7 @@ export default function Dashboard() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
 
   const { data: trials, isLoading } = useQuery<Trial[]>({
     queryKey: ["/api/trials"],
@@ -26,6 +30,7 @@ export default function Dashboard() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/trials"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       toast({ title: "Trial marked as canceled" });
     },
     onError: (err: any) => {
@@ -53,6 +58,19 @@ export default function Dashboard() {
     (t) => t.status === "ACTIVE" && differenceInDays(parseISO(t.endDate), now) < 0
   );
 
+  const isPaid = user.plan !== "FREE";
+  const activeCount = user.activeTrialCount ?? 0;
+  const limit = user.trialLimit;
+  const atLimit = !isPaid && limit !== null && activeCount >= limit;
+
+  const handleAddTrial = () => {
+    if (atLimit) {
+      setUpgradeOpen(true);
+    } else {
+      setLocation("/trials/new");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b sticky top-0 bg-background z-50">
@@ -62,6 +80,23 @@ export default function Dashboard() {
             <span className="font-bold" data-testid="text-brand">RecallTrial</span>
           </div>
           <div className="flex items-center gap-1">
+            {!isPaid && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setLocation("/pricing")}
+                data-testid="button-upgrade"
+              >
+                <Sparkles className="h-4 w-4 mr-1" />
+                Upgrade
+              </Button>
+            )}
+            {user.plan === "PRO" && (
+              <Badge data-testid="badge-pro">Pro</Badge>
+            )}
+            {user.plan === "PREMIUM" && (
+              <Badge data-testid="badge-premium">Premium</Badge>
+            )}
             <Button
               size="icon"
               variant="ghost"
@@ -86,15 +121,30 @@ export default function Dashboard() {
         <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold" data-testid="text-page-title">Your Trials</h1>
-            <p className="text-sm text-muted-foreground">
-              {allTrials.filter((t) => t.status === "ACTIVE").length} active trial{allTrials.filter((t) => t.status === "ACTIVE").length !== 1 ? "s" : ""}
+            <p className="text-sm text-muted-foreground" data-testid="text-trial-count">
+              {activeCount} active trial{activeCount !== 1 ? "s" : ""}
+              {!isPaid && limit !== null && ` of ${limit}`}
             </p>
           </div>
-          <Button onClick={() => setLocation("/trials/new")} data-testid="button-add-trial">
+          <Button onClick={handleAddTrial} data-testid="button-add-trial">
             <Plus className="h-4 w-4 mr-2" />
             Add Trial
           </Button>
         </div>
+
+        {!isPaid && limit !== null && activeCount >= limit - 1 && activeCount > 0 && (
+          <div className="mb-6 p-3 rounded-md border bg-muted/50 flex items-center justify-between gap-3 flex-wrap" data-testid="banner-limit-warning">
+            <p className="text-sm">
+              {atLimit
+                ? "You've reached the free limit. Upgrade to Pro for unlimited trials."
+                : `You have ${limit - activeCount} trial slot${limit - activeCount !== 1 ? "s" : ""} remaining on your free plan.`}
+            </p>
+            <Button variant="outline" size="sm" onClick={() => setLocation("/pricing")} data-testid="button-banner-upgrade">
+              <Sparkles className="h-4 w-4 mr-1" />
+              Upgrade
+            </Button>
+          </div>
+        )}
 
         {isLoading ? (
           <div className="space-y-3">
@@ -178,6 +228,8 @@ export default function Dashboard() {
           </div>
         )}
       </main>
+
+      <UpgradeModal open={upgradeOpen} onOpenChange={setUpgradeOpen} />
     </div>
   );
 }

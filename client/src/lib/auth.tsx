@@ -1,11 +1,20 @@
 import { createContext, useContext, type ReactNode } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, getQueryFn } from "./queryClient";
-import type { User } from "@shared/schema";
 import { useLocation } from "wouter";
 
+type AuthUser = {
+  id: string;
+  email: string;
+  timezone: string;
+  plan: "FREE" | "PRO" | "PREMIUM";
+  activeTrialCount: number;
+  trialLimit: number | null;
+  createdAt: string;
+};
+
 type AuthContextType = {
-  user: User | null;
+  user: AuthUser | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string) => Promise<void>;
@@ -17,7 +26,7 @@ const AuthContext = createContext<AuthContextType | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [, setLocation] = useLocation();
 
-  const { data: user, isLoading } = useQuery<User | null>({
+  const { data: user, isLoading } = useQuery<AuthUser | null>({
     queryKey: ["/api/auth/me"],
     queryFn: getQueryFn({ on401: "returnNull" }),
   });

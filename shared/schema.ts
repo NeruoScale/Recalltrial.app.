@@ -6,12 +6,19 @@ import { z } from "zod";
 export const trialStatusEnum = pgEnum("trial_status", ["ACTIVE", "CANCELED"]);
 export const reminderTypeEnum = pgEnum("reminder_type", ["THREE_DAYS", "ONE_DAY"]);
 export const reminderStatusEnum = pgEnum("reminder_status", ["PENDING", "SENT", "SKIPPED"]);
+export const planEnum = pgEnum("plan", ["FREE", "PRO", "PREMIUM"]);
+export const userSubStatusEnum = pgEnum("user_sub_status", ["ACTIVE", "CANCELED", "PAST_DUE", "INCOMPLETE"]);
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   timezone: text("timezone").notNull().default("Asia/Qatar"),
+  plan: planEnum("plan").notNull().default("FREE"),
+  stripeCustomerId: text("stripe_customer_id").unique(),
+  stripeSubscriptionId: text("stripe_subscription_id").unique(),
+  subscriptionStatus: userSubStatusEnum("user_sub_status"),
+  currentPeriodEnd: timestamp("current_period_end"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
