@@ -176,6 +176,71 @@ export async function registerRoutes(
     return res.json(remindersList);
   });
 
+  app.get("/api/trials/:id/calendar.ics", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const trial = await storage.getTrialById(req.params.id, req.session.userId!);
+      if (!trial) return res.status(404).json({ message: "Trial not found" });
+
+      const endDate = trial.endDate.replace(/-/g, "");
+      const nextDay = new Date(trial.endDate + "T00:00:00Z");
+      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+      const dtEnd = nextDay.toISOString().slice(0, 10).replace(/-/g, "");
+
+      const now = new Date();
+      const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+
+      const cancelUrl = trial.cancelUrl || trial.serviceUrl;
+      const description = `Your free trial for ${trial.serviceName} ends today. Cancel now to avoid being charged.\\n\\nCancel here: ${cancelUrl}`;
+
+      const uid = `recalltrial-${trial.id}@recalltrial.app`;
+
+      const threeDaysBefore = new Date(trial.endDate + "T00:00:00Z");
+      threeDaysBefore.setUTCDate(threeDaysBefore.getUTCDate() - 3);
+      const alarmTrigger3 = "-P3D";
+
+      const oneDayBefore = new Date(trial.endDate + "T00:00:00Z");
+      oneDayBefore.setUTCDate(oneDayBefore.getUTCDate() - 1);
+      const alarmTrigger1 = "-P1D";
+
+      const ics = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//RecallTrial//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        `UID:${uid}`,
+        `DTSTAMP:${stamp}`,
+        `DTSTART;VALUE=DATE:${endDate}`,
+        `DTEND;VALUE=DATE:${dtEnd}`,
+        `SUMMARY:Cancel ${trial.serviceName} - Free Trial Ends`,
+        `DESCRIPTION:${description}`,
+        `URL:${cancelUrl}`,
+        "STATUS:CONFIRMED",
+        "BEGIN:VALARM",
+        "TRIGGER:" + alarmTrigger3,
+        "ACTION:DISPLAY",
+        `DESCRIPTION:${trial.serviceName} free trial ends in 3 days - cancel now!`,
+        "END:VALARM",
+        "BEGIN:VALARM",
+        "TRIGGER:" + alarmTrigger1,
+        "ACTION:DISPLAY",
+        `DESCRIPTION:${trial.serviceName} free trial ends tomorrow - cancel now!`,
+        "END:VALARM",
+        "END:VEVENT",
+        "END:VCALENDAR",
+      ].join("\r\n");
+
+      const filename = `cancel-${trial.serviceName.toLowerCase().replace(/[^a-z0-9]/g, "-")}.ics`;
+      res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      return res.send(ics);
+    } catch (err) {
+      console.error("Calendar export error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
   app.post("/api/trials", requireAuth, async (req: Request, res: Response) => {
     try {
       const parsed = insertTrialSchema.safeParse(req.body);

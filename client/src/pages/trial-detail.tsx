@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bell, ArrowLeft, ExternalLink, Calendar, DollarSign, Clock, X } from "lucide-react";
+import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X } from "lucide-react";
 import type { Trial, Reminder } from "@shared/schema";
 import { format, parseISO, differenceInDays } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -166,27 +166,40 @@ export default function TrialDetail() {
           </Card>
         )}
 
-        <div className="flex gap-3">
-          <Button
-            className="flex-1"
-            onClick={() => window.open(cancelLink, "_blank")}
-            data-testid="button-open-cancel"
-          >
-            <ExternalLink className="h-4 w-4 mr-2" />
-            Open cancel page
-          </Button>
-          {trial.status === "ACTIVE" && (
+        <div className="space-y-3">
+          <div className="flex gap-3">
             <Button
-              variant="outline"
               className="flex-1"
-              onClick={() => cancelMutation.mutate()}
-              disabled={cancelMutation.isPending}
-              data-testid="button-mark-canceled"
+              onClick={() => window.open(cancelLink, "_blank")}
+              data-testid="button-open-cancel"
             >
-              <X className="h-4 w-4 mr-2" />
-              Mark as canceled
+              <ExternalLink className="h-4 w-4 mr-2" />
+              Open cancel page
             </Button>
-          )}
+            {trial.status === "ACTIVE" && (
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => cancelMutation.mutate()}
+                disabled={cancelMutation.isPending}
+                data-testid="button-mark-canceled"
+              >
+                <X className="h-4 w-4 mr-2" />
+                Mark as canceled
+              </Button>
+            )}
+          </div>
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={() => {
+              window.location.href = `/api/trials/${params.id}/calendar.ics`;
+            }}
+            data-testid="button-add-to-calendar"
+          >
+            <CalendarPlus className="h-4 w-4 mr-2" />
+            Add to Calendar
+          </Button>
         </div>
       </main>
     </div>
