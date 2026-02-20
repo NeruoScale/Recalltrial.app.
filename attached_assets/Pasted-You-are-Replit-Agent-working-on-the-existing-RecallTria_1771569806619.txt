@@ -1,0 +1,115 @@
+You are Replit Agent working on the existing RecallTrial codebase (React + TS frontend, Express backend, Postgres/Drizzle, Resend email reminders, cron endpoint).
+
+GOAL: Make email delivery testable immediately even while Resend domain verification is Pending, add debug visibility, and ensure cron-triggered reminders can be verified end-to-end.
+
+========================
+A) REQUIRED CHANGES (DO NOT BREAK EXISTING FEATURES)
+========================
+
+1) Add environment-driven sender config with a safe fallback
+- Add these env vars (read from process.env):
+  - RESEND_API_KEY (already set)
+  - APP_URL (already exists)
+  - FROM_EMAIL (new; optional)
+  - REPLY_TO_EMAIL (new; optional)
+  - CRON_KEY (already exists)
+- Behavior:
+  - If FROM_EMAIL is set -> use it as the "From" value.
+  - Else fallback to: "RecallTrial <onboarding@resend.dev>" (so we can test immediately while domain is pending).
+  - If REPLY_TO_EMAIL is set, set Reply-To header; otherwise do not set it.
+
+2) Add a protected debug endpoint to send a test email immediately
+- Create backend route:
+  - POST /api/debug/send-test-email
+- Security:
+  - Must require header: x-debug-key = DEBUG_KEY
+  - Add DEBUG_KEY env var requirement (no default). If missing, return 500 "DEBUG_KEY not configured".
+- Request body:
+  {
+    "to": "email@example.com",
+    "subject": "optional",
+    "message": "optional"
+  }
+- Response should include:
+  - success true/false
+  - resendMessageId (if available)
+  - usedFromEmail
+  - usedReplyToEmail
+  - error message (if any)
+- Also log to server console:
+  - "✅ Resend test email queued" + message id
+  - or "❌ Resend test email failed" + error details
+
+3) Add a protected debug endpoint to run reminders cron now (manual trigger)
+- Create backend route:
+  - POST /api/debug/run-reminders-now
+- Security:
+  - Same header: x-debug-key = DEBUG_KEY
+- It should call the same internal function used by:
+  - POST /api/cron/reminders
+- Response should include:
+  - remindersProcessedCount
+  - emailsAttemptedCount
+  - emailsSentCount
+  - failedCount
+  - list of failures (trialId/reminderId + reason)
+- Ensure it does NOT mark reminders "sent" unless Resend API call succeeded.
+
+4) Improve Resend send logging + store provider message id
+- Update reminders table (Drizzle schema + migration):
+  - add columns:
+    - provider: text (default 'resend')
+    - providerMessageId: text nullable
+    - lastError: text nullable
+- When sending:
+  - On success: set status=SENT, sentAt=now, providerMessageId=returned id, lastError=null
+  - On failure: set status=FAILED (or keep PENDING but store lastError), and do NOT set sentAt
+- Update UI (Trial detail reminders list) to show:
+  - Status: PENDING / SENT / FAILED
+  - If FAILED: show a small “View error” expandable area with lastError
+  - If SENT and providerMessageId exists: show “Resend id: …”
+
+5) Ensure "From" aligns with MVP reality
+- In code, do NOT hardcode noreply@recalltrial.it.com.
+- Use env var or fallback onboarding@resend.dev as described.
+
+========================
+B) QUICK TEST INSTRUCTIONS (ADD TO README)
+========================
+Update README with a “Email Debug Checklist” section:
+
+- Set Replit secrets:
+  - RESEND_API_KEY=...
+  - DEBUG_KEY=some-long-random-string
+  - FROM_EMAIL="RecallTrial <onboarding@resend.dev>"   (temporary for domain pending)
+  - REPLY_TO_EMAIL="support@recalltrial.it.com"        (optional)
+- Test email:
+  curl -X POST $APP_URL/api/debug/send-test-email \
+    -H "Content-Type: application/json" \
+    -H "x-debug-key: $DEBUG_KEY" \
+    -d '{"to":"YOUR_EMAIL","subject":"RecallTrial Test","message":"If you see this, Resend works."}'
+- Trigger reminders:
+  curl -X POST $APP_URL/api/debug/run-reminders-now \
+    -H "x-debug-key: $DEBUG_KEY"
+
+Also mention:
+- Once domain verifies in Resend, change FROM_EMAIL to:
+  "RecallTrial <noreply@recalltrial.it.com>"
+
+========================
+C) DO NOT DO
+========================
+- Do not remove Stripe code (freeze it as-is). No billing changes now.
+- Do not change trial limit logic (Free is 3 active trials).
+- Do not introduce new paid plans.
+- Do not break existing routes/pages.
+- Do not expose debug endpoints without DEBUG_KEY protection.
+
+========================
+D) DELIVERABLES
+========================
+- Code changes implemented + migrations applied.
+- Debug endpoints working.
+- Reminder sending only marks SENT on actual Resend success.
+- README updated with test commands.
+- Confirm by running a test email and showing server logs with success and returned Resend message id.
