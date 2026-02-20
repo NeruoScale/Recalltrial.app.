@@ -24,7 +24,15 @@ export function log(message: string, source = "express") {
 
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
 
-if (BILLING_ENABLED) {
+async function initBilling() {
+  if (!BILLING_ENABLED) {
+    console.log('Billing disabled (BILLING_ENABLED=false). Stripe initialization skipped.');
+    app.post('/api/stripe/webhook', (_req, res) => {
+      return res.status(404).json({ message: "Not found" });
+    });
+    return;
+  }
+
   const { runMigrations } = await import('stripe-replit-sync');
   const { getStripeSync } = await import("./stripeClient");
   const { WebhookHandlers } = await import("./webhookHandlers");
@@ -105,11 +113,6 @@ if (BILLING_ENABLED) {
       }
     }
   );
-} else {
-  console.log('Billing disabled (BILLING_ENABLED=false). Stripe initialization skipped.');
-  app.post('/api/stripe/webhook', (_req, res) => {
-    return res.status(404).json({ message: "Not found" });
-  });
 }
 
 app.use(
@@ -147,6 +150,7 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  await initBilling();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
