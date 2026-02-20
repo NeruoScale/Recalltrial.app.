@@ -65,6 +65,8 @@ shared/
 - GET /api/admin/metrics - Admin metrics (requires X-ADMIN-KEY header or ?key= query param)
 - POST /api/billing/* - Billing routes (gated, return 404 when BILLING_ENABLED=false)
 - POST /api/stripe/webhook - Stripe webhook (gated, return 404 when BILLING_ENABLED=false)
+- POST /api/debug/send-test-email - Send test email (requires X-DEBUG-KEY header)
+- POST /api/debug/run-reminders-now - Manually trigger due reminders (requires X-DEBUG-KEY header)
 - POST /api/cron/reminders - Process due reminders (requires X-CRON-KEY header)
 
 ## Early Access Mode
@@ -82,7 +84,7 @@ shared/
 ## Database Models
 - **users**: id, email, passwordHash, timezone, plan (FREE/PRO/PREMIUM), stripeCustomerId, stripeSubscriptionId, subscriptionStatus, currentPeriodEnd, createdAt
 - **trials**: id, userId, serviceName, serviceUrl, domain, iconUrl, cancelUrl, startDate, endDate, renewalPrice, currency, status, canceledAt, createdAt
-- **reminders**: id, trialId, userId, remindAt, type, status, sentAt, createdAt
+- **reminders**: id, trialId, userId, remindAt, type, status (PENDING/SENT/SKIPPED/FAILED), sentAt, provider, providerMessageId, lastError, createdAt
 - **analytics_events**: id, userId, event, metadata (JSON string), createdAt
 
 ## Environment Variables
@@ -93,6 +95,9 @@ shared/
 - CRON_KEY - Secret for cron endpoint authentication
 - APP_URL - Application URL for email links
 - RESEND_API_KEY - Resend email API key (optional, logs to console if not set)
+- FROM_EMAIL - Email sender address (default: "RecallTrial <onboarding@resend.dev>")
+- REPLY_TO_EMAIL - Reply-to address for emails (optional)
+- DEBUG_KEY - Secret key for debug endpoints (send-test-email, run-reminders-now)
 - STRIPE_PRO_MONTHLY_PRICE_ID - Stripe price ID for Pro monthly
 - STRIPE_PRO_YEARLY_PRICE_ID - Stripe price ID for Pro yearly
 - STRIPE_PREMIUM_MONTHLY_PRICE_ID - Stripe price ID for Premium monthly

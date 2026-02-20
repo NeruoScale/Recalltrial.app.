@@ -4,7 +4,7 @@ import session from "express-session";
 import { storage } from "./storage";
 import { signupSchema, loginSchema, insertTrialSchema } from "@shared/schema";
 import { extractDomain, getIconUrl } from "./icon";
-import { sendReminderEmail } from "./email";
+import { sendReminderEmail, sendTestEmail } from "./email";
 import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
@@ -437,6 +437,81 @@ export async function registerRoutes(
     });
   });
 
+  async function processRemindersNow() {
+    const now = new Date();
+    const dueReminders = await storage.getDueReminders(now);
+    let emailsAttempted = 0;
+    let emailsSent = 0;
+    let failedCount = 0;
+    const failures: { reminderId: string; trialId: string; reason: string }[] = [];
+
+    for (const reminder of dueReminders) {
+      const claimed = await storage.claimAndSendReminder(reminder.id);
+      if (!claimed) continue;
+
+      emailsAttempted++;
+      const result = await sendReminderEmail(reminder.trial, reminder.user, reminder.type);
+      if (result.success) {
+        await storage.markReminderSent(reminder.id, result.messageId);
+        emailsSent++;
+      } else {
+        await storage.markReminderFailed(reminder.id, result.error || "Unknown error");
+        failedCount++;
+        failures.push({ reminderId: reminder.id, trialId: reminder.trialId, reason: result.error || "Unknown error" });
+      }
+    }
+
+    return {
+      remindersProcessedCount: dueReminders.length,
+      emailsAttemptedCount: emailsAttempted,
+      emailsSentCount: emailsSent,
+      failedCount,
+      failures,
+    };
+  }
+
+  app.post("/api/debug/send-test-email", async (req: Request, res: Response) => {
+    const debugKey = process.env.DEBUG_KEY;
+    if (!debugKey) {
+      return res.status(500).json({ success: false, error: "DEBUG_KEY not configured" });
+    }
+    if (req.headers["x-debug-key"] !== debugKey) {
+      return res.status(403).json({ success: false, error: "Forbidden" });
+    }
+
+    const { to, subject, message } = req.body || {};
+    if (!to || typeof to !== "string") {
+      return res.status(400).json({ success: false, error: "Missing 'to' email address" });
+    }
+
+    const result = await sendTestEmail(to, subject, message);
+    return res.json({
+      success: result.success,
+      resendMessageId: result.messageId || null,
+      usedFromEmail: result.usedFromEmail,
+      usedReplyToEmail: result.usedReplyToEmail,
+      error: result.error || null,
+    });
+  });
+
+  app.post("/api/debug/run-reminders-now", async (req: Request, res: Response) => {
+    const debugKey = process.env.DEBUG_KEY;
+    if (!debugKey) {
+      return res.status(500).json({ success: false, error: "DEBUG_KEY not configured" });
+    }
+    if (req.headers["x-debug-key"] !== debugKey) {
+      return res.status(403).json({ success: false, error: "Forbidden" });
+    }
+
+    try {
+      const result = await processRemindersNow();
+      return res.json(result);
+    } catch (err: any) {
+      console.error("Debug run-reminders error:", err);
+      return res.status(500).json({ success: false, error: err.message || "Internal error" });
+    }
+  });
+
   app.post("/api/cron/reminders", async (req: Request, res: Response) => {
     const cronKey = req.headers["x-cron-key"];
     if (cronKey !== process.env.CRON_KEY) {
@@ -444,20 +519,8 @@ export async function registerRoutes(
     }
 
     try {
-      const now = new Date();
-      const dueReminders = await storage.getDueReminders(now);
-      let sent = 0;
-      let failed = 0;
-
-      for (const reminder of dueReminders) {
-        const marked = await storage.claimAndSendReminder(reminder.id);
-        if (!marked) continue;
-
-        const success = await sendReminderEmail(reminder.trial, reminder.user, reminder.type);
-        if (success) { sent++; } else { failed++; }
-      }
-
-      return res.json({ processed: dueReminders.length, sent, failed });
+      const result = await processRemindersNow();
+      return res.json(result);
     } catch (err) {
       console.error("Cron error:", err);
       return res.status(500).json({ message: "Internal error" });

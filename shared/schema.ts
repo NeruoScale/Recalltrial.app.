@@ -5,7 +5,7 @@ import { z } from "zod";
 
 export const trialStatusEnum = pgEnum("trial_status", ["ACTIVE", "CANCELED"]);
 export const reminderTypeEnum = pgEnum("reminder_type", ["THREE_DAYS", "ONE_DAY"]);
-export const reminderStatusEnum = pgEnum("reminder_status", ["PENDING", "SENT", "SKIPPED"]);
+export const reminderStatusEnum = pgEnum("reminder_status", ["PENDING", "SENT", "SKIPPED", "FAILED"]);
 export const planEnum = pgEnum("plan", ["FREE", "PRO", "PREMIUM"]);
 export const userSubStatusEnum = pgEnum("user_sub_status", ["ACTIVE", "CANCELED", "PAST_DUE", "INCOMPLETE"]);
 
@@ -47,6 +47,9 @@ export const reminders = pgTable("reminders", {
   type: reminderTypeEnum("type").notNull(),
   status: reminderStatusEnum("status").notNull().default("PENDING"),
   sentAt: timestamp("sent_at"),
+  provider: text("provider").default("resend"),
+  providerMessageId: text("provider_message_id"),
+  lastError: text("last_error"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -95,6 +98,9 @@ export const insertReminderSchema = createInsertSchema(reminders).omit({
   id: true,
   status: true,
   sentAt: true,
+  provider: true,
+  providerMessageId: true,
+  lastError: true,
   createdAt: true,
 });
 

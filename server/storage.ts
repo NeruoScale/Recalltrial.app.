@@ -21,6 +21,8 @@ export interface IStorage {
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: "THREE_DAYS" | "ONE_DAY" }): Promise<Reminder>;
   getDueReminders(now: Date): Promise<(Reminder & { trial: Trial; user: User })[]>;
   claimAndSendReminder(reminderId: string): Promise<boolean>;
+  markReminderSent(reminderId: string, providerMessageId?: string): Promise<void>;
+  markReminderFailed(reminderId: string, error: string): Promise<void>;
   skipRemindersByTrial(trialId: string): Promise<void>;
 
   getSubscription(subscriptionId: string): Promise<any>;
@@ -139,6 +141,26 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(reminders.id, reminderId), eq(reminders.status, "PENDING")))
       .returning();
     return result.length > 0;
+  }
+
+  async markReminderSent(reminderId: string, providerMessageId?: string): Promise<void> {
+    await db.update(reminders)
+      .set({
+        status: "SENT",
+        sentAt: new Date(),
+        providerMessageId: providerMessageId || null,
+        lastError: null,
+      })
+      .where(eq(reminders.id, reminderId));
+  }
+
+  async markReminderFailed(reminderId: string, error: string): Promise<void> {
+    await db.update(reminders)
+      .set({
+        status: "FAILED",
+        lastError: error,
+      })
+      .where(eq(reminders.id, reminderId));
   }
 
   async skipRemindersByTrial(trialId: string): Promise<void> {

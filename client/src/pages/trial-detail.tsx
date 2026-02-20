@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X, Mail } from "lucide-react";
+import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X, Mail, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import type { Trial, Reminder } from "@shared/schema";
 import { format, parseISO, differenceInDays } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -170,17 +170,43 @@ export default function TrialDetail() {
             <CardHeader>
               <CardTitle className="text-base">Reminders</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2">
+            <CardContent className="space-y-3">
               {reminders.map((r) => (
-                <div key={r.id} className="flex items-center gap-3 text-sm">
-                  <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <span className="flex-1">
-                    {r.type === "THREE_DAYS" ? "3 days before" : "1 day before"} —{" "}
-                    {format(new Date(r.remindAt), "MMM d, yyyy 'at' h:mm a")}
-                  </span>
-                  <Badge variant={r.status === "SENT" ? "secondary" : r.status === "SKIPPED" ? "secondary" : "default"}>
-                    {r.status}
-                  </Badge>
+                <div key={r.id} className="space-y-1" data-testid={`reminder-item-${r.id}`}>
+                  <div className="flex items-center gap-3 text-sm">
+                    {r.status === "SENT" ? (
+                      <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
+                    ) : r.status === "FAILED" ? (
+                      <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
+                    ) : (
+                      <Loader2 className="h-4 w-4 text-muted-foreground shrink-0" />
+                    )}
+                    <span className="flex-1">
+                      {r.type === "THREE_DAYS" ? "3 days before" : "1 day before"} —{" "}
+                      {format(new Date(r.remindAt), "MMM d, yyyy 'at' h:mm a")}
+                    </span>
+                    <Badge
+                      variant={r.status === "SENT" ? "secondary" : r.status === "FAILED" ? "destructive" : r.status === "SKIPPED" ? "secondary" : "default"}
+                      data-testid={`badge-reminder-status-${r.id}`}
+                    >
+                      {r.status}
+                    </Badge>
+                  </div>
+                  {r.status === "SENT" && r.providerMessageId && (
+                    <p className="text-xs text-muted-foreground ml-7" data-testid={`text-resend-id-${r.id}`}>
+                      Resend id: {r.providerMessageId}
+                    </p>
+                  )}
+                  {r.status === "FAILED" && r.lastError && (
+                    <details className="ml-7">
+                      <summary className="text-xs text-destructive cursor-pointer" data-testid={`button-view-error-${r.id}`}>
+                        View error
+                      </summary>
+                      <p className="text-xs text-muted-foreground mt-1 bg-muted/40 rounded-md p-2" data-testid={`text-error-detail-${r.id}`}>
+                        {r.lastError}
+                      </p>
+                    </details>
+                  )}
                 </div>
               ))}
             </CardContent>
