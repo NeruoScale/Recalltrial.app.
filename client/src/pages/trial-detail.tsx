@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X, Mail, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { Bell, ArrowLeft, ExternalLink, Calendar, CalendarPlus, DollarSign, Clock, X, Mail, AlertCircle, CheckCircle2, Loader2, SkipForward, Info } from "lucide-react";
 import type { Trial, Reminder } from "@shared/schema";
 import { format, parseISO, differenceInDays } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -79,6 +79,19 @@ export default function TrialDetail() {
   const initial = trial.serviceName.charAt(0).toUpperCase();
 
   const nextPendingReminder = reminders?.find((r) => r.status === "PENDING");
+  const hasFutureReminders = reminders?.some((r) => r.status === "PENDING");
+
+  function reminderTypeLabel(type: string): string {
+    switch (type) {
+      case "THREE_DAYS": return "3 days before";
+      case "ONE_DAY": return "1 day before";
+      case "TWENTY_FOUR_HOURS": return "24 hours before";
+      case "THREE_HOURS": return "3 hours before";
+      case "SIX_HOURS": return "6 hours before";
+      case "ONE_HOUR": return "1 hour before";
+      default: return type;
+    }
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -165,28 +178,30 @@ export default function TrialDetail() {
           </CardContent>
         </Card>
 
-        {reminders && reminders.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Reminders</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {reminders.map((r) => (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Reminders</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {reminders && reminders.length > 0 ? (
+              reminders.map((r) => (
                 <div key={r.id} className="space-y-1" data-testid={`reminder-item-${r.id}`}>
                   <div className="flex items-center gap-3 text-sm">
                     {r.status === "SENT" ? (
                       <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
                     ) : r.status === "FAILED" ? (
                       <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
+                    ) : r.status === "SKIPPED" ? (
+                      <SkipForward className="h-4 w-4 text-muted-foreground shrink-0" />
                     ) : (
-                      <Loader2 className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <Clock className="h-4 w-4 text-primary shrink-0" />
                     )}
                     <span className="flex-1">
-                      {r.type === "THREE_DAYS" ? "3 days before" : "1 day before"} —{" "}
+                      {reminderTypeLabel(r.type)} —{" "}
                       {format(new Date(r.remindAt), "MMM d, yyyy 'at' h:mm a")}
                     </span>
                     <Badge
-                      variant={r.status === "SENT" ? "secondary" : r.status === "FAILED" ? "destructive" : r.status === "SKIPPED" ? "secondary" : "default"}
+                      variant={r.status === "SENT" ? "secondary" : r.status === "FAILED" ? "destructive" : r.status === "SKIPPED" ? "outline" : "default"}
                       data-testid={`badge-reminder-status-${r.id}`}
                     >
                       {r.status}
@@ -208,10 +223,15 @@ export default function TrialDetail() {
                     </details>
                   )}
                 </div>
-              ))}
-            </CardContent>
-          </Card>
-        )}
+              ))
+            ) : (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground" data-testid="text-no-reminders">
+                <Info className="h-4 w-4 shrink-0" />
+                <span>No future reminders available for this trial.</span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <div className="space-y-3">
           <div className="flex gap-3">

@@ -18,7 +18,7 @@ export interface IStorage {
   cancelTrial(trialId: string, userId: string): Promise<Trial | undefined>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
-  createReminder(data: { trialId: string; userId: string; remindAt: Date; type: "THREE_DAYS" | "ONE_DAY" }): Promise<Reminder>;
+  createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
   getDueReminders(now: Date): Promise<(Reminder & { trial: Trial; user: User })[]>;
   claimAndSendReminder(reminderId: string): Promise<boolean>;
   markReminderSent(reminderId: string, providerMessageId?: string): Promise<void>;
@@ -114,12 +114,12 @@ export class DatabaseStorage implements IStorage {
       .orderBy(reminders.remindAt);
   }
 
-  async createReminder(data: { trialId: string; userId: string; remindAt: Date; type: "THREE_DAYS" | "ONE_DAY" }): Promise<Reminder> {
+  async createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder> {
     const [reminder] = await db.insert(reminders).values({
       trialId: data.trialId,
       userId: data.userId,
       remindAt: data.remindAt,
-      type: data.type,
+      type: data.type as any,
     }).returning();
     return reminder;
   }

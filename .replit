@@ -50,7 +50,7 @@ STRIPE_PREMIUM_MONTHLY_PRICE_ID = "price_1T2MUJB5tg0rN4pMN2h4xNKY"
 STRIPE_PREMIUM_YEARLY_PRICE_ID = "price_1T2MUJB5tg0rN4pMGWBEor9H"
 BILLING_ENABLED = "false"
 ADMIN_KEY = "b4a4896a3f1be72301af5e5f21ef226b"
-FROM_EMAIL = "RecallTrial <noreply@recalltrial.app>"
+FROM_EMAIL = "RecallTrial <notifications@recalltrial.app>"
 
 [userenv.development]
 DEBUG_KEY = "test-debug-key-2026"

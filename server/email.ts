@@ -50,7 +50,7 @@ function buildReminderEmail(trial: Trial, user: User, reminderType: string): { s
       <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin:16px 0;">
         <p style="margin:0;font-size:14px;color:#92400e;">
           <strong>Your free trial ends on ${endFullFormatted}.</strong>
-          ${reminderType === "ONE_DAY" ? " That's tomorrow!" : " That's in 3 days."}
+          ${reminderType === "ONE_HOUR" ? " That's in about 1 hour!" : reminderType === "THREE_HOURS" ? " That's in about 3 hours!" : reminderType === "SIX_HOURS" ? " That's in about 6 hours!" : reminderType === "TWENTY_FOUR_HOURS" || reminderType === "ONE_DAY" ? " That's tomorrow!" : " That's in 3 days."}
         </p>
       </div>
 

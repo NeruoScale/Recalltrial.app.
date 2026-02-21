@@ -33,7 +33,9 @@ function requireBilling(_req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-function computeReminderTimeInUTC(endDateStr: string, daysBefore: number, timezone: string): Date {
+type ReminderPlan = { remindAt: Date; type: string };
+
+function getTimezoneOffsetMs(timezone: string, refDate: Date): number {
   try {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone: timezone,
@@ -45,23 +47,56 @@ function computeReminderTimeInUTC(endDateStr: string, daysBefore: number, timezo
       second: "2-digit",
       hour12: false,
     });
-
-    const targetDate = new Date(endDateStr + "T12:00:00Z");
-    targetDate.setUTCDate(targetDate.getUTCDate() - daysBefore);
-
-    const utcEstimate = new Date(targetDate);
-    const parts = formatter.formatToParts(utcEstimate);
-    const localHour = parseInt(parts.find((p) => p.type === "hour")?.value || "0");
-    const offsetHours = localHour - utcEstimate.getUTCHours();
-
-    const result = new Date(targetDate);
-    result.setUTCHours(10 - offsetHours, 0, 0, 0);
-    return result;
+    const parts = formatter.formatToParts(refDate);
+    const get = (t: string) => parseInt(parts.find((p) => p.type === t)?.value || "0");
+    const localH = get("hour");
+    const localM = get("minute");
+    const utcH = refDate.getUTCHours();
+    const utcM = refDate.getUTCMinutes();
+    return ((localH - utcH) * 60 + (localM - utcM)) * 60 * 1000;
   } catch {
-    const fallback = new Date(endDateStr + "T10:00:00Z");
-    fallback.setUTCDate(fallback.getUTCDate() - daysBefore);
-    return fallback;
+    return 0;
   }
+}
+
+function computeReminders(endDateStr: string, now: Date, timezone: string): ReminderPlan[] {
+  const tzOffsetMs = getTimezoneOffsetMs(timezone, now);
+  const endDateTimeUtc = new Date(new Date(endDateStr + "T23:59:59.000Z").getTime() - tzOffsetMs);
+
+  const timeLeftMs = endDateTimeUtc.getTime() - now.getTime();
+  const timeLeftHours = timeLeftMs / (1000 * 60 * 60);
+  const minFutureMs = 2 * 60 * 1000;
+
+  let offsets: { hoursBeforeEnd: number; type: string }[];
+
+  if (timeLeftHours <= 0) {
+    return [];
+  } else if (timeLeftHours < 24) {
+    offsets = [
+      { hoursBeforeEnd: 6, type: "SIX_HOURS" },
+      { hoursBeforeEnd: 1, type: "ONE_HOUR" },
+    ];
+  } else if (timeLeftHours < 72) {
+    offsets = [
+      { hoursBeforeEnd: 24, type: "TWENTY_FOUR_HOURS" },
+      { hoursBeforeEnd: 3, type: "THREE_HOURS" },
+    ];
+  } else {
+    offsets = [
+      { hoursBeforeEnd: 72, type: "THREE_DAYS" },
+      { hoursBeforeEnd: 24, type: "ONE_DAY" },
+    ];
+  }
+
+  const results: ReminderPlan[] = [];
+  for (const offset of offsets) {
+    const remindAt = new Date(endDateTimeUtc.getTime() - offset.hoursBeforeEnd * 60 * 60 * 1000);
+    if (remindAt.getTime() > now.getTime() + minFutureMs) {
+      results.push({ remindAt, type: offset.type });
+    }
+  }
+
+  return results;
 }
 
 export async function registerRoutes(
@@ -266,17 +301,10 @@ export async function registerRoutes(
       const now = new Date();
       const tz = user.timezone || "Asia/Qatar";
 
-      const threeDayRemind = computeReminderTimeInUTC(data.endDate, 3, tz);
-      if (threeDayRemind > now) {
+      const reminderPlans = computeReminders(data.endDate, now, tz);
+      for (const plan of reminderPlans) {
         await storage.createReminder({
-          trialId: trial.id, userId: req.session.userId!, remindAt: threeDayRemind, type: "THREE_DAYS",
-        });
-      }
-
-      const oneDayRemind = computeReminderTimeInUTC(data.endDate, 1, tz);
-      if (oneDayRemind > now) {
-        await storage.createReminder({
-          trialId: trial.id, userId: req.session.userId!, remindAt: oneDayRemind, type: "ONE_DAY",
+          trialId: trial.id, userId: req.session.userId!, remindAt: plan.remindAt, type: plan.type as any,
         });
       }
 

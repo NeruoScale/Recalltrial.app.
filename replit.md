@@ -14,6 +14,7 @@ RecallTrial is a trust-first free-trial reminder app. Users add free trials manu
 - **Payments:** Stripe (frozen behind BILLING_ENABLED flag, code intact via stripe-replit-sync)
 - **Search:** Fuse.js fuzzy search over 585-service catalog
 - **Scheduling:** Cron endpoint at POST /api/cron/reminders (secured via X-CRON-KEY header)
+- **Reminder Logic:** Adaptive offsets based on time remaining: >=72h uses THREE_DAYS+ONE_DAY, <72h uses TWENTY_FOUR_HOURS+THREE_HOURS, <24h uses SIX_HOURS+ONE_HOUR. Past reminders filtered out (>now+2min)
 
 ## Project Structure
 ```
@@ -95,7 +96,7 @@ shared/
 - CRON_KEY - Secret for cron endpoint authentication
 - APP_URL - Application URL for email links
 - RESEND_API_KEY - Resend email API key (optional, logs to console if not set)
-- FROM_EMAIL - Email sender address (default: "RecallTrial <onboarding@resend.dev>")
+- FROM_EMAIL - Email sender address (default: "RecallTrial <onboarding@resend.dev>", currently set to notifications@recalltrial.app)
 - REPLY_TO_EMAIL - Reply-to address for emails (optional)
 - DEBUG_KEY - Secret key for debug endpoints (send-test-email, run-reminders-now)
 - STRIPE_PRO_MONTHLY_PRICE_ID - Stripe price ID for Pro monthly
