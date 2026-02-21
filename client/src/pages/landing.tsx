@@ -82,7 +82,8 @@ export default function Landing() {
                   </div>
                   <h3 className="font-semibold mb-2">Get reminders</h3>
                   <p className="text-sm text-muted-foreground">
-                    We email you 3 days and 1 day before the trial ends with the cancel link.
+                    Receive email reminders 3 days and 1 day before renewal.<br />
+                    Add it to your calendar instantly so you never miss it.
                   </p>
                 </CardContent>
               </Card>
