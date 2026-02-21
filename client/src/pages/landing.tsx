@@ -130,7 +130,6 @@ export default function Landing() {
                   So I built RecallTrial to make sure that never happens again — for me or anyone else.
                 </p>
                 <p className="text-base md:text-lg font-medium text-foreground mt-6">— Founder</p>
-                <p className="text-xs text-muted-foreground">&copy; 2026 RecallTrial - All Rights Reserved</p>
               </div>
             </div>
           </div>
