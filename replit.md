@@ -106,5 +106,5 @@ shared/
 
 ## Branding
 - App name: RecallTrial
-- Footer: "Operated by SKAHM LTD (UK)."
+- Footer: "© 2026 RecallTrial - All Rights Reserved"
 - Default timezone: Asia/Qatar

@@ -72,7 +72,7 @@ function buildReminderEmail(trial: Trial, user: User, reminderType: string): { s
     </div>
 
     <div style="background:#f9fafb;padding:16px 24px;text-align:center;border-top:1px solid #e5e7eb;">
-      <p style="margin:0;font-size:12px;color:#9ca3af;">RecallTrial — Operated by SKAHM LTD (UK)</p>
+      <p style="margin:0;font-size:12px;color:#9ca3af;">&copy; 2026 RecallTrial - All Rights Reserved</p>
     </div>
   </div>
 </body>

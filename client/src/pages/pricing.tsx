@@ -240,7 +240,7 @@ export default function Pricing() {
 
       <footer className="border-t py-8 px-4 mt-10">
         <div className="max-w-5xl mx-auto text-center text-sm text-muted-foreground">
-          <p>Operated by SKAHM LTD (UK).</p>
+          <p>&copy; 2026 RecallTrial - All Rights Reserved</p>
         </div>
       </footer>
     </div>

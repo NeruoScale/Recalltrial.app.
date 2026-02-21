@@ -130,7 +130,7 @@ export default function Landing() {
                   So I built RecallTrial to make sure that never happens again — for me or anyone else.
                 </p>
                 <p className="text-base md:text-lg font-medium text-foreground mt-6">— Founder</p>
-                <p className="text-xs text-muted-foreground">Operated by SKAHM LTD (UK).</p>
+                <p className="text-xs text-muted-foreground">&copy; 2026 RecallTrial - All Rights Reserved</p>
               </div>
             </div>
           </div>
@@ -168,7 +168,7 @@ export default function Landing() {
             <Bell className="h-4 w-4 text-primary" />
             <span className="font-medium text-foreground">RecallTrial</span>
           </div>
-          <p data-testid="text-footer">Operated by SKAHM LTD (UK).</p>
+          <p data-testid="text-footer">&copy; 2026 RecallTrial - All Rights Reserved</p>
         </div>
       </footer>
     </div>
