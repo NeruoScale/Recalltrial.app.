@@ -111,6 +111,11 @@ export async function sendReminderEmail(trial: Trial, user: User, reminderType: 
     }
 
     const result = await resend.emails.send(sendOptions);
+    if (result?.error) {
+      const errorMessage = result.error.message || JSON.stringify(result.error);
+      console.error(`[Email] Resend rejected send to ${user.email}:`, errorMessage);
+      return { success: false, error: errorMessage };
+    }
     const messageId = result?.data?.id || undefined;
     console.log(`[Email] Sent reminder to ${user.email}: ${subject} (id: ${messageId})`);
     return { success: true, messageId };
@@ -167,6 +172,11 @@ export async function sendTestEmail(to: string, subject?: string, message?: stri
     }
 
     const result = await resend.emails.send(sendOptions);
+    if (result?.error) {
+      const errorMessage = result.error.message || JSON.stringify(result.error);
+      console.error(`[Email] Resend rejected test email:`, errorMessage);
+      return { success: false, error: errorMessage, usedFromEmail: fromEmail, usedReplyToEmail: replyTo || null };
+    }
     const messageId = result?.data?.id || undefined;
     console.log(`[Email] Resend test email queued (id: ${messageId})`);
     return { success: true, messageId, usedFromEmail: fromEmail, usedReplyToEmail: replyTo || null };
