@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, date, decimal, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, date, decimal, pgEnum, integer, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -93,6 +93,36 @@ export const analyticsEvents = pgTable("analytics_events", {
   metadata: text("metadata"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
+
+export const reviews = pgTable("reviews", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  rating: integer("rating").notNull(),
+  text: text("text").notNull(),
+  name: text("name"),
+  location: text("location"),
+  source: reviewSourceEnum("source").notNull().default("manual"),
+  isApproved: boolean("is_approved").notNull().default(false),
+  isFeatured: boolean("is_featured").notNull().default(false),
+  userId: varchar("user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertReviewSchema = createInsertSchema(reviews).omit({
+  id: true,
+  isApproved: true,
+  isFeatured: true,
+  createdAt: true,
+}).extend({
+  rating: z.number().int().min(1).max(5),
+  text: z.string().min(10, "Review must be at least 10 characters").max(300, "Review must be under 300 characters"),
+  name: z.string().max(60).optional().or(z.literal("")),
+  location: z.string().max(60).optional().or(z.literal("")),
+});
+
+export type Review = typeof reviews.$inferSelect;
+export type InsertReview = z.infer<typeof insertReviewSchema>;
 
 export const insertReminderSchema = createInsertSchema(reminders).omit({
   id: true,

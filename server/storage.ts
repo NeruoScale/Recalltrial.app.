@@ -1,6 +1,6 @@
-import { eq, and, lte, sql, count } from "drizzle-orm";
+import { eq, and, lte, sql, count, desc } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, type User, type Trial, type Reminder } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, type User, type Trial, type Reminder, type Review } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -38,6 +38,13 @@ export interface IStorage {
     sentReminders: number;
     recentEvents: { event: string; count: number }[];
   }>;
+
+  getApprovedReviews(limit?: number): Promise<Review[]>;
+  getAllReviews(): Promise<Review[]>;
+  createReview(data: { rating: number; text: string; name?: string | null; location?: string | null; source?: string; userId?: string | null; isApproved?: boolean }): Promise<Review>;
+  approveReview(reviewId: string): Promise<Review | undefined>;
+  deleteReview(reviewId: string): Promise<boolean>;
+  toggleFeaturedReview(reviewId: string): Promise<Review | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -226,6 +233,54 @@ export class DatabaseStorage implements IStorage {
       sentReminders: sentCount?.count ?? 0,
       recentEvents: eventCounts.map((r) => ({ event: r.event, count: r.count })),
     };
+  }
+
+  async getApprovedReviews(limit?: number): Promise<Review[]> {
+    const query = db.select().from(reviews)
+      .where(eq(reviews.isApproved, true))
+      .orderBy(desc(reviews.createdAt));
+    if (limit) return query.limit(limit);
+    return query;
+  }
+
+  async getAllReviews(): Promise<Review[]> {
+    return db.select().from(reviews).orderBy(desc(reviews.createdAt));
+  }
+
+  async createReview(data: { rating: number; text: string; name?: string | null; location?: string | null; source?: string; userId?: string | null; isApproved?: boolean }): Promise<Review> {
+    const [review] = await db.insert(reviews).values({
+      rating: data.rating,
+      text: data.text,
+      name: data.name || null,
+      location: data.location || null,
+      source: (data.source || "manual") as any,
+      userId: data.userId || null,
+      isApproved: data.isApproved ?? false,
+    }).returning();
+    return review;
+  }
+
+  async approveReview(reviewId: string): Promise<Review | undefined> {
+    const [review] = await db.update(reviews)
+      .set({ isApproved: true })
+      .where(eq(reviews.id, reviewId))
+      .returning();
+    return review;
+  }
+
+  async deleteReview(reviewId: string): Promise<boolean> {
+    const result = await db.delete(reviews).where(eq(reviews.id, reviewId)).returning();
+    return result.length > 0;
+  }
+
+  async toggleFeaturedReview(reviewId: string): Promise<Review | undefined> {
+    const [existing] = await db.select().from(reviews).where(eq(reviews.id, reviewId)).limit(1);
+    if (!existing) return undefined;
+    const [review] = await db.update(reviews)
+      .set({ isFeatured: !existing.isFeatured })
+      .where(eq(reviews.id, reviewId))
+      .returning();
+    return review;
   }
 }
 

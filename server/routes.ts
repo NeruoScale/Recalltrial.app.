@@ -498,6 +498,81 @@ export async function registerRoutes(
     };
   }
 
+  // ===== REVIEWS ROUTES =====
+
+  app.get("/api/reviews", async (_req: Request, res: Response) => {
+    const approvedReviews = await storage.getApprovedReviews();
+    return res.json(approvedReviews);
+  });
+
+  app.get("/api/reviews/featured", async (_req: Request, res: Response) => {
+    const approvedReviews = await storage.getApprovedReviews(6);
+    return res.json(approvedReviews);
+  });
+
+  app.post("/api/reviews/submit", requireAuth, async (req: Request, res: Response) => {
+    const { rating, text, name, location } = req.body;
+    if (!rating || typeof rating !== "number" || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: "Rating must be 1-5" });
+    }
+    if (!text || typeof text !== "string" || text.trim().length < 10) {
+      return res.status(400).json({ message: "Review must be at least 10 characters" });
+    }
+    if (text.length > 300) {
+      return res.status(400).json({ message: "Review must be under 300 characters" });
+    }
+    const plainText = text.replace(/<[^>]*>/g, "").trim();
+    const review = await storage.createReview({
+      rating,
+      text: plainText,
+      name: name?.trim()?.substring(0, 60) || null,
+      location: location?.trim()?.substring(0, 60) || null,
+      source: "in_app",
+      userId: req.session.userId!,
+    });
+    return res.json({ success: true, message: "Thanks! Your review will appear after approval.", review });
+  });
+
+  // Admin reviews (protected by ADMIN_KEY)
+  app.get("/api/admin/reviews", async (req: Request, res: Response) => {
+    const adminKey = process.env.ADMIN_KEY;
+    if (!adminKey) return res.status(500).json({ message: "ADMIN_KEY not configured" });
+    const key = req.headers["x-admin-key"] || req.query.key;
+    if (key !== adminKey) return res.status(403).json({ message: "Forbidden" });
+    const allReviews = await storage.getAllReviews();
+    return res.json(allReviews);
+  });
+
+  app.post("/api/admin/reviews/:id/approve", async (req: Request, res: Response) => {
+    const adminKey = process.env.ADMIN_KEY;
+    if (!adminKey) return res.status(500).json({ message: "ADMIN_KEY not configured" });
+    const key = req.headers["x-admin-key"] || req.query.key;
+    if (key !== adminKey) return res.status(403).json({ message: "Forbidden" });
+    const review = await storage.approveReview(req.params.id);
+    if (!review) return res.status(404).json({ message: "Review not found" });
+    return res.json(review);
+  });
+
+  app.post("/api/admin/reviews/:id/feature", async (req: Request, res: Response) => {
+    const adminKey = process.env.ADMIN_KEY;
+    if (!adminKey) return res.status(500).json({ message: "ADMIN_KEY not configured" });
+    const key = req.headers["x-admin-key"] || req.query.key;
+    if (key !== adminKey) return res.status(403).json({ message: "Forbidden" });
+    const review = await storage.toggleFeaturedReview(req.params.id);
+    if (!review) return res.status(404).json({ message: "Review not found" });
+    return res.json(review);
+  });
+
+  app.delete("/api/admin/reviews/:id", async (req: Request, res: Response) => {
+    const adminKey = process.env.ADMIN_KEY;
+    if (!adminKey) return res.status(500).json({ message: "ADMIN_KEY not configured" });
+    const key = req.headers["x-admin-key"] || req.query.key;
+    if (key !== adminKey) return res.status(403).json({ message: "Forbidden" });
+    const deleted = await storage.deleteReview(req.params.id);
+    if (!deleted) return res.status(404).json({ message: "Review not found" });
+    return res.json({ success: true });
+  });
+
   app.post("/api/debug/send-test-email", async (req: Request, res: Response) => {
     const debugKey = process.env.DEBUG_KEY;
     if (!debugKey) {
