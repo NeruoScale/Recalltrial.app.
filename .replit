@@ -44,13 +44,14 @@ waitForPort = 5000
 [userenv.shared]
 CRON_KEY = "recalltrial-cron-secret-2026"
 APP_URL = "https://recalltrial.replit.app"
-STRIPE_PRO_MONTHLY_PRICE_ID = "price_1T2MUXB5tg0rN4pMYRG5WtK3"
+STRIPE_PRO_MONTHLY_PRICE_ID = "price_1T3W9IB5tg0rN4pMXR9pbAmO"
 STRIPE_PRO_YEARLY_PRICE_ID = "price_1T2MUXB5tg0rN4pMDtjoarYW"
 STRIPE_PREMIUM_MONTHLY_PRICE_ID = "price_1T2MUJB5tg0rN4pMN2h4xNKY"
 STRIPE_PREMIUM_YEARLY_PRICE_ID = "price_1T2MUJB5tg0rN4pMGWBEor9H"
 BILLING_ENABLED = "true"
 ADMIN_KEY = "b4a4896a3f1be72301af5e5f21ef226b"
 FROM_EMAIL = "RecallTrial <notifications@recalltrial.app>"
+STRIPE_PLUS_MONTHLY_PRICE_ID = "price_1T3W9HB5tg0rN4pMc9GIm1dt"
 
 [userenv.development]
 DEBUG_KEY = "test-debug-key-2026"
