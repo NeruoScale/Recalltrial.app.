@@ -11,6 +11,9 @@ import Dashboard from "@/pages/dashboard";
 import TrialNew from "@/pages/trial-new";
 import TrialDetail from "@/pages/trial-detail";
 import SettingsPage from "@/pages/settings";
+import ReviewsPage from "@/pages/reviews";
+import AdminReviewsPage from "@/pages/admin-reviews";
+import ReviewNewPage from "@/pages/review-new";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -23,6 +26,9 @@ function Router() {
       <Route path="/trials/new" component={TrialNew} />
       <Route path="/trials/:id" component={TrialDetail} />
       <Route path="/settings" component={SettingsPage} />
+      <Route path="/reviews" component={ReviewsPage} />
+      <Route path="/admin/reviews" component={AdminReviewsPage} />
+      <Route path="/review/new" component={ReviewNewPage} />
       <Route component={NotFound} />
     </Switch>
   );

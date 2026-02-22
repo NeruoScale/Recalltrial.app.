@@ -69,6 +69,13 @@ shared/
 - POST /api/debug/send-test-email - Send test email (requires X-DEBUG-KEY header)
 - POST /api/debug/run-reminders-now - Manually trigger due reminders (requires X-DEBUG-KEY header)
 - POST /api/cron/reminders - Process due reminders (requires X-CRON-KEY header)
+- GET /api/reviews - All approved reviews (public)
+- GET /api/reviews/featured - Up to 6 approved reviews for landing page (public)
+- POST /api/reviews/submit - Submit a review (requires auth, source=in_app, pending approval)
+- GET /api/admin/reviews - All reviews for admin (requires ADMIN_KEY)
+- POST /api/admin/reviews/:id/approve - Approve a review (requires ADMIN_KEY)
+- POST /api/admin/reviews/:id/feature - Toggle featured status (requires ADMIN_KEY)
+- DELETE /api/admin/reviews/:id - Delete a review (requires ADMIN_KEY)
 
 ## Early Access Mode
 - **BILLING_ENABLED=false**: All billing routes return 404, Stripe initialization skipped
@@ -87,6 +94,7 @@ shared/
 - **trials**: id, userId, serviceName, serviceUrl, domain, iconUrl, cancelUrl, startDate, endDate, renewalPrice, currency, status, canceledAt, createdAt
 - **reminders**: id, trialId, userId, remindAt, type, status (PENDING/SENT/SKIPPED/FAILED), sentAt, provider, providerMessageId, lastError, createdAt
 - **analytics_events**: id, userId, event, metadata (JSON string), createdAt
+- **reviews**: id, rating (1-5), text, name, location, source (manual/in_app/import), isApproved, isFeatured, userId, createdAt
 
 ## Environment Variables
 - DATABASE_URL - PostgreSQL connection string

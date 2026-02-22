@@ -1,14 +1,32 @@
 import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
-import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap } from "lucide-react";
+import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap, Star } from "lucide-react";
+import type { Review } from "@shared/schema";
+
+function StarRating({ rating }: { rating: number }) {
+  return (
+    <div className="flex gap-0.5">
+      {[1, 2, 3, 4, 5].map((i) => (
+        <Star
+          key={i}
+          className={`h-4 w-4 ${i <= rating ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground/30"}`}
+        />
+      ))}
+    </div>
+  );
+}
 
 export default function Landing() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
+  const { data: featuredReviews = [] } = useQuery<Review[]>({
+    queryKey: ["/api/reviews/featured"],
+  });
 
   useEffect(() => {
     if (user) setLocation("/dashboard");
@@ -101,6 +119,38 @@ export default function Landing() {
             </div>
           </div>
         </section>
+
+        {featuredReviews.length > 0 && (
+          <section className="py-16 px-4 bg-muted/20" data-testid="section-reviews">
+            <div className="max-w-4xl mx-auto">
+              <h2 className="text-2xl font-bold text-center mb-2">What People Say</h2>
+              <p className="text-center text-muted-foreground mb-10">
+                Trusted by people who hate surprise renewals.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {featuredReviews.slice(0, 6).map((review) => (
+                  <Card key={review.id} data-testid={`card-review-${review.id}`}>
+                    <CardContent className="py-5">
+                      <StarRating rating={review.rating} />
+                      <p className="text-sm text-foreground leading-relaxed mt-3 mb-3">"{review.text}"</p>
+                      <div className="text-xs text-muted-foreground">
+                        {review.name && <span className="font-medium text-foreground">{review.name}</span>}
+                        {review.name && review.location && <span> · </span>}
+                        {review.location && <span>{review.location}</span>}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+              <div className="text-center mt-8">
+                <Button variant="outline" onClick={() => setLocation("/reviews")} data-testid="link-all-reviews">
+                  View all reviews
+                  <ArrowRight className="h-4 w-4 ml-1" />
+                </Button>
+              </div>
+            </div>
+          </section>
+        )}
 
         <section className="py-16 px-4">
           <div className="max-w-2xl mx-auto text-center mb-10">

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Bell, ArrowLeft, Loader2, Save } from "lucide-react";
+import { Bell, ArrowLeft, Loader2, Save, Star } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const TIMEZONES = [
@@ -137,6 +137,19 @@ export default function SettingsPage() {
                 1 day before the trial ends at 10:00 AM
               </li>
             </ul>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="py-5 flex items-center justify-between">
+            <div>
+              <h3 className="font-semibold text-sm">Enjoying RecallTrial?</h3>
+              <p className="text-xs text-muted-foreground">Share your experience and help others discover us.</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => setLocation("/review/new")} data-testid="link-leave-review">
+              <Star className="h-4 w-4 mr-1" />
+              Leave a Review
+            </Button>
           </CardContent>
         </Card>
       </main>
