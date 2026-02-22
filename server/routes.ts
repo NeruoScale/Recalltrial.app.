@@ -10,8 +10,13 @@ import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
 
-const ACTIVE_TRIAL_LIMIT = 3;
+const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
+
+function getTrialLimit(plan: string): number | null {
+  if (plan === "PLUS" || plan === "PRO" || plan === "PREMIUM") return null;
+  return FREE_TRIAL_LIMIT;
+}
 
 declare module "express-session" {
   interface SessionData {
@@ -176,12 +181,16 @@ export async function registerRoutes(
     const user = await storage.getUserById(req.session.userId!);
     if (!user) return res.status(401).json({ message: "User not found" });
     const activeCount = await storage.countActiveTrials(user.id);
+    const limit = getTrialLimit(user.plan);
     return res.json({
       id: user.id,
       email: user.email,
       timezone: user.timezone,
+      plan: user.plan,
+      subscriptionStatus: user.subscriptionStatus,
+      currentPeriodEnd: user.currentPeriodEnd,
       activeTrialCount: activeCount,
-      trialLimit: ACTIVE_TRIAL_LIMIT,
+      trialLimit: limit,
       billingEnabled: BILLING_ENABLED,
       createdAt: user.createdAt,
     });
@@ -266,12 +275,15 @@ export async function registerRoutes(
       const user = await storage.getUserById(req.session.userId!);
       if (!user) return res.status(401).json({ message: "User not found" });
 
-      const activeCount = await storage.countActiveTrials(user.id);
-      if (activeCount >= ACTIVE_TRIAL_LIMIT) {
-        return res.status(403).json({
-          error: "TRIAL_LIMIT_REACHED",
-          message: "Free Early Access allows up to 3 active trials.",
-        });
+      const limit = getTrialLimit(user.plan);
+      if (limit !== null) {
+        const activeCount = await storage.countActiveTrials(user.id);
+        if (activeCount >= limit) {
+          return res.status(403).json({
+            error: "TRIAL_LIMIT_REACHED",
+            message: `Free plan allows up to ${limit} active trials. Upgrade to Plus for unlimited trials.`,
+          });
+        }
       }
 
       const data = parsed.data;
@@ -387,7 +399,7 @@ export async function registerRoutes(
         timezone: user.timezone,
         plan: user.plan,
         activeTrialCount: activeCount,
-        trialLimit: ACTIVE_TRIAL_LIMIT,
+        trialLimit: getTrialLimit(user.plan),
       });
     } catch (err) {
       console.error("Billing sync error:", err);
@@ -434,35 +446,47 @@ export async function registerRoutes(
 
   app.get("/api/billing/prices", requireBilling, async (_req: Request, res: Response) => {
     return res.json({
+      plus: {
+        monthly: {
+          priceId: process.env.STRIPE_PLUS_MONTHLY_PRICE_ID,
+          amount: 399,
+          currency: "usd",
+          interval: "month",
+        },
+      },
       pro: {
         monthly: {
           priceId: process.env.STRIPE_PRO_MONTHLY_PRICE_ID,
-          amount: 499,
+          amount: 799,
           currency: "usd",
           interval: "month",
-        },
-        yearly: {
-          priceId: process.env.STRIPE_PRO_YEARLY_PRICE_ID,
-          amount: 4990,
-          currency: "usd",
-          interval: "year",
-        },
-      },
-      premium: {
-        monthly: {
-          priceId: process.env.STRIPE_PREMIUM_MONTHLY_PRICE_ID,
-          amount: 999,
-          currency: "usd",
-          interval: "month",
-        },
-        yearly: {
-          priceId: process.env.STRIPE_PREMIUM_YEARLY_PRICE_ID,
-          amount: 9990,
-          currency: "usd",
-          interval: "year",
         },
       },
     });
+  });
+
+  app.post("/api/billing/create-portal-session", requireBilling, requireAuth, async (req: Request, res: Response) => {
+    try {
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+      if (!user.stripeCustomerId) {
+        return res.status(400).json({ message: "No billing account found" });
+      }
+
+      const { getUncachableStripeClient } = await import("./stripeClient");
+      const stripe = await getUncachableStripeClient();
+      const appUrl = process.env.APP_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+
+      const portalSession = await stripe.billingPortal.sessions.create({
+        customer: user.stripeCustomerId,
+        return_url: `${appUrl}/settings`,
+      });
+
+      return res.json({ url: portalSession.url });
+    } catch (err) {
+      console.error("Portal session error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
   });
 
   async function processRemindersNow() {

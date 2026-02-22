@@ -1,7 +1,7 @@
 # RecallTrial
 
 ## Overview
-RecallTrial is a trust-first free-trial reminder app. Users add free trials manually, and the app sends email reminders before renewal with cancel links. Currently in **Free Early Access** mode — all billing features are hidden behind `BILLING_ENABLED=false` flag (Stripe code preserved for future paid launch).
+RecallTrial is a trust-first free-trial reminder app. Users add free trials manually, and the app sends email reminders before renewal with cancel links. Supports 3 pricing plans (Free/Plus/Pro) with Stripe billing in test mode.
 
 **Tagline:** "Never get charged for a free trial again."
 
@@ -11,7 +11,7 @@ RecallTrial is a trust-first free-trial reminder app. Users add free trials manu
 - **Database:** PostgreSQL with Drizzle ORM
 - **Auth:** Email/password with bcrypt + express-session (pg-backed sessions)
 - **Email:** Resend (graceful fallback to console logging if API key not set)
-- **Payments:** Stripe (frozen behind BILLING_ENABLED flag, code intact via stripe-replit-sync)
+- **Payments:** Stripe (test mode, BILLING_ENABLED=true, Replit connector for SDK init)
 - **Search:** Fuse.js fuzzy search over 585-service catalog
 - **Scheduling:** Cron endpoint at POST /api/cron/reminders (secured via X-CRON-KEY header)
 - **Reminder Logic:** Adaptive offsets based on time remaining: >=72h uses THREE_DAYS+ONE_DAY, <72h uses TWENTY_FOUR_HOURS+THREE_HOURS, <24h uses SIX_HOURS+ONE_HOUR. Past reminders filtered out (>now+2min)
@@ -23,13 +23,15 @@ client/src/
   lib/auth.tsx      - Auth context (login/signup/logout, billingEnabled flag)
   lib/queryClient.ts - TanStack Query setup
   pages/
-    landing.tsx     - Public landing page (Free Early Access messaging)
+    landing.tsx     - Public landing page with pricing CTA
     auth-login.tsx  - Login page
     auth-signup.tsx - Signup page
-    dashboard.tsx   - Main dashboard (urgent/upcoming/canceled trials, 3-trial limit)
+    dashboard.tsx   - Main dashboard (urgent/upcoming/canceled trials, plan-aware limits)
     trial-new.tsx   - Add new trial form with fuzzy service search + calendar pickers
     trial-detail.tsx - Trial detail with reminders, calendar export
-    settings.tsx    - User settings (timezone)
+    settings.tsx    - User settings (timezone, plan management, billing portal)
+    pricing.tsx     - Pricing page (Free/Plus/Pro plans with Stripe checkout)
+    billing-success.tsx - Post-checkout success page with plan sync
   components/
     trial-card.tsx  - Reusable trial card component
 server/
@@ -64,8 +66,11 @@ shared/
 - GET /api/trials/:id/cancel-click - Track cancel link click + redirect to cancel URL
 - GET /api/services/search?q= - Fuzzy search 585 services (fuse.js, threshold 0.35, top 10)
 - GET /api/admin/metrics - Admin metrics (requires X-ADMIN-KEY header or ?key= query param)
-- POST /api/billing/* - Billing routes (gated, return 404 when BILLING_ENABLED=false)
-- POST /api/stripe/webhook - Stripe webhook (gated, return 404 when BILLING_ENABLED=false)
+- GET /api/billing/prices - Plan price IDs (gated by BILLING_ENABLED)
+- POST /api/billing/create-checkout-session - Stripe checkout (gated)
+- POST /api/billing/sync - Sync subscription status from Stripe (gated)
+- POST /api/billing/create-portal-session - Stripe billing portal (gated)
+- POST /api/stripe/webhook - Stripe webhook (gated)
 - POST /api/debug/send-test-email - Send test email (requires X-DEBUG-KEY header)
 - POST /api/debug/run-reminders-now - Manually trigger due reminders (requires X-DEBUG-KEY header)
 - POST /api/cron/reminders - Process due reminders (requires X-CRON-KEY header)
@@ -77,12 +82,13 @@ shared/
 - POST /api/admin/reviews/:id/feature - Toggle featured status (requires ADMIN_KEY)
 - DELETE /api/admin/reviews/:id - Delete a review (requires ADMIN_KEY)
 
-## Early Access Mode
-- **BILLING_ENABLED=false**: All billing routes return 404, Stripe initialization skipped
-- **Trial limit: 3** active trials per user (was 5 for Free plan)
-- **No pricing page** in frontend routes when billing disabled
-- All Stripe code preserved in codebase for future paid launch
-- Landing page shows "100% Free during Early Access" messaging
+## Pricing Plans
+- **Free ($0):** 3 active trials, email reminders, cancel link storage
+- **Plus ($3.99/mo):** Unlimited trials, calendar export, reminder customization
+- **Pro ($7.99/mo):** Everything in Plus, email scanning (coming soon), priority support
+- **BILLING_ENABLED=true**: Stripe checkout, billing portal, webhook sync all active
+- Trial limits: Free=3, Plus/Pro=unlimited (null limit)
+- Stripe products created via `npx tsx server/seed-products.ts`
 
 ## Analytics
 - **analytics_events** table tracks: signup, login, trial_created, trial_canceled, cancel_link_clicked
@@ -90,7 +96,7 @@ shared/
 - Admin metrics endpoint at GET /api/admin/metrics (protected by ADMIN_KEY env var)
 
 ## Database Models
-- **users**: id, email, passwordHash, timezone, plan (FREE/PRO/PREMIUM), stripeCustomerId, stripeSubscriptionId, subscriptionStatus, currentPeriodEnd, createdAt
+- **users**: id, email, passwordHash, timezone, plan (FREE/PLUS/PRO/PREMIUM), stripeCustomerId, stripeSubscriptionId, subscriptionStatus, currentPeriodEnd, createdAt
 - **trials**: id, userId, serviceName, serviceUrl, domain, iconUrl, cancelUrl, startDate, endDate, renewalPrice, currency, status, canceledAt, createdAt
 - **reminders**: id, trialId, userId, remindAt, type, status (PENDING/SENT/SKIPPED/FAILED), sentAt, provider, providerMessageId, lastError, createdAt
 - **analytics_events**: id, userId, event, metadata (JSON string), createdAt
@@ -107,10 +113,8 @@ shared/
 - FROM_EMAIL - Email sender address (default: "RecallTrial <onboarding@resend.dev>", currently set to notifications@recalltrial.app)
 - REPLY_TO_EMAIL - Reply-to address for emails (optional)
 - DEBUG_KEY - Secret key for debug endpoints (send-test-email, run-reminders-now)
+- STRIPE_PLUS_MONTHLY_PRICE_ID - Stripe price ID for Plus monthly
 - STRIPE_PRO_MONTHLY_PRICE_ID - Stripe price ID for Pro monthly
-- STRIPE_PRO_YEARLY_PRICE_ID - Stripe price ID for Pro yearly
-- STRIPE_PREMIUM_MONTHLY_PRICE_ID - Stripe price ID for Premium monthly
-- STRIPE_PREMIUM_YEARLY_PRICE_ID - Stripe price ID for Premium yearly
 
 ## Branding
 - App name: RecallTrial

@@ -5,9 +5,10 @@ import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Bell, ArrowLeft, Loader2, Save, Star } from "lucide-react";
+import { Bell, ArrowLeft, Loader2, Save, Star, CreditCard, Sparkles } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const TIMEZONES = [
@@ -56,10 +57,27 @@ export default function SettingsPage() {
     },
   });
 
+  const portalMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/billing/create-portal-session");
+      return res.json();
+    },
+    onSuccess: (data: { url: string }) => {
+      if (data.url) window.location.href = data.url;
+    },
+    onError: (err: any) => {
+      toast({ title: "Unable to open billing portal", description: err.message, variant: "destructive" });
+    },
+  });
+
   if (!user) {
     setLocation("/auth/login");
     return null;
   }
+
+  const planLabels: Record<string, string> = { FREE: "Free", PLUS: "Plus", PRO: "Pro", PREMIUM: "Premium" };
+  const planLabel = planLabels[user.plan] || user.plan;
+  const isPaid = user.plan !== "FREE";
 
   return (
     <div className="min-h-screen bg-background">
@@ -116,6 +134,57 @@ export default function SettingsPage() {
               )}
               Save settings
             </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base">Your Plan</CardTitle>
+              <Badge variant={isPaid ? "default" : "secondary"} data-testid="badge-plan">
+                {planLabel}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {isPaid ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  You're on the <span className="font-medium text-foreground">{planLabel}</span> plan.
+                  {user.currentPeriodEnd && (
+                    <> Renews on {new Date(user.currentPeriodEnd).toLocaleDateString()}.</>
+                  )}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => portalMutation.mutate()}
+                  disabled={portalMutation.isPending}
+                  data-testid="button-manage-billing"
+                >
+                  {portalMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : (
+                    <CreditCard className="h-4 w-4 mr-1" />
+                  )}
+                  Manage Billing
+                </Button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  You're on the Free plan (3 active trials). Upgrade for unlimited trials.
+                </p>
+                <Button
+                  size="sm"
+                  onClick={() => setLocation("/pricing")}
+                  data-testid="button-upgrade"
+                >
+                  <Sparkles className="h-4 w-4 mr-1" />
+                  View Plans
+                </Button>
+              </>
+            )}
           </CardContent>
         </Card>
 

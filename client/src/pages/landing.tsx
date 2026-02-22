@@ -58,7 +58,7 @@ export default function Landing() {
           <div className="max-w-3xl mx-auto text-center">
             <Badge variant="secondary" className="mb-6">
               <Zap className="h-3 w-3 mr-1" />
-              100% Free during Early Access
+              Start Free — No credit card required
             </Badge>
             <h1 className="text-4xl md:text-6xl font-bold tracking-tight mb-6" data-testid="text-headline">
               Never get charged for a free trial again.
@@ -152,16 +152,20 @@ export default function Landing() {
           </section>
         )}
 
-        <section className="py-16 px-4">
+        <section className="py-16 px-4" data-testid="section-pricing-cta">
           <div className="max-w-2xl mx-auto text-center mb-10">
             <Badge variant="secondary" className="mb-4">
               <Zap className="h-3 w-3 mr-1" />
-              Early Access
+              Pricing
             </Badge>
-            <h2 className="text-2xl font-bold mb-3">100% Free during Early Access</h2>
-            <p className="text-muted-foreground">
-              Track up to 3 active trials completely free. No credit card required.
+            <h2 className="text-2xl font-bold mb-3">Start free. Upgrade when you need more.</h2>
+            <p className="text-muted-foreground mb-6">
+              Free plan includes 3 active trials. Plus ($3.99/mo) and Pro ($7.99/mo) offer unlimited trials and more.
             </p>
+            <Button variant="outline" onClick={() => setLocation("/pricing")} data-testid="link-pricing">
+              View Plans
+              <ArrowRight className="h-4 w-4 ml-1" />
+            </Button>
           </div>
         </section>
 

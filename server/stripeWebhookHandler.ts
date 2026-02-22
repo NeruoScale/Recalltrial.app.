@@ -2,7 +2,7 @@ import { db } from "./db";
 import { users } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
 
-async function determinePlanFromSubscription(subscriptionId: string): Promise<"PRO" | "PREMIUM"> {
+async function determinePlanFromSubscription(subscriptionId: string): Promise<"PLUS" | "PRO"> {
   try {
     const result = await db.execute(
       sql`SELECT si.price, p.product FROM stripe.subscription_items si
@@ -12,12 +12,11 @@ async function determinePlanFromSubscription(subscriptionId: string): Promise<"P
     );
     const item = result.rows[0] as any;
     if (item) {
-      const premiumPriceIds = [
-        process.env.STRIPE_PREMIUM_MONTHLY_PRICE_ID,
-        process.env.STRIPE_PREMIUM_YEARLY_PRICE_ID,
+      const proPriceIds = [
+        process.env.STRIPE_PRO_MONTHLY_PRICE_ID,
       ].filter(Boolean);
-      if (premiumPriceIds.includes(item.price)) {
-        return "PREMIUM";
+      if (proPriceIds.includes(item.price)) {
+        return "PRO";
       }
 
       const prodResult = await db.execute(
@@ -26,13 +25,13 @@ async function determinePlanFromSubscription(subscriptionId: string): Promise<"P
       const prod = prodResult.rows[0] as any;
       if (prod?.metadata) {
         const meta = typeof prod.metadata === 'string' ? JSON.parse(prod.metadata) : prod.metadata;
-        if (meta.tier === 'premium') return "PREMIUM";
+        if (meta.tier === 'pro') return "PRO";
       }
     }
   } catch (err) {
     console.error("Error determining plan from subscription:", err);
   }
-  return "PRO";
+  return "PLUS";
 }
 
 export async function syncUserSubscriptionFromStripe(stripeCustomerId: string): Promise<void> {
@@ -74,7 +73,7 @@ export async function syncUserSubscriptionFromStripe(stripeCustomerId: string): 
       unpaid: "PAST_DUE",
     };
 
-    let plan: "FREE" | "PRO" | "PREMIUM" = "FREE";
+    let plan: "FREE" | "PLUS" | "PRO" = "FREE";
     if (isActive) {
       plan = await determinePlanFromSubscription(sub.id);
     }

@@ -14,6 +14,8 @@ import SettingsPage from "@/pages/settings";
 import ReviewsPage from "@/pages/reviews";
 import AdminReviewsPage from "@/pages/admin-reviews";
 import ReviewNewPage from "@/pages/review-new";
+import PricingPage from "@/pages/pricing";
+import BillingSuccess from "@/pages/billing-success";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -26,6 +28,8 @@ function Router() {
       <Route path="/trials/new" component={TrialNew} />
       <Route path="/trials/:id" component={TrialDetail} />
       <Route path="/settings" component={SettingsPage} />
+      <Route path="/pricing" component={PricingPage} />
+      <Route path="/billing/success" component={BillingSuccess} />
       <Route path="/reviews" component={ReviewsPage} />
       <Route path="/admin/reviews" component={AdminReviewsPage} />
       <Route path="/review/new" component={ReviewNewPage} />

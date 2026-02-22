@@ -7,8 +7,11 @@ type AuthUser = {
   id: string;
   email: string;
   timezone: string;
+  plan: string;
+  subscriptionStatus: string | null;
+  currentPeriodEnd: string | null;
   activeTrialCount: number;
-  trialLimit: number;
+  trialLimit: number | null;
   billingEnabled: boolean;
   createdAt: string;
 };

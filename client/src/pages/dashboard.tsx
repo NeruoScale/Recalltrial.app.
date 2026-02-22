@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrialCard } from "@/components/trial-card";
-import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Zap, ArrowRight } from "lucide-react";
+import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Zap, ArrowRight, Sparkles } from "lucide-react";
 import type { Trial } from "@shared/schema";
 import { differenceInDays, parseISO } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -60,12 +60,15 @@ export default function Dashboard() {
   const activeCount = user.activeTrialCount ?? 0;
   const limit = user.trialLimit;
   const atLimit = limit !== null && activeCount >= limit;
+  const isFree = (user.plan || "FREE") === "FREE";
 
   const handleAddTrial = () => {
     if (atLimit) {
       toast({
         title: "Trial limit reached",
-        description: "Free Early Access allows up to 3 active trials. Cancel an existing trial to add a new one.",
+        description: isFree
+          ? "Free plan allows up to 3 active trials. Upgrade to Plus for unlimited."
+          : "Cancel an existing trial to add a new one.",
         variant: "destructive",
       });
     } else {
@@ -107,7 +110,9 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold" data-testid="text-page-title">Your Trials</h1>
             <p className="text-sm text-muted-foreground" data-testid="text-trial-count">
-              {activeCount} of {limit} active trial{activeCount !== 1 ? "s" : ""} used
+              {limit !== null
+                ? `${activeCount} of ${limit} active trial${activeCount !== 1 ? "s" : ""} used`
+                : `${activeCount} active trial${activeCount !== 1 ? "s" : ""}`}
             </p>
           </div>
           <Button onClick={handleAddTrial} disabled={atLimit} data-testid="button-add-trial">
@@ -119,8 +124,16 @@ export default function Dashboard() {
         {atLimit && (
           <div className="mb-6 p-3 rounded-md border bg-muted/50 flex items-center justify-between gap-3 flex-wrap" data-testid="banner-limit-warning">
             <p className="text-sm">
-              You've reached the Early Access limit of 3 active trials. Cancel an existing trial to add a new one.
+              {isFree
+                ? "You've reached the Free plan limit of 3 active trials."
+                : "You've reached your trial limit. Cancel an existing trial to add a new one."}
             </p>
+            {isFree && user.billingEnabled && (
+              <Button size="sm" onClick={() => setLocation("/pricing")} data-testid="button-upgrade-cta">
+                <Sparkles className="h-4 w-4 mr-1" />
+                Upgrade to Plus
+              </Button>
+            )}
           </div>
         )}
 
