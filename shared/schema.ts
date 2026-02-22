@@ -6,7 +6,7 @@ import { z } from "zod";
 export const trialStatusEnum = pgEnum("trial_status", ["ACTIVE", "CANCELED"]);
 export const reminderTypeEnum = pgEnum("reminder_type", ["THREE_DAYS", "ONE_DAY", "TWENTY_FOUR_HOURS", "THREE_HOURS", "SIX_HOURS", "ONE_HOUR"]);
 export const reminderStatusEnum = pgEnum("reminder_status", ["PENDING", "SENT", "SKIPPED", "FAILED"]);
-export const planEnum = pgEnum("plan", ["FREE", "PRO", "PREMIUM"]);
+export const planEnum = pgEnum("plan", ["FREE", "PLUS", "PRO", "PREMIUM"]);
 export const userSubStatusEnum = pgEnum("user_sub_status", ["ACTIVE", "CANCELED", "PAST_DUE", "INCOMPLETE"]);
 
 export const users = pgTable("users", {
