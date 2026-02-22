@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -10,14 +11,15 @@ import { useToast } from "@/hooks/use-toast";
 
 type PriceInfo = { priceId: string; amount: number; currency: string; interval: string };
 type PricesData = {
-  plus: { monthly: PriceInfo };
-  pro: { monthly: PriceInfo };
+  plus: { monthly: PriceInfo; yearly: PriceInfo };
+  pro: { monthly: PriceInfo; yearly: PriceInfo };
 };
 
 export default function PricingPage() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const [billing, setBilling] = useState<"monthly" | "yearly">("monthly");
 
   const { data: prices } = useQuery<PricesData>({
     queryKey: ["/api/billing/prices"],
@@ -44,7 +46,7 @@ export default function PricingPage() {
       setLocation("/auth/signup");
       return;
     }
-    const priceId = prices?.[planId as keyof PricesData]?.monthly?.priceId;
+    const priceId = prices?.[planId as keyof PricesData]?.[billing]?.priceId;
     if (priceId) {
       checkoutMutation.mutate(priceId);
     } else {
@@ -53,13 +55,16 @@ export default function PricingPage() {
   };
 
   const userPlan = (user?.plan || "FREE").toUpperCase();
+  const planOrder: Record<string, number> = { FREE: 0, PLUS: 1, PRO: 2, PREMIUM: 3 };
 
   const plans = [
     {
       id: "free",
       dbPlan: "FREE",
       name: "Free",
-      price: "$0",
+      monthlyPrice: "$0",
+      yearlyPrice: "$0",
+      yearlySub: "",
       period: "forever",
       description: "Get started with the basics",
       features: [
@@ -75,8 +80,10 @@ export default function PricingPage() {
       id: "plus",
       dbPlan: "PLUS",
       name: "Plus",
-      price: "$3.99",
-      period: "/month",
+      monthlyPrice: "$3.99",
+      yearlyPrice: "$40.70",
+      yearlySub: "$3.39/mo",
+      period: billing === "monthly" ? "/month" : "/year",
       description: "Unlimited trials + calendar",
       features: [
         "Unlimited active trials",
@@ -91,8 +98,10 @@ export default function PricingPage() {
       id: "pro",
       dbPlan: "PRO",
       name: "Pro",
-      price: "$7.99",
-      period: "/month",
+      monthlyPrice: "$7.99",
+      yearlyPrice: "$81.50",
+      yearlySub: "$6.79/mo",
+      period: billing === "monthly" ? "/month" : "/year",
       description: "Everything + email scanning",
       features: [
         "Everything in Plus",
@@ -104,8 +113,6 @@ export default function PricingPage() {
       highlight: false,
     },
   ];
-
-  const planOrder: Record<string, number> = { FREE: 0, PLUS: 1, PRO: 2, PREMIUM: 3 };
 
   return (
     <div className="min-h-screen bg-background">
@@ -125,7 +132,25 @@ export default function PricingPage() {
       <main className="max-w-4xl mx-auto px-4 py-12">
         <div className="text-center mb-10">
           <h1 className="text-3xl font-bold mb-2" data-testid="text-pricing-title">Simple, honest pricing</h1>
-          <p className="text-muted-foreground">Start free. Upgrade when you need more.</p>
+          <p className="text-muted-foreground mb-6">Start free. Upgrade when you need more.</p>
+
+          <div className="inline-flex items-center rounded-lg border p-1 bg-muted/50" data-testid="toggle-billing">
+            <button
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${billing === "monthly" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              onClick={() => setBilling("monthly")}
+              data-testid="toggle-monthly"
+            >
+              Monthly
+            </button>
+            <button
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5 ${billing === "yearly" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              onClick={() => setBilling("yearly")}
+              data-testid="toggle-yearly"
+            >
+              Yearly
+              <Badge variant="secondary" className="text-xs px-1.5 py-0">Save 15%</Badge>
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -133,6 +158,7 @@ export default function PricingPage() {
             const isCurrent = userPlan === plan.dbPlan;
             const isUpgrade = (planOrder[plan.dbPlan] || 0) > (planOrder[userPlan] || 0);
             const Icon = plan.icon;
+            const displayPrice = billing === "monthly" ? plan.monthlyPrice : plan.yearlyPrice;
 
             return (
               <Card
@@ -152,9 +178,14 @@ export default function PricingPage() {
                   <CardTitle className="text-xl">{plan.name}</CardTitle>
                   <CardDescription>{plan.description}</CardDescription>
                   <div className="mt-3">
-                    <span className="text-3xl font-bold">{plan.price}</span>
-                    <span className="text-muted-foreground text-sm">{plan.period}</span>
+                    <span className="text-3xl font-bold" data-testid={`text-price-${plan.id}`}>{displayPrice}</span>
+                    <span className="text-muted-foreground text-sm">{plan.id === "free" ? " forever" : plan.period}</span>
                   </div>
+                  {billing === "yearly" && plan.yearlySub && (
+                    <p className="text-xs text-muted-foreground mt-1" data-testid={`text-yearly-equiv-${plan.id}`}>
+                      That's just <span className="font-semibold text-foreground">{plan.yearlySub}</span> — save 15%
+                    </p>
+                  )}
                 </CardHeader>
                 <CardContent className="flex-1 flex flex-col">
                   <ul className="space-y-2.5 flex-1 mb-6">

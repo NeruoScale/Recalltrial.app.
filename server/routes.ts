@@ -453,6 +453,12 @@ export async function registerRoutes(
           currency: "usd",
           interval: "month",
         },
+        yearly: {
+          priceId: process.env.STRIPE_PLUS_YEARLY_PRICE_ID,
+          amount: 4070,
+          currency: "usd",
+          interval: "year",
+        },
       },
       pro: {
         monthly: {
@@ -460,6 +466,12 @@ export async function registerRoutes(
           amount: 799,
           currency: "usd",
           interval: "month",
+        },
+        yearly: {
+          priceId: process.env.STRIPE_PRO_YEARLY_PRICE_ID,
+          amount: 8150,
+          currency: "usd",
+          interval: "year",
         },
       },
     });

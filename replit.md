@@ -114,7 +114,9 @@ shared/
 - REPLY_TO_EMAIL - Reply-to address for emails (optional)
 - DEBUG_KEY - Secret key for debug endpoints (send-test-email, run-reminders-now)
 - STRIPE_PLUS_MONTHLY_PRICE_ID - Stripe price ID for Plus monthly
+- STRIPE_PLUS_YEARLY_PRICE_ID - Stripe price ID for Plus yearly (15% off)
 - STRIPE_PRO_MONTHLY_PRICE_ID - Stripe price ID for Pro monthly
+- STRIPE_PRO_YEARLY_PRICE_ID - Stripe price ID for Pro yearly (15% off)
 
 ## Branding
 - App name: RecallTrial
