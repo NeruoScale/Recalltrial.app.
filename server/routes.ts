@@ -116,11 +116,12 @@ export async function registerRoutes(
       secret: process.env.SESSION_SECRET || "recalltrial-dev-secret",
       resave: false,
       saveUninitialized: false,
+      proxy: true,
       cookie: {
         maxAge: 30 * 24 * 60 * 60 * 1000,
         httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
+        secure: true,
+        sameSite: "none",
       },
     })
   );
