@@ -9,6 +9,7 @@ import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
+import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -35,6 +36,29 @@ function requireBilling(_req: Request, res: Response, next: NextFunction) {
   if (!BILLING_ENABLED) {
     return res.status(404).json({ message: "Not found" });
   }
+  next();
+}
+
+async function requirePro(req: Request, res: Response, next: NextFunction) {
+  if (!req.session.userId) return res.status(401).json({ message: "Not authenticated" });
+  const user = await storage.getUserById(req.session.userId);
+  if (!user || (user.plan !== "PRO" && user.plan !== "PREMIUM")) {
+    return res.status(403).json({ code: "PRO_REQUIRED", message: "This feature requires a Pro plan." });
+  }
+  (req as any).currentUser = user;
+  next();
+}
+
+async function requireEmailScanning(req: Request, res: Response, next: NextFunction) {
+  if (!req.session.userId) return res.status(401).json({ message: "Not authenticated" });
+  const user = (req as any).currentUser || (await storage.getUserById(req.session.userId));
+  if (!user || (user.plan !== "PRO" && user.plan !== "PREMIUM")) {
+    return res.status(403).json({ code: "PRO_REQUIRED", message: "This feature requires a Pro plan." });
+  }
+  if (!user.emailScanningEnabled) {
+    return res.status(403).json({ code: "SCANNING_NOT_ENABLED", message: "Email scanning is not enabled." });
+  }
+  (req as any).currentUser = user;
   next();
 }
 
@@ -175,20 +199,172 @@ export async function registerRoutes(
       activeTrialCount: activeCount,
       trialLimit: limit,
       billingEnabled: BILLING_ENABLED,
+      emailScanningEnabled: user.emailScanningEnabled,
+      gmailConnected: user.gmailConnected,
+      lastEmailScanAt: user.lastEmailScanAt,
       createdAt: user.createdAt,
     });
   });
 
   app.patch("/api/auth/settings", requireAuth, async (req: Request, res: Response) => {
     try {
-      const { timezone } = req.body;
+      const userId = req.session.userId!;
+      const { timezone, emailScanningEnabled } = req.body;
+
+      if (emailScanningEnabled !== undefined) {
+        const user = await storage.getUserById(userId);
+        if (!user || (user.plan !== "PRO" && user.plan !== "PREMIUM")) {
+          return res.status(403).json({ code: "PRO_REQUIRED", message: "Email scanning requires Pro." });
+        }
+        const updated = await storage.toggleEmailScanning(userId, !!emailScanningEnabled);
+        return res.json({ emailScanningEnabled: updated.emailScanningEnabled });
+      }
+
       if (!timezone || typeof timezone !== "string") {
         return res.status(400).json({ message: "Invalid timezone" });
       }
-      const user = await storage.updateUserTimezone(req.session.userId!, timezone);
+      const user = await storage.updateUserTimezone(userId, timezone);
       return res.json({ id: user.id, email: user.email, timezone: user.timezone });
     } catch (err) {
       console.error("Settings error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // ===== GMAIL ROUTES =====
+
+  app.get("/api/gmail/connect", requireAuth, requirePro, async (req: Request, res: Response) => {
+    if (!isGoogleConfigured()) {
+      return res.status(503).json({ message: "Google OAuth is not configured on this server." });
+    }
+    const url = generateAuthUrl(req.session.userId!);
+    return res.redirect(url);
+  });
+
+  app.get("/api/gmail/callback", async (req: Request, res: Response) => {
+    const appUrl = process.env.APP_URL || "";
+    try {
+      const { code, state: userId } = req.query as { code?: string; state?: string };
+      if (!code || !userId) {
+        return res.redirect(`${appUrl}/settings?gmailError=missing_params`);
+      }
+      const tokens = await exchangeCodeForTokens(code);
+      await storage.updateUserGmailTokens(userId, tokens);
+      return res.redirect(`${appUrl}/settings?gmailConnected=1`);
+    } catch (err) {
+      console.error("Gmail callback error:", err);
+      return res.redirect(`${appUrl}/settings?gmailError=callback_failed`);
+    }
+  });
+
+  app.post("/api/gmail/disconnect", requireAuth, requirePro, async (req: Request, res: Response) => {
+    try {
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "Not found" });
+      if (user.gmailAccessToken) {
+        await revokeToken(user.gmailAccessToken);
+      }
+      await storage.clearUserGmailTokens(req.session.userId!);
+      return res.json({ success: true });
+    } catch (err) {
+      console.error("Gmail disconnect error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.post("/api/gmail/scan", requireAuth, requirePro, requireEmailScanning, async (req: Request, res: Response) => {
+    try {
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "Not found" });
+      if (!user.gmailConnected || !user.gmailAccessToken) {
+        return res.status(400).json({ message: "Gmail is not connected." });
+      }
+
+      const suggestions = await scanGmailForTrials(
+        user.gmailAccessToken,
+        user.gmailRefreshToken,
+        user.gmailTokenExpiry
+      );
+
+      let newCount = 0;
+      for (const s of suggestions) {
+        await storage.upsertSuggestedTrial({ ...s, userId: user.id });
+        newCount++;
+      }
+
+      await storage.updateLastEmailScan(user.id);
+      storage.logEvent(user.id, "email_scan", { foundCount: suggestions.length });
+
+      return res.json({ success: true, found: suggestions.length, newSuggestions: newCount });
+    } catch (err) {
+      console.error("Gmail scan error:", err);
+      return res.status(500).json({ message: "Internal error during scan." });
+    }
+  });
+
+  // ===== SUGGESTED TRIALS ROUTES =====
+
+  app.get("/api/suggested-trials", requireAuth, requireEmailScanning, async (req: Request, res: Response) => {
+    const suggestions = await storage.getSuggestedTrials(req.session.userId!);
+    return res.json(suggestions);
+  });
+
+  app.post("/api/suggested-trials/:id/add", requireAuth, requireEmailScanning, async (req: Request, res: Response) => {
+    try {
+      const userId = req.session.userId!;
+      const suggestion = await storage.getSuggestedTrialById(req.params.id, userId);
+      if (!suggestion) return res.status(404).json({ message: "Suggestion not found" });
+
+      const user = await storage.getUserById(userId);
+      if (!user) return res.status(401).json({ message: "Not found" });
+
+      const startDate = new Date().toISOString().slice(0, 10);
+      const endDate = suggestion.endDateGuess || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+
+      const domain = suggestion.fromDomain || "";
+      const serviceUrl = domain ? `https://${domain}` : "";
+      const iconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=64` : null;
+
+      const trial = await storage.createTrial({
+        userId,
+        serviceName: suggestion.serviceGuess || suggestion.fromDomain || "Unknown Service",
+        serviceUrl,
+        domain,
+        iconUrl,
+        cancelUrl: null,
+        startDate,
+        endDate,
+        renewalPrice: suggestion.amountGuess ? String(suggestion.amountGuess) : null,
+        currency: suggestion.currencyGuess || "USD",
+        status: "ACTIVE",
+      });
+
+      const now = new Date();
+      const tz = user.timezone || "Asia/Qatar";
+      const reminderPlans = computeReminders(endDate, now, tz);
+      for (const plan of reminderPlans) {
+        await storage.createReminder({
+          trialId: trial.id, userId, remindAt: plan.remindAt, type: plan.type as any,
+        });
+      }
+
+      await storage.markSuggestedTrialAdded(suggestion.id, userId);
+      storage.logEvent(userId, "trial_created", { trialId: trial.id, serviceName: trial.serviceName, source: "suggestion" });
+
+      return res.json({ success: true, trial });
+    } catch (err) {
+      console.error("Add suggested trial error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.post("/api/suggested-trials/:id/ignore", requireAuth, requireEmailScanning, async (req: Request, res: Response) => {
+    try {
+      const result = await storage.markSuggestedTrialIgnored(req.params.id, req.session.userId!);
+      if (!result) return res.status(404).json({ message: "Suggestion not found" });
+      return res.json({ success: true });
+    } catch (err) {
+      console.error("Ignore suggestion error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });
@@ -656,6 +832,42 @@ export async function registerRoutes(
       return res.json(result);
     } catch (err) {
       console.error("Cron error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.post("/api/cron/email-scan", async (req: Request, res: Response) => {
+    const cronKey = req.headers["x-cron-key"];
+    if (cronKey !== process.env.CRON_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    try {
+      const proUsers = await storage.getProUsersWithScanningEnabled();
+      const batch = proUsers.slice(0, 10);
+      const results: { userId: string; found: number; error?: string }[] = [];
+
+      for (const user of batch) {
+        if (!user.gmailAccessToken) continue;
+        try {
+          const suggestions = await scanGmailForTrials(
+            user.gmailAccessToken,
+            user.gmailRefreshToken,
+            user.gmailTokenExpiry
+          );
+          for (const s of suggestions) {
+            await storage.upsertSuggestedTrial({ ...s, userId: user.id });
+          }
+          await storage.updateLastEmailScan(user.id);
+          results.push({ userId: user.id, found: suggestions.length });
+        } catch (err: any) {
+          results.push({ userId: user.id, found: 0, error: err.message });
+        }
+      }
+
+      return res.json({ usersScanned: batch.length, results });
+    } catch (err) {
+      console.error("Cron email-scan error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

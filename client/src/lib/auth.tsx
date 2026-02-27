@@ -13,6 +13,9 @@ type AuthUser = {
   activeTrialCount: number;
   trialLimit: number | null;
   billingEnabled: boolean;
+  emailScanningEnabled: boolean;
+  gmailConnected: boolean;
+  lastEmailScanAt: string | null;
   createdAt: string;
 };
 

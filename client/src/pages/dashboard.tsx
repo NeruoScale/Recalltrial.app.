@@ -5,10 +5,11 @@ import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TrialCard } from "@/components/trial-card";
-import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Zap, ArrowRight, Sparkles } from "lucide-react";
-import type { Trial } from "@shared/schema";
+import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Zap, ArrowRight, Sparkles, CheckCircle, X, Mail } from "lucide-react";
+import type { Trial, SuggestedTrial } from "@shared/schema";
 import { differenceInDays, parseISO } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 
@@ -22,6 +23,15 @@ export default function Dashboard() {
     queryFn: getQueryFn({ on401: "throw" }),
   });
 
+  const isPro = user?.plan === "PRO" || user?.plan === "PREMIUM";
+  const showSuggestions = isPro && user?.emailScanningEnabled;
+
+  const { data: suggestions } = useQuery<SuggestedTrial[]>({
+    queryKey: ["/api/suggested-trials"],
+    queryFn: getQueryFn({ on401: "throw" }),
+    enabled: !!showSuggestions,
+  });
+
   const cancelMutation = useMutation({
     mutationFn: async (id: string) => {
       await apiRequest("POST", `/api/trials/${id}/cancel`);
@@ -33,6 +43,34 @@ export default function Dashboard() {
     },
     onError: (err: any) => {
       toast({ title: "Failed to cancel", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const addSuggestionMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await apiRequest("POST", `/api/suggested-trials/${id}/add`);
+      return res.json();
+    },
+    onSuccess: (data: { trial: Trial }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/trials"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/suggested-trials"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      toast({ title: `${data.trial.serviceName} added`, description: "Trial added successfully." });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to add trial", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const ignoreSuggestionMutation = useMutation({
+    mutationFn: async (id: string) => {
+      await apiRequest("POST", `/api/suggested-trials/${id}/ignore`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/suggested-trials"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to ignore", description: err.message, variant: "destructive" });
     },
   });
 
@@ -61,6 +99,8 @@ export default function Dashboard() {
   const limit = user.trialLimit;
   const atLimit = limit !== null && activeCount >= limit;
   const isFree = (user.plan || "FREE") === "FREE";
+
+  const pendingSuggestions = (suggestions || []).filter((s) => s.status === "new");
 
   const handleAddTrial = () => {
     if (atLimit) {
@@ -135,6 +175,73 @@ export default function Dashboard() {
               </Button>
             )}
           </div>
+        )}
+
+        {showSuggestions && pendingSuggestions.length > 0 && (
+          <section className="mb-8">
+            <div className="flex items-center gap-2 mb-3">
+              <Mail className="h-4 w-4 text-primary" />
+              <h2 className="font-semibold" data-testid="text-section-suggestions">
+                Suggested Trials
+              </h2>
+              <Badge variant="secondary" className="text-xs">{pendingSuggestions.length}</Badge>
+            </div>
+            <div className="space-y-2">
+              {pendingSuggestions.map((s) => (
+                <Card key={s.id} data-testid={`card-suggestion-${s.id}`} className="border-primary/20">
+                  <CardContent className="py-3 px-4">
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          <p className="font-medium text-sm truncate" data-testid={`text-suggestion-service-${s.id}`}>
+                            {s.serviceGuess || s.fromDomain || "Unknown service"}
+                          </p>
+                          <Badge
+                            variant={s.confidence >= 70 ? "default" : "secondary"}
+                            className="text-xs shrink-0"
+                            data-testid={`badge-confidence-${s.id}`}
+                          >
+                            {s.confidence}% match
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground truncate" data-testid={`text-suggestion-subject-${s.id}`}>
+                          {s.subject}
+                        </p>
+                        <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
+                          {s.endDateGuess && (
+                            <span>Ends ~{new Date(s.endDateGuess).toLocaleDateString()}</span>
+                          )}
+                          {s.amountGuess && (
+                            <span>{s.currencyGuess} {s.amountGuess}/mo</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          size="sm"
+                          onClick={() => addSuggestionMutation.mutate(s.id)}
+                          disabled={addSuggestionMutation.isPending}
+                          data-testid={`button-add-suggestion-${s.id}`}
+                        >
+                          <CheckCircle className="h-3.5 w-3.5 mr-1" />
+                          Add
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => ignoreSuggestionMutation.mutate(s.id)}
+                          disabled={ignoreSuggestionMutation.isPending}
+                          data-testid={`button-ignore-suggestion-${s.id}`}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </section>
         )}
 
         {isLoading ? (

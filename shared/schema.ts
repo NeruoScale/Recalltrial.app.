@@ -19,6 +19,12 @@ export const users = pgTable("users", {
   stripeSubscriptionId: text("stripe_subscription_id").unique(),
   subscriptionStatus: userSubStatusEnum("user_sub_status"),
   currentPeriodEnd: timestamp("current_period_end"),
+  emailScanningEnabled: boolean("email_scanning_enabled").notNull().default(false),
+  gmailConnected: boolean("gmail_connected").notNull().default(false),
+  gmailAccessToken: text("gmail_access_token"),
+  gmailRefreshToken: text("gmail_refresh_token"),
+  gmailTokenExpiry: timestamp("gmail_token_expiry"),
+  lastEmailScanAt: timestamp("last_email_scan_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -93,6 +99,35 @@ export const analyticsEvents = pgTable("analytics_events", {
   metadata: text("metadata"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+export const suggestedTrialStatusEnum = pgEnum("suggested_trial_status", ["new", "added", "ignored"]);
+
+export const suggestedTrials = pgTable("suggested_trials", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  provider: text("provider").notNull().default("gmail"),
+  messageId: text("message_id").notNull(),
+  fromEmail: text("from_email"),
+  fromDomain: text("from_domain"),
+  subject: text("subject"),
+  receivedAt: timestamp("received_at"),
+  serviceGuess: text("service_guess"),
+  endDateGuess: date("end_date_guess"),
+  amountGuess: decimal("amount_guess", { precision: 10, scale: 2 }),
+  currencyGuess: text("currency_guess"),
+  confidence: integer("confidence").notNull().default(50),
+  status: suggestedTrialStatusEnum("status").notNull().default("new"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertSuggestedTrialSchema = createInsertSchema(suggestedTrials).omit({
+  id: true,
+  createdAt: true,
+  status: true,
+});
+
+export type SuggestedTrial = typeof suggestedTrials.$inferSelect;
+export type InsertSuggestedTrial = z.infer<typeof insertSuggestedTrialSchema>;
 
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 

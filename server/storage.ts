@@ -1,6 +1,6 @@
 import { eq, and, lte, sql, count, desc } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, type User, type Trial, type Reminder, type Review } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, type User, type Trial, type Reminder, type Review, type SuggestedTrial } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -45,6 +45,18 @@ export interface IStorage {
   approveReview(reviewId: string): Promise<Review | undefined>;
   deleteReview(reviewId: string): Promise<boolean>;
   toggleFeaturedReview(reviewId: string): Promise<Review | undefined>;
+
+  updateUserGmailTokens(userId: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<void>;
+  clearUserGmailTokens(userId: string): Promise<void>;
+  toggleEmailScanning(userId: string, enabled: boolean): Promise<User>;
+  updateLastEmailScan(userId: string): Promise<void>;
+  getProUsersWithScanningEnabled(): Promise<User[]>;
+
+  getSuggestedTrials(userId: string): Promise<SuggestedTrial[]>;
+  upsertSuggestedTrial(data: Omit<SuggestedTrial, "id" | "createdAt" | "status"> & { userId: string }): Promise<void>;
+  markSuggestedTrialAdded(id: string, userId: string): Promise<SuggestedTrial | undefined>;
+  markSuggestedTrialIgnored(id: string, userId: string): Promise<SuggestedTrial | undefined>;
+  getSuggestedTrialById(id: string, userId: string): Promise<SuggestedTrial | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -281,6 +293,87 @@ export class DatabaseStorage implements IStorage {
       .where(eq(reviews.id, reviewId))
       .returning();
     return review;
+  }
+
+  async updateUserGmailTokens(userId: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<void> {
+    await db.update(users).set({
+      gmailAccessToken: tokens.accessToken,
+      gmailRefreshToken: tokens.refreshToken,
+      gmailTokenExpiry: tokens.expiry,
+      gmailConnected: true,
+    }).where(eq(users.id, userId));
+  }
+
+  async clearUserGmailTokens(userId: string): Promise<void> {
+    await db.update(users).set({
+      gmailAccessToken: null,
+      gmailRefreshToken: null,
+      gmailTokenExpiry: null,
+      gmailConnected: false,
+    }).where(eq(users.id, userId));
+  }
+
+  async toggleEmailScanning(userId: string, enabled: boolean): Promise<User> {
+    const [user] = await db.update(users).set({ emailScanningEnabled: enabled }).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  async updateLastEmailScan(userId: string): Promise<void> {
+    await db.update(users).set({ lastEmailScanAt: new Date() }).where(eq(users.id, userId));
+  }
+
+  async getProUsersWithScanningEnabled(): Promise<User[]> {
+    return db.select().from(users).where(
+      and(
+        eq(users.emailScanningEnabled, true),
+        eq(users.gmailConnected, true),
+      )
+    );
+  }
+
+  async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {
+    return db.select().from(suggestedTrials).where(
+      and(eq(suggestedTrials.userId, userId), eq(suggestedTrials.status, "new"))
+    ).orderBy(desc(suggestedTrials.confidence));
+  }
+
+  async getSuggestedTrialById(id: string, userId: string): Promise<SuggestedTrial | undefined> {
+    const [row] = await db.select().from(suggestedTrials).where(
+      and(eq(suggestedTrials.id, id), eq(suggestedTrials.userId, userId))
+    ).limit(1);
+    return row;
+  }
+
+  async upsertSuggestedTrial(data: Omit<SuggestedTrial, "id" | "createdAt" | "status"> & { userId: string }): Promise<void> {
+    await db.insert(suggestedTrials).values({
+      userId: data.userId,
+      provider: data.provider,
+      messageId: data.messageId,
+      fromEmail: data.fromEmail,
+      fromDomain: data.fromDomain,
+      subject: data.subject,
+      receivedAt: data.receivedAt,
+      serviceGuess: data.serviceGuess,
+      endDateGuess: data.endDateGuess,
+      amountGuess: data.amountGuess,
+      currencyGuess: data.currencyGuess,
+      confidence: data.confidence,
+      status: "new",
+    } as any).onConflictDoNothing();
+  }
+
+  async markSuggestedTrialAdded(id: string, userId: string): Promise<SuggestedTrial | undefined> {
+    const [row] = await db.update(suggestedTrials).set({ status: "added" }).where(
+      and(eq(suggestedTrials.id, id), eq(suggestedTrials.userId, userId))
+    ).returning();
+    return row;
+  }
+
+  async markSuggestedTrialIgnored(id: string, userId: string): Promise<SuggestedTrial | undefined> {
+    const [row] = await db.update(suggestedTrials).set({ status: "ignored" }).where(
+      and(eq(suggestedTrials.id, id), eq(suggestedTrials.userId, userId))
+    ).returning();
+    return row;
   }
 }
 
