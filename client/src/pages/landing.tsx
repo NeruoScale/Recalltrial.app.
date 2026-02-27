@@ -164,7 +164,10 @@ export default function Landing() {
                 {[
                   { id: 's1', rating: 5, text: "RecallTrial saved me $15 on a subscription I forgot about. The email reminder was perfect!", name: "Sarah J.", location: "New York" },
                   { id: 's2', rating: 5, text: "Simple, clean, and does exactly what it says. No more surprise charges for me.", name: "Mike D.", location: "London" },
-                  { id: 's3', rating: 4, text: "The best tool for managing free trials. Highly recommended for anyone who signs up for everything!", name: "Alex P.", location: "San Francisco" }
+                  { id: 's3', rating: 4, text: "The best tool for managing free trials. Highly recommended for anyone who signs up for everything!", name: "Alex P.", location: "San Francisco" },
+                  { id: 's4', rating: 5, text: "I didn’t realize how much I was losing from forgotten trials until I started tracking them. This saved me more than I expected.", name: "Daniel K.", location: "Berlin" },
+                  { id: 's5', rating: 5, text: "I used to screenshot trial dates and still forget. Getting reminders 3, 2, and 1 day before renewal changed everything.", name: "Sarah M.", location: "Toronto" },
+                  { id: 's6', rating: 5, text: "The cancel link in the reminder email is the best part. No searching, no stress.", name: "Ahmed R.", location: "Dubai" }
                 ].map((review) => (
                   <Card key={review.id}>
                     <CardContent className="py-5">

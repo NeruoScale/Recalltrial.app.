@@ -69,7 +69,7 @@ export default function PricingPage() {
       description: "Get started with the basics",
       features: [
         "Up to 3 active trials",
-        "Email reminders (3d + 1d before renewal)",
+        "Email reminders (3, 2, and 1 day before)",
         "Cancel link storage",
         "Service icon auto-detection",
       ],
