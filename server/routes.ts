@@ -530,8 +530,14 @@ export async function registerRoutes(
   });
 
   app.get("/api/reviews/featured", async (_req: Request, res: Response) => {
-    const approvedReviews = await storage.getApprovedReviews(6);
-    return res.json(approvedReviews);
+    try {
+      const approvedReviews = await storage.getApprovedReviews(6);
+      console.log(`[API] Returning ${approvedReviews.length} featured reviews`);
+      return res.json(approvedReviews);
+    } catch (err) {
+      console.error("[API] Error fetching featured reviews:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
   });
 
   app.post("/api/reviews/submit", requireAuth, async (req: Request, res: Response) => {
