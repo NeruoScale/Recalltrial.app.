@@ -68,36 +68,18 @@ function computeReminders(endDateStr: string, now: Date, timezone: string): Remi
   const tzOffsetMs = getTimezoneOffsetMs(timezone, now);
   const endDateTimeUtc = new Date(new Date(endDateStr + "T23:59:59.000Z").getTime() - tzOffsetMs);
 
-  const timeLeftMs = endDateTimeUtc.getTime() - now.getTime();
-  const timeLeftHours = timeLeftMs / (1000 * 60 * 60);
   const minFutureMs = 2 * 60 * 1000;
-
-  let offsets: { hoursBeforeEnd: number; type: string }[];
-
-  if (timeLeftHours <= 0) {
-    return [];
-  } else if (timeLeftHours < 24) {
-    offsets = [
-      { hoursBeforeEnd: 6, type: "SIX_HOURS" },
-      { hoursBeforeEnd: 1, type: "ONE_HOUR" },
-    ];
-  } else if (timeLeftHours < 72) {
-    offsets = [
-      { hoursBeforeEnd: 24, type: "TWENTY_FOUR_HOURS" },
-      { hoursBeforeEnd: 3, type: "THREE_HOURS" },
-    ];
-  } else {
-    offsets = [
-      { hoursBeforeEnd: 72, type: "THREE_DAYS" },
-      { hoursBeforeEnd: 24, type: "ONE_DAY" },
-    ];
-  }
+  const offsets = [
+    { hoursBeforeEnd: 72, type: "THREE_DAYS" },
+    { hoursBeforeEnd: 48, type: "TWO_DAYS" },
+    { hoursBeforeEnd: 24, type: "ONE_DAY" },
+  ];
 
   const results: ReminderPlan[] = [];
   for (const offset of offsets) {
     const remindAt = new Date(endDateTimeUtc.getTime() - offset.hoursBeforeEnd * 60 * 60 * 1000);
     if (remindAt.getTime() > now.getTime() + minFutureMs) {
-      results.push({ remindAt, type: offset.type });
+      results.push({ remindAt, type: offset.type as any });
     }
   }
 
@@ -293,8 +275,16 @@ export async function registerRoutes(
 
       const endD = new Date(data.endDate);
       const startD = new Date(data.startDate);
-      if (endD < startD) {
-        return res.status(400).json({ message: "End date must be after start date" });
+
+      const now = new Date();
+      const tz = user.timezone || "Asia/Qatar";
+      const tzOffsetMs = getTimezoneOffsetMs(tz, now);
+      const todayLocal = new Date(now.getTime() + tzOffsetMs);
+      todayLocal.setUTCHours(0, 0, 0, 0);
+      const minEndDate = new Date(todayLocal.getTime() + 4 * 86400000);
+
+      if (endD < minEndDate) {
+        return res.status(400).json({ message: "End date must be at least 4 days from today so we can send 3/2/1-day reminders." });
       }
 
       const trial = await storage.createTrial({
@@ -310,9 +300,6 @@ export async function registerRoutes(
         currency: data.currency || "USD",
         status: "ACTIVE",
       });
-
-      const now = new Date();
-      const tz = user.timezone || "Asia/Qatar";
 
       const reminderPlans = computeReminders(data.endDate, now, tz);
       for (const plan of reminderPlans) {

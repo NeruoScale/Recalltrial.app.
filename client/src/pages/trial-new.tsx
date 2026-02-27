@@ -88,10 +88,20 @@ export default function TrialNew() {
       toast({ title: "Please select both dates", variant: "destructive" });
       return;
     }
-    if (endDate < startDate) {
-      toast({ title: "End date must be after start date", variant: "destructive" });
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const minEndDate = addDays(today, 4);
+
+    if (endDate < minEndDate) {
+      toast({
+        title: "Invalid End Date",
+        description: "End date must be at least 4 days from today so we can send 3/2/1-day reminders.",
+        variant: "destructive"
+      });
       return;
     }
+
     let url = serviceUrl.trim();
     if (url && !url.startsWith("http")) {
       url = "https://" + url;
@@ -332,50 +342,63 @@ export default function TrialNew() {
                 </div>
               </div>
 
-              {startDate && endDate && endDate >= startDate && (() => {
+              {startDate && endDate && (() => {
                 const now = new Date();
+                const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                const minEndDate = addDays(today, 4);
+                const isInvalid = endDate < minEndDate;
+
                 const endEod = new Date(endDate);
                 endEod.setHours(23, 59, 59, 0);
-                const hoursLeft = Math.max(0, (endEod.getTime() - now.getTime()) / 3600000);
-                const offsets = hoursLeft <= 0 ? [] : hoursLeft < 24
-                  ? [{ h: 6, label: "6 hours before" }, { h: 1, label: "1 hour before" }]
-                  : hoursLeft < 72
-                  ? [{ h: 24, label: "24 hours before" }, { h: 3, label: "3 hours before" }]
-                  : [{ h: 72, label: "3 days before" }, { h: 24, label: "1 day before" }];
+
+                const offsets = [
+                  { h: 72, label: "3 days before" },
+                  { h: 48, label: "2 days before" },
+                  { h: 24, label: "1 day before" }
+                ];
+
                 const futureReminders = offsets
                   .map(o => ({ ...o, at: subHours(endEod, o.h) }))
                   .filter(r => r.at.getTime() > now.getTime() + 120000);
+
                 return (
-                  <Card className="bg-muted/50">
-                    <CardContent className="py-3 text-sm space-y-1">
-                      <p data-testid="text-trial-preview">
-                        <strong>Trial duration:</strong> {daysLeft} day{daysLeft !== 1 ? "s" : ""}
+                  <div className="space-y-4">
+                    {isInvalid && (
+                      <p className="text-sm font-medium text-destructive flex items-center gap-1.5" data-testid="text-date-error">
+                        <Info className="h-4 w-4" />
+                        End date must be at least 4 days from today so we can send 3/2/1-day reminders.
                       </p>
-                      <p>
-                        <strong>Trial ends:</strong> {format(endDate, "MMMM d, yyyy")}
-                      </p>
-                      {futureReminders.length > 0 ? (
+                    )}
+
+                    <Card className={cn("bg-muted/50", isInvalid && "opacity-50")}>
+                      <CardContent className="py-3 text-sm space-y-1">
+                        <p data-testid="text-trial-preview">
+                          <strong>Trial duration:</strong> {daysLeft} day{daysLeft !== 1 ? "s" : ""}
+                        </p>
+                        <p>
+                          <strong>Trial ends:</strong> {format(endDate, "MMMM d, yyyy")}
+                        </p>
                         <p className="text-muted-foreground" data-testid="text-reminder-preview">
                           <Check className="h-3 w-3 inline mr-1" />
-                          We'll remind you {futureReminders.map((r, i) => (
-                            <span key={i}>{i > 0 && " and "}<strong>{r.label}</strong> ({format(r.at, "MMM d, h:mm a")})</span>
+                          We'll remind you 3 days before, 2 days before, and 1 day before (with the cancel link).
+                        </p>
+                        <div className="pt-1 space-y-1">
+                          {futureReminders.map((r, i) => (
+                            <p key={i} className="text-xs text-muted-foreground pl-4">
+                              • {r.label}: {format(r.at, "MMM d, h:mm a")}
+                            </p>
                           ))}
-                        </p>
-                      ) : (
-                        <p className="text-muted-foreground" data-testid="text-reminder-preview">
-                          <Info className="h-3 w-3 inline mr-1" />
-                          Trial ends too soon for reminders
-                        </p>
-                      )}
-                    </CardContent>
-                  </Card>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
                 );
               })()}
 
               <Button
                 type="submit"
                 className="w-full"
-                disabled={createMutation.isPending}
+                disabled={createMutation.isPending || (endDate && endDate < addDays(new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()), 4))}
                 data-testid="button-submit-trial"
               >
                 {createMutation.isPending ? (
