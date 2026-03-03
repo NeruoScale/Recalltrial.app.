@@ -49,6 +49,7 @@ STRIPE_PREMIUM_YEARLY_PRICE_ID = "price_1T2MUJB5tg0rN4pMGWBEor9H"
 BILLING_ENABLED = "true"
 ADMIN_KEY = "b4a4896a3f1be72301af5e5f21ef226b"
 FROM_EMAIL = "RecallTrial <notifications@recalltrial.app>"
+GOOGLE_REDIRECT_URI = "https://trial-reminder-buddy.replit.app/api/gmail/callback"
 
 [userenv.development]
 DEBUG_KEY = "test-debug-key-2026"
