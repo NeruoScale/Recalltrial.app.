@@ -7,11 +7,37 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { TrialCard } from "@/components/trial-card";
-import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, Zap, ArrowRight, Sparkles, CheckCircle, X, Mail } from "lucide-react";
+import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, ArrowRight, Sparkles, CheckCircle, X, Mail } from "lucide-react";
 import type { Trial, SuggestedTrial } from "@shared/schema";
 import { differenceInDays, parseISO } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
+
+function getConfidenceBreakdown(subject: string): Array<{ label: string; points: number }> {
+  const text = subject.toLowerCase();
+  const breakdown: Array<{ label: string; points: number }> = [];
+
+  const check = (label: string, keywords: string[], points: number) => {
+    if (keywords.some((k) => text.includes(k))) {
+      breakdown.push({ label, points });
+    }
+  };
+
+  check("Free trial detected", ["free trial", "free trial has started", "starter plan free trial"], 30);
+  check("Trial period", ["trial period", "trial begins", "trial has started", "your trial"], 20);
+  check("Trial keyword", ["trial"], 15);
+  check("Renewal signal", ["renew", "renewal", "renews on"], 20);
+  check("Subscription", ["subscription", "subscription started"], 15);
+  check("Charge warning", ["will be charged", "charge", "before you're charged", "your card will be"], 25);
+  check("First payment", ["first payment", "payment due", "billing starts"], 20);
+  check("Cancel signal", ["cancel before", "cancel anytime", "cancel"], 15);
+  check("Invoice/Receipt", ["invoice", "receipt"], 10);
+  check("Expiry signal", ["expires", "expiration", "trial ends", "trial will end"], 15);
+  check("Welcome/Plan start", ["welcome to your", "starter plan", "plan starts"], 10);
+
+  return breakdown;
+}
 
 export default function Dashboard() {
   const { user, logout } = useAuth();
@@ -117,6 +143,7 @@ export default function Dashboard() {
   };
 
   return (
+    <TooltipProvider>
     <div className="min-h-screen bg-background">
       <header className="border-b sticky top-0 bg-background z-50">
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
@@ -196,13 +223,31 @@ export default function Dashboard() {
                           <p className="font-medium text-sm truncate" data-testid={`text-suggestion-service-${s.id}`}>
                             {s.serviceGuess || s.fromDomain || "Unknown service"}
                           </p>
-                          <Badge
-                            variant={s.confidence >= 70 ? "default" : "secondary"}
-                            className="text-xs shrink-0"
-                            data-testid={`badge-confidence-${s.id}`}
-                          >
-                            {s.confidence}% match
-                          </Badge>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge
+                                variant={s.confidence >= 70 ? "default" : "secondary"}
+                                className="text-xs shrink-0 cursor-help"
+                                data-testid={`badge-confidence-${s.id}`}
+                              >
+                                {s.confidence}% match
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-xs">
+                              <div className="text-xs space-y-1">
+                                <p className="font-semibold mb-1">Confidence breakdown</p>
+                                {getConfidenceBreakdown(s.subject || "").map((item, i) => (
+                                  <div key={i} className="flex justify-between gap-4">
+                                    <span>{item.label}</span>
+                                    <span className="font-medium text-green-400">+{item.points}%</span>
+                                  </div>
+                                ))}
+                                {getConfidenceBreakdown(s.subject || "").length === 0 && (
+                                  <p className="text-muted-foreground">Base score from email pattern</p>
+                                )}
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
                         </div>
                         <p className="text-xs text-muted-foreground truncate" data-testid={`text-suggestion-subject-${s.id}`}>
                           {s.subject}
@@ -346,5 +391,6 @@ export default function Dashboard() {
         )}
       </main>
     </div>
+    </TooltipProvider>
   );
 }

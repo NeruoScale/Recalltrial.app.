@@ -306,7 +306,26 @@ export async function registerRoutes(
 
   app.get("/api/suggested-trials", requireAuth, requireEmailScanning, async (req: Request, res: Response) => {
     const suggestions = await storage.getSuggestedTrials(req.session.userId!);
-    return res.json(suggestions);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Filter out suggestions where end date is already in the past
+    const fresh = suggestions.filter((s) => {
+      if (!s.endDateGuess) return true;
+      return new Date(s.endDateGuess) >= today;
+    });
+
+    // Deduplicate by serviceGuess — keep highest confidence per service
+    const bestByService = new Map<string, typeof fresh[0]>();
+    for (const s of fresh) {
+      const key = (s.serviceGuess || s.fromDomain || "unknown").toLowerCase();
+      const existing = bestByService.get(key);
+      if (!existing || (s.confidence ?? 0) > (existing.confidence ?? 0)) {
+        bestByService.set(key, s);
+      }
+    }
+
+    return res.json(Array.from(bestByService.values()));
   });
 
   app.post("/api/suggested-trials/:id/add", requireAuth, requireEmailScanning, async (req: Request, res: Response) => {
