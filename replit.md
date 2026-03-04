@@ -15,7 +15,7 @@ RecallTrial is a trust-first free-trial reminder app. Users add free trials manu
 - **Search:** Fuse.js fuzzy search over 585-service catalog
 - **Scheduling:** Cron endpoints at POST /api/cron/reminders and POST /api/cron/email-scan (secured via X-CRON-KEY header)
 - **Reminder Logic:** Fixed 3-offset reminders: THREE_DAYS (72h), TWO_DAYS (48h), ONE_DAY (24h) before end date. End date must be ≥4 days from today.
-- **Gmail Scanning:** Pro-only opt-in feature. Uses googleapis + Google OAuth 2.0 per-user tokens. Scans metadata only (no body), keyword-based extraction.
+- **Gmail Scanning:** Pro-only opt-in feature. Uses googleapis + Google OAuth 2.0 per-user tokens. Scans metadata only (no body). Two-phase search (Phase A: high-precision lifecycle terms; Phase B: broad subject keywords), up to 1000 emails per scan. Includes strong-negative rejection (shipping, jobs, legal, webinars, discounts), receipt filter (requires recurring indicators), payment-processor service resolution (Stripe/PayPal → extract merchant from snippet), smart deduplication (up to 2 per service if price/date differs), and validity check (discard past end dates with no ongoing signal).
 
 ## Project Structure
 ```
