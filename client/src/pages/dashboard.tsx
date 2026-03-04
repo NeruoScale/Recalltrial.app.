@@ -206,15 +206,26 @@ export default function Dashboard() {
 
         {showSuggestions && pendingSuggestions.length > 0 && (
           <section className="mb-8">
-            <div className="flex items-center gap-2 mb-3">
+            <div className="flex items-center gap-2 mb-1">
               <Mail className="h-4 w-4 text-primary" />
               <h2 className="font-semibold" data-testid="text-section-suggestions">
                 Suggested Trials
               </h2>
               <Badge variant="secondary" className="text-xs">{pendingSuggestions.length}</Badge>
             </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Found in your Gmail. The <span className="font-medium">match %</span> shows how confident we are each email is a real free trial or paid subscription — hover it to see why.
+            </p>
             <div className="space-y-2">
-              {pendingSuggestions.map((s) => (
+              {pendingSuggestions.map((s) => {
+                const breakdown = getConfidenceBreakdown(s.subject || "");
+                const confidenceLabel = s.confidence >= 80 ? "Strong match" : s.confidence >= 60 ? "Likely a trial" : "Possible trial";
+                const confidenceColor = s.confidence >= 80
+                  ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
+                  : s.confidence >= 60
+                  ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200 dark:border-yellow-700"
+                  : "bg-muted text-muted-foreground border-border";
+                return (
                 <Card key={s.id} data-testid={`card-suggestion-${s.id}`} className="border-primary/20">
                   <CardContent className="py-3 px-4">
                     <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -225,25 +236,32 @@ export default function Dashboard() {
                           </p>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Badge
-                                variant={s.confidence >= 70 ? "default" : "secondary"}
-                                className="text-xs shrink-0 cursor-help"
+                              <span
+                                className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium cursor-help shrink-0 ${confidenceColor}`}
                                 data-testid={`badge-confidence-${s.id}`}
                               >
-                                {s.confidence}% match
-                              </Badge>
+                                {s.confidence}% · {confidenceLabel}
+                              </span>
                             </TooltipTrigger>
-                            <TooltipContent side="top" className="max-w-xs">
-                              <div className="text-xs space-y-1">
-                                <p className="font-semibold mb-1">Confidence breakdown</p>
-                                {getConfidenceBreakdown(s.subject || "").map((item, i) => (
-                                  <div key={i} className="flex justify-between gap-4">
-                                    <span>{item.label}</span>
-                                    <span className="font-medium text-green-400">+{item.points}%</span>
+                            <TooltipContent side="top" className="max-w-xs p-3">
+                              <div className="text-xs space-y-2">
+                                <p className="font-semibold">Why {s.confidence}%?</p>
+                                <p className="text-muted-foreground leading-relaxed">
+                                  We scan email subjects for trial and subscription signals. Each signal found adds to the score.
+                                </p>
+                                {breakdown.length > 0 && (
+                                  <div className="border-t pt-2 space-y-1">
+                                    <p className="font-medium text-muted-foreground mb-1">Signals detected:</p>
+                                    {breakdown.map((item, i) => (
+                                      <div key={i} className="flex justify-between gap-4">
+                                        <span>✓ {item.label}</span>
+                                        <span className="font-medium text-green-500">+{item.points}%</span>
+                                      </div>
+                                    ))}
                                   </div>
-                                ))}
-                                {getConfidenceBreakdown(s.subject || "").length === 0 && (
-                                  <p className="text-muted-foreground">Base score from email pattern</p>
+                                )}
+                                {breakdown.length === 0 && (
+                                  <p className="text-muted-foreground">Matched by email sender pattern (base score).</p>
                                 )}
                               </div>
                             </TooltipContent>
@@ -284,7 +302,8 @@ export default function Dashboard() {
                     </div>
                   </CardContent>
                 </Card>
-              ))}
+              );
+              })}
             </div>
           </section>
         )}
