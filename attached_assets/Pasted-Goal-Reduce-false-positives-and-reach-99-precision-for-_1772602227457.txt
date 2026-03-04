@@ -1,0 +1,107 @@
+Goal: Reduce false positives and reach ~99% precision for “real subscriptions / real trials” in Gmail scanning.
+
+Current state recap (don’t change privacy model):
+
+We use Gmail metadata only (subject, from, date, snippet). No full body.
+
+We scan last 90 days.
+
+We extract service from sender domain.
+
+We regex date/amount + confidence scoring.
+
+We dedupe per service and discard past end dates.
+
+What to implement:
+
+A) Add a keyword system with STRONG POSITIVE signals + STRONG NEGATIVE filters
+
+Create a new module (or constants) for keyword lists used by gmail scanning:
+
+1) STRONG POSITIVE SUBJECT/SNIPPET PHRASES (high confidence triggers)
+Match case-insensitive and also allow minor variations:
+
+"your trial ends" / "trial ends" / "trial ending" / "trial ends tomorrow" / "trial ends in"
+
+"trial will end" / "trial expires" / "trial expiring" / "trial period ends"
+
+"free trial started" / "trial has started" / "trial begins" / "trial period started"
+
+"subscription confirmed" / "subscription is active" / "subscription activated"
+
+"your subscription has been activated" / "your subscription is now active"
+
+"your plan is now active" / "welcome to your (plan)" (only if sender is a known product domain and there is also billing/trial language)
+
+"billing starts" / "billing begins" / "your billing starts"
+
+"you will be charged" / "will be charged on" / "first payment on"
+
+"next payment" / "upcoming payment" / "payment due" / "renews on"
+
+"invoice" / "receipt" / "payment received" / "charged" / "charge successful" / "card charged"
+
+"subscription renewal" / "renewal notice" / "renews in"
+
+"cancel before" / "cancel by" / "cancel anytime" (only if paired with trial/billing)
+
+2) NEGATIVE FILTERS (must exclude unless there’s an overriding strong positive)
+If subject/snippet contains any of these, drop the email unless it also contains a strong positive phrase like “will be charged”, “invoice”, “receipt”, “trial ends”, “trial started”, “subscription activated”:
+
+marketing / promos: "sale", "deal", "discount", "offer", "save", "limited time", "last chance", "promo", "promotion", "black friday", "cyber", "newsletter", "digest", "weekly", "monthly update", "new features", "release notes", "what's new", "product updates", "tips", "webinar", "workshop", "event", "invite", "invitation", "join us", "community", "blog", "survey", "feedback", "vote"
+
+outreach spam: "cold", "lead", "prospecting", "book a call", "demo", "schedule a call", "meeting", "calendar"
+
+unrelated accounts/security: "security alert", "login", "new sign-in", "verify", "verification", "password", "2-step", "otp", "code"
+
+shipping/orders (not subscriptions): "shipped", "delivery", "tracking", "order confirmed", "order number"
+
+3) Sender filters
+Add allow/deny heuristics:
+
+Prefer senders containing: "billing", "payments", "invoice", "receipts", "subscription", "noreply" from the service domain.
+
+Penalize or exclude senders from generic marketing domains if subject lacks strong positives.
+
+B) Only suggest trials/subscriptions that are STILL VALID in the future
+
+Implement a hard rule:
+
+If we detect an end/renew date, it must be >= (today + 1 day) to be suggested.
+
+If a detected date is <= today, treat as invalid and do not suggest.
+
+C) If no explicit end date exists, we must NOT invent a far-future date
+
+New rule:
+
+If we can’t find an explicit end date OR a reliable duration (“7-day”, “14-day”, “30-day”) OR a reliable relative phrase (“ends tomorrow”, “in 3 days”), then the suggestion should be dropped unless it is clearly a paid subscription receipt/invoice (in which case we can set “next billing date unknown” and treat it as subscription with confidence threshold higher).
+
+Add a field endDateSource in the suggested result: "explicit" | "relative" | "duration" | "none".
+
+D) Improve deduplication: group by “service key” not just pretty name
+
+Use normalized domain root (eTLD+1 if possible) as the dedupe key.
+Example: billing.stripe.com and noreply@stripe.com should group.
+
+E) Raise confidence threshold for “suggested trials”
+
+Do not show items below 70% unless they have an explicit future end date and a strong positive phrase.
+
+Deliverables:
+
+Update server/gmail.ts scoring & filtering accordingly.
+
+Add the keyword lists in a dedicated constants file.
+
+Add tests (or at least a small set of fixtures) for common subjects: trial start, trial end tomorrow, invoice, marketing newsletter.
+
+Ensure we still only use metadata/snippet (no full body).
+
+Acceptance criteria:
+
+Marketing newsletters should not appear.
+
+Only real trial/subscription emails appear.
+
+Any suggestion must have an end date in the future OR be a clear paid receipt/invoice.
