@@ -152,6 +152,9 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  const { runMigrations } = await import("./migrate");
+  await runMigrations();
+
   await initBilling();
   await registerRoutes(httpServer, app);
 
