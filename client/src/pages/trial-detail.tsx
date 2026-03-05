@@ -84,6 +84,7 @@ export default function TrialDetail() {
   function reminderTypeLabel(type: string): string {
     switch (type) {
       case "THREE_DAYS": return "3 days before";
+      case "TWO_DAYS": return "2 days before";
       case "ONE_DAY": return "1 day before";
       case "TWENTY_FOUR_HOURS": return "24 hours before";
       case "THREE_HOURS": return "3 hours before";
