@@ -354,6 +354,8 @@ export class DatabaseStorage implements IStorage {
       subject: data.subject,
       receivedAt: data.receivedAt,
       serviceGuess: data.serviceGuess,
+      startDateGuess: (data as any).startDateGuess ?? null,
+      startDateSource: (data as any).startDateSource ?? null,
       endDateGuess: data.endDateGuess,
       amountGuess: data.amountGuess,
       currencyGuess: data.currencyGuess,

@@ -241,9 +241,7 @@ function extractDate(
 // Only extract if an explicit start date phrase is present. Never defaults to today.
 
 function extractStartDate(text: string): { date: string | null; source: "explicit" | "none" } {
-  const lower = text.toLowerCase();
-
-  // Explicit start date patterns
+  // Explicit start date patterns — use /i flag for case-insensitive matching
   const startPatterns = [
     /(?:trial started|trial begins?|started|activated|subscription started|billing starts?|effective)\s+(?:on\s+)?([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
     /since\s+([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
@@ -252,7 +250,7 @@ function extractStartDate(text: string): { date: string | null; source: "explici
   ];
 
   for (const pattern of startPatterns) {
-    const match = lower.match(pattern) || text.match(pattern);
+    const match = text.match(pattern);
     if (match && match[1]) {
       const raw = match[1].replace(/(?:st|nd|rd|th)/i, "").trim();
       const d = new Date(raw);

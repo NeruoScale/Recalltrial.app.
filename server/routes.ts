@@ -296,9 +296,15 @@ export async function registerRoutes(
       storage.logEvent(user.id, "email_scan", { foundCount: suggestions.length });
 
       return res.json({ success: true, found: suggestions.length, newSuggestions: newCount });
-    } catch (err) {
-      console.error("Gmail scan error:", err);
-      return res.status(500).json({ message: "Internal error during scan." });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      const status = err?.response?.status || err?.status;
+      const gdata = err?.response?.data;
+      console.error("Gmail scan error:", message, gdata || "");
+      if (status === 401 || message?.includes("invalid_grant") || message?.includes("Token has been expired")) {
+        return res.status(400).json({ message: "Gmail token expired. Please disconnect and reconnect Gmail." });
+      }
+      return res.status(500).json({ message: "Internal error during scan.", detail: message });
     }
   });
 
