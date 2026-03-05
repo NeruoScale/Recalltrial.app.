@@ -337,7 +337,7 @@ export async function registerRoutes(
       const user = await storage.getUserById(userId);
       if (!user) return res.status(401).json({ message: "Not found" });
 
-      const startDate = new Date().toISOString().slice(0, 10);
+      const startDate = suggestion.startDateGuess || null;
       const endDate = suggestion.endDateGuess || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
 
       const domain = suggestion.fromDomain || "";
@@ -469,7 +469,6 @@ export async function registerRoutes(
       const iconUrl = await getIconUrl(domain);
 
       const endD = new Date(data.endDate);
-      const startD = new Date(data.startDate);
 
       const now = new Date();
       const tz = user.timezone || "Asia/Qatar";
@@ -489,7 +488,7 @@ export async function registerRoutes(
         domain,
         iconUrl,
         cancelUrl: data.cancelUrl || null,
-        startDate: data.startDate,
+        startDate: data.startDate || null,
         endDate: data.endDate,
         renewalPrice: data.renewalPrice || null,
         currency: data.currency || "USD",

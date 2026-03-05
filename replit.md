@@ -115,10 +115,10 @@ shared/
 
 ## Database Models
 - **users**: id, email, passwordHash, timezone, plan (FREE/PLUS/PRO/PREMIUM), stripeCustomerId, stripeSubscriptionId, subscriptionStatus, currentPeriodEnd, emailScanningEnabled, gmailConnected, gmailAccessToken, gmailRefreshToken, gmailTokenExpiry, lastEmailScanAt, createdAt
-- **trials**: id, userId, serviceName, serviceUrl, domain, iconUrl, cancelUrl, startDate, endDate, renewalPrice, currency, status, canceledAt, createdAt
+- **trials**: id, userId, serviceName, serviceUrl, domain, iconUrl, cancelUrl, startDate (nullable — not set for Gmail suggestions without explicit start date), endDate, renewalPrice, currency, status, canceledAt, createdAt
 - **reminders**: id, trialId, userId, remindAt, type (THREE_DAYS/TWO_DAYS/ONE_DAY), status (PENDING/SENT/SKIPPED/FAILED), sentAt, provider, providerMessageId, lastError, createdAt
 - **analytics_events**: id, userId, event, metadata (JSON string), createdAt
-- **suggested_trials**: id, userId, provider, messageId (unique per user+messageId), fromEmail, fromDomain, subject, receivedAt, serviceGuess, endDateGuess, amountGuess, currencyGuess, confidence (0-100), status (new/added/ignored), createdAt
+- **suggested_trials**: id, userId, provider, messageId (unique per user+messageId), fromEmail, fromDomain, subject, receivedAt, serviceGuess, startDateGuess (nullable, explicit only), startDateSource ("explicit"|"none"), endDateGuess, amountGuess, currencyGuess, confidence (0-100), status (new/added/ignored), createdAt
 - **reviews**: id, rating (1-5), text, name, location, source (manual/in_app/import), isApproved, isFeatured, userId, createdAt
 
 ## Environment Variables

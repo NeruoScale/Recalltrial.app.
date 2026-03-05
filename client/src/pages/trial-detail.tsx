@@ -140,7 +140,11 @@ export default function TrialDetail() {
               <Calendar className="h-4 w-4 text-muted-foreground shrink-0" />
               <div>
                 <span className="text-muted-foreground">Started: </span>
-                <span className="font-medium">{format(parseISO(trial.startDate), "MMMM d, yyyy")}</span>
+                {trial.startDate ? (
+                  <span className="font-medium" data-testid="text-start-date">{format(parseISO(trial.startDate), "MMMM d, yyyy")}</span>
+                ) : (
+                  <span className="text-muted-foreground italic" data-testid="text-start-date-unknown">Not detected</span>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-3 text-sm">

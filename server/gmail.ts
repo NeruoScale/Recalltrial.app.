@@ -237,6 +237,34 @@ function extractDate(
   return { date: null, source: "none" };
 }
 
+// ─── Start date extraction ─────────────────────────────────────────────────────
+// Only extract if an explicit start date phrase is present. Never defaults to today.
+
+function extractStartDate(text: string): { date: string | null; source: "explicit" | "none" } {
+  const lower = text.toLowerCase();
+
+  // Explicit start date patterns
+  const startPatterns = [
+    /(?:trial started|trial begins?|started|activated|subscription started|billing starts?|effective)\s+(?:on\s+)?([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
+    /since\s+([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
+    /starts?\s+on\s+([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
+    /start date[:\s]+([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
+  ];
+
+  for (const pattern of startPatterns) {
+    const match = lower.match(pattern) || text.match(pattern);
+    if (match && match[1]) {
+      const raw = match[1].replace(/(?:st|nd|rd|th)/i, "").trim();
+      const d = new Date(raw);
+      if (!isNaN(d.getTime())) {
+        return { date: d.toISOString().slice(0, 10), source: "explicit" };
+      }
+    }
+  }
+
+  return { date: null, source: "none" };
+}
+
 // ─── Amount extraction ────────────────────────────────────────────────────────
 
 function extractAmount(text: string): { amount: string | null; currency: string } {
@@ -412,6 +440,7 @@ export async function scanGmailForTrials(
 
       // ── Date extraction ──
       const { date: extractedDate, source: endDateSource } = extractDate(combined, receivedAt);
+      const { date: extractedStartDate, source: startDateSource } = extractStartDate(combined);
 
       // ── B: Hard validity rule — end date must be >= tomorrow ──
       if (extractedDate) {
@@ -457,6 +486,8 @@ export async function scanGmailForTrials(
         subject: subject.slice(0, 255),
         receivedAt,
         serviceGuess,
+        startDateGuess: extractedStartDate || null,
+        startDateSource: startDateSource,
         endDateGuess: validDate || null,
         amountGuess: amount || null,
         currencyGuess: currency,
