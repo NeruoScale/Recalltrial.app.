@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -7,7 +7,15 @@ import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap, Star, Check } from "lucide-react";
 import type { Review } from "@shared/schema";
-import dashboardScreenshot from "@assets/Screenshot_2026-03-06_033344_1772839862379.png";
+import screenshotDashboard from "@assets/Screenshot_2026-03-06_033344_1772839862379.png";
+import screenshotDetail from "@assets/Screenshot_2026-03-06_033404_1772839862377.png";
+import screenshotSettings from "@assets/Screenshot_2026-03-06_033241_1772839862379.png";
+
+const heroScreenshots = [
+  { src: screenshotDashboard, alt: "RecallTrial dashboard showing tracked trials" },
+  { src: screenshotDetail, alt: "Trial detail with reminders" },
+  { src: screenshotSettings, alt: "Settings and Gmail email scanning" },
+];
 
 function StarRating({ rating }: { rating: number }) {
   return (
@@ -25,6 +33,7 @@ function StarRating({ rating }: { rating: number }) {
 export default function Landing() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
+  const [activeSlide, setActiveSlide] = useState(0);
   const { data: featuredReviews = [] } = useQuery<Review[]>({
     queryKey: ["/api/reviews/featured"],
     retry: 3,
@@ -33,6 +42,13 @@ export default function Landing() {
   useEffect(() => {
     if (user) setLocation("/dashboard");
   }, [user, setLocation]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActiveSlide((prev) => (prev + 1) % heroScreenshots.length);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, []);
 
   if (user) return null;
 
@@ -90,13 +106,29 @@ export default function Landing() {
                 </div>
               ))}
             </div>
-            <div className="w-full max-w-2xl rounded-xl border shadow-xl overflow-hidden bg-white">
-              <img
-                src={dashboardScreenshot}
-                alt="RecallTrial dashboard showing tracked trials"
-                className="w-full h-auto block"
-                data-testid="img-hero-screenshot"
-              />
+            <div className="w-full max-w-2xl" data-testid="img-hero-screenshot">
+              <div className="relative rounded-xl border shadow-xl overflow-hidden bg-white">
+                {heroScreenshots.map((shot, i) => (
+                  <img
+                    key={i}
+                    src={shot.src}
+                    alt={shot.alt}
+                    className="w-full h-auto block absolute top-0 left-0 transition-opacity duration-700"
+                    style={{ opacity: i === activeSlide ? 1 : 0, position: i === 0 ? "relative" : "absolute" }}
+                  />
+                ))}
+              </div>
+              <div className="flex justify-center gap-2 mt-4">
+                {heroScreenshots.map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setActiveSlide(i)}
+                    data-testid={`button-slide-${i}`}
+                    className={`h-1.5 rounded-full transition-all duration-300 ${i === activeSlide ? "w-6 bg-primary" : "w-1.5 bg-muted-foreground/30"}`}
+                    aria-label={`Go to screenshot ${i + 1}`}
+                  />
+                ))}
+              </div>
             </div>
           </div>
         </section>
