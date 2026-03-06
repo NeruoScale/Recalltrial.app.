@@ -5,8 +5,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
-import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap, Star } from "lucide-react";
+import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap, Star, Check } from "lucide-react";
 import type { Review } from "@shared/schema";
+import dashboardScreenshot from "@assets/Screenshot_2026-03-06_033344_1772839862379.png";
 
 function StarRating({ rating }: { rating: number }) {
   return (
@@ -28,8 +29,6 @@ export default function Landing() {
     queryKey: ["/api/reviews/featured"],
     retry: 3,
   });
-
-  console.log("[Landing] Featured reviews count:", featuredReviews.length);
 
   useEffect(() => {
     if (user) setLocation("/dashboard");
@@ -57,27 +56,53 @@ export default function Landing() {
       </header>
 
       <main>
-        <section className="py-20 md:py-32 px-4">
-          <div className="max-w-3xl mx-auto text-center">
-            <Badge variant="secondary" className="mb-6">
-              <Zap className="h-3 w-3 mr-1" />
-              Start Free — No credit card required
-            </Badge>
-            <h1 className="text-4xl md:text-6xl font-bold tracking-tight mb-6" data-testid="text-headline">
-              Never get charged for a free trial again.
-            </h1>
-            <p className="text-lg md:text-xl text-muted-foreground mb-10 max-w-2xl mx-auto" data-testid="text-subtext">
-              Add a trial in seconds. Get reminders with the cancel link before renewal.
-            </p>
-            <Button
-              size="lg"
-              className="text-base px-8"
-              onClick={() => setLocation("/auth/signup")}
-              data-testid="button-cta"
-            >
-              Get Started Free
-              <ArrowRight className="ml-2 h-4 w-4" />
-            </Button>
+        <section className="py-16 md:py-24 px-4">
+          <div className="max-w-5xl mx-auto flex flex-col md:flex-row items-center gap-12 md:gap-16">
+            <div className="flex-1 flex flex-col items-start text-left">
+              <Badge variant="secondary" className="mb-5">
+                <Zap className="h-3 w-3 mr-1" />
+                Start Free — No credit card required
+              </Badge>
+              <h1 className="text-4xl md:text-5xl font-bold tracking-tight mb-5 leading-tight" data-testid="text-headline">
+                Never get charged for a free trial again.
+              </h1>
+              <p className="text-lg text-muted-foreground mb-8 max-w-md" data-testid="text-subtext">
+                Track trials in seconds and get reminders before they renew.
+              </p>
+              <Button
+                size="lg"
+                className="text-base px-8 mb-3"
+                onClick={() => setLocation("/auth/signup")}
+                data-testid="button-cta"
+              >
+                Start Tracking My Trials
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+              <p className="text-sm text-muted-foreground mb-6">Free plan · No credit card required</p>
+              <div className="flex flex-col gap-2">
+                {[
+                  "Free plan available",
+                  "Takes less than 20 seconds",
+                  "No bank connection required",
+                ].map((bullet) => (
+                  <div key={bullet} className="flex items-center gap-2 text-sm text-foreground/80">
+                    <Check className="h-4 w-4 text-primary shrink-0" />
+                    <span>{bullet}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex-1 w-full max-w-lg">
+              <div className="rounded-xl border shadow-xl overflow-hidden bg-white">
+                <img
+                  src={dashboardScreenshot}
+                  alt="RecallTrial dashboard showing tracked trials"
+                  className="w-full h-auto block"
+                  data-testid="img-hero-screenshot"
+                />
+              </div>
+            </div>
           </div>
         </section>
 
@@ -162,12 +187,12 @@ export default function Landing() {
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {[
-                  { id: 's1', rating: 5, text: "RecallTrial saved me $15 on a subscription I forgot about. The email reminder was perfect!", name: "Sarah J.", location: "New York" },
-                  { id: 's2', rating: 5, text: "Simple, clean, and does exactly what it says. No more surprise charges for me.", name: "Mike D.", location: "London" },
-                  { id: 's3', rating: 4, text: "The best tool for managing free trials. Highly recommended for anyone who signs up for everything!", name: "Alex P.", location: "San Francisco" },
-                  { id: 's4', rating: 5, text: "I didn’t realize how much I was losing from forgotten trials until I started tracking them. This saved me more than I expected.", name: "Daniel K.", location: "Berlin" },
-                  { id: 's5', rating: 5, text: "I used to screenshot trial dates and still forget. Getting reminders 3, 2, and 1 day before renewal changed everything.", name: "Sarah M.", location: "Toronto" },
-                  { id: 's6', rating: 5, text: "The email scanning only looks for subscription-related keywords — nothing personal. Smart reminders without the privacy concern.", name: "Ahmed R.", location: "Dubai" }
+                  { id: 's1', rating: 5, text: "RecallTrial saved me $15 on a subscription I forgot about. The email reminder was perfect!", name: "Sarah J.", location: "Early beta user" },
+                  { id: 's2', rating: 5, text: "Simple, clean, and does exactly what it says. No more surprise charges for me.", name: "Mike D.", location: "Product Hunt user" },
+                  { id: 's3', rating: 4, text: "The best tool for managing free trials. Highly recommended for anyone who signs up for everything!", name: "Alex P.", location: "Startup founder" },
+                  { id: 's4', rating: 5, text: "I didn't realize how much I was losing from forgotten trials until I started tracking them. This saved me more than I expected.", name: "Daniel K.", location: "Early beta user" },
+                  { id: 's5', rating: 5, text: "I used to screenshot trial dates and still forget. Getting reminders 3, 2, and 1 day before renewal changed everything.", name: "Sarah M.", location: "Product Hunt user" },
+                  { id: 's6', rating: 5, text: "The email scanning only looks for subscription-related keywords — nothing personal. Smart reminders without the privacy concern.", name: "Ahmed R.", location: "Startup founder" }
                 ].map((review) => (
                   <Card key={review.id}>
                     <CardContent className="py-5">
