@@ -57,51 +57,46 @@ export default function Landing() {
 
       <main>
         <section className="py-16 md:py-24 px-4">
-          <div className="max-w-5xl mx-auto flex flex-col md:flex-row items-center gap-12 md:gap-16">
-            <div className="flex-1 flex flex-col items-start text-left">
-              <Badge variant="secondary" className="mb-5">
-                <Zap className="h-3 w-3 mr-1" />
-                Start Free — No credit card required
-              </Badge>
-              <h1 className="text-4xl md:text-5xl font-bold tracking-tight mb-5 leading-tight" data-testid="text-headline">
-                Never get charged for a free trial again.
-              </h1>
-              <p className="text-lg text-muted-foreground mb-8 max-w-md" data-testid="text-subtext">
-                Track trials in seconds and get reminders before they renew.
-              </p>
-              <Button
-                size="lg"
-                className="text-base px-8 mb-3"
-                onClick={() => setLocation("/auth/signup")}
-                data-testid="button-cta"
-              >
-                Start Tracking My Trials
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-              <p className="text-sm text-muted-foreground mb-6">Free plan · No credit card required</p>
-              <div className="flex flex-col gap-2">
-                {[
-                  "Free plan available",
-                  "Takes less than 20 seconds",
-                  "No bank connection required",
-                ].map((bullet) => (
-                  <div key={bullet} className="flex items-center gap-2 text-sm text-foreground/80">
-                    <Check className="h-4 w-4 text-primary shrink-0" />
-                    <span>{bullet}</span>
-                  </div>
-                ))}
-              </div>
+          <div className="max-w-3xl mx-auto flex flex-col items-center text-center">
+            <Badge variant="secondary" className="mb-5">
+              <Zap className="h-3 w-3 mr-1" />
+              Start Free — No credit card required
+            </Badge>
+            <h1 className="text-4xl md:text-5xl font-bold tracking-tight mb-5 leading-tight" data-testid="text-headline">
+              Never get charged for a free trial again.
+            </h1>
+            <p className="text-lg text-muted-foreground mb-8 max-w-md" data-testid="text-subtext">
+              Track trials in seconds and get reminders before they renew.
+            </p>
+            <Button
+              size="lg"
+              className="text-base px-8 mb-3"
+              onClick={() => setLocation("/auth/signup")}
+              data-testid="button-cta"
+            >
+              Start Tracking My Trials
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+            <p className="text-sm text-muted-foreground mb-6">Free plan · No credit card required</p>
+            <div className="flex flex-col sm:flex-row gap-3 sm:gap-6 mb-10">
+              {[
+                "Free plan available",
+                "Takes less than 20 seconds",
+                "No bank connection required",
+              ].map((bullet) => (
+                <div key={bullet} className="flex items-center gap-2 text-sm text-foreground/80">
+                  <Check className="h-4 w-4 text-primary shrink-0" />
+                  <span>{bullet}</span>
+                </div>
+              ))}
             </div>
-
-            <div className="flex-1 w-full max-w-lg">
-              <div className="rounded-xl border shadow-xl overflow-hidden bg-white">
-                <img
-                  src={dashboardScreenshot}
-                  alt="RecallTrial dashboard showing tracked trials"
-                  className="w-full h-auto block"
-                  data-testid="img-hero-screenshot"
-                />
-              </div>
+            <div className="w-full max-w-2xl rounded-xl border shadow-xl overflow-hidden bg-white">
+              <img
+                src={dashboardScreenshot}
+                alt="RecallTrial dashboard showing tracked trials"
+                className="w-full h-auto block"
+                data-testid="img-hero-screenshot"
+              />
             </div>
           </div>
         </section>
