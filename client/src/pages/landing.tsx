@@ -73,7 +73,7 @@ export default function Landing() {
 
       <main>
         <section className="py-16 md:py-24 px-4">
-          <div className="max-w-3xl mx-auto flex flex-col items-center text-center">
+          <div className="max-w-4xl mx-auto flex flex-col items-center text-center">
             <Badge variant="secondary" className="mb-5">
               <Zap className="h-3 w-3 mr-1" />
               Start Free — No credit card required
@@ -106,8 +106,8 @@ export default function Landing() {
                 </div>
               ))}
             </div>
-            <div className="w-full max-w-2xl" data-testid="img-hero-screenshot">
-              <div className="relative rounded-xl border shadow-xl overflow-hidden bg-white">
+            <div className="w-full" data-testid="img-hero-screenshot">
+              <div className="relative rounded-xl border shadow-2xl overflow-hidden bg-white">
                 {heroScreenshots.map((shot, i) => (
                   <img
                     key={i}
