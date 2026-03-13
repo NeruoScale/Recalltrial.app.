@@ -4,7 +4,8 @@ import session from "express-session";
 import { storage } from "./storage";
 import { signupSchema, loginSchema, insertTrialSchema } from "@shared/schema";
 import { extractDomain, getIconUrl } from "./icon";
-import { sendReminderEmail, sendTestEmail } from "./email";
+import { sendReminderEmail, sendTestEmail, sendPasswordResetEmail } from "./email";
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
@@ -182,6 +183,49 @@ export async function registerRoutes(
     req.session.destroy(() => {
       res.json({ ok: true });
     });
+  });
+
+  app.post("/api/auth/forgot-password", async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== "string") {
+        return res.status(400).json({ message: "Email is required" });
+      }
+      const user = await storage.getUserByEmail(email.trim().toLowerCase());
+      if (user) {
+        const token = crypto.randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+        await storage.createPasswordResetToken(user.id, token, expiresAt);
+        const appUrl = process.env.APP_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+        const resetUrl = `${appUrl}/auth/reset-password?token=${token}`;
+        await sendPasswordResetEmail(user.email, resetUrl);
+      }
+      return res.json({ message: "If an account exists with that email, we've sent a password reset link." });
+    } catch (err) {
+      console.error("Forgot password error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.post("/api/auth/reset-password", async (req: Request, res: Response) => {
+    try {
+      const { token, password } = req.body;
+      if (!token || typeof token !== "string") {
+        return res.status(400).json({ message: "Reset token is required" });
+      }
+      if (!password || typeof password !== "string" || password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      const passwordHash = await bcrypt.hash(password, 12);
+      const success = await storage.consumePasswordResetToken(token, passwordHash);
+      if (!success) {
+        return res.status(400).json({ message: "Invalid or expired reset link. Please request a new one." });
+      }
+      return res.json({ message: "Password has been reset. You can now log in." });
+    } catch (err) {
+      console.error("Reset password error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
   });
 
   app.get("/api/auth/me", requireAuth, async (req: Request, res: Response) => {

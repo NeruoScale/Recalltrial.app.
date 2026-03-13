@@ -25,8 +25,10 @@ client/src/
   lib/queryClient.ts - TanStack Query setup
   pages/
     landing.tsx     - Public landing page with pricing CTA
-    auth-login.tsx  - Login page
+    auth-login.tsx  - Login page (includes "Forgot password?" link)
     auth-signup.tsx - Signup page
+    auth-forgot-password.tsx - Request password reset email
+    auth-reset-password.tsx  - Reset password with token from email
     dashboard.tsx   - Main dashboard (urgent/upcoming/canceled trials, plan-aware limits, suggested trials for Pro)
     trial-new.tsx   - Add new trial form with fuzzy service search + calendar pickers
     trial-detail.tsx - Trial detail with reminders, calendar export
@@ -57,6 +59,8 @@ shared/
 - POST /api/auth/signup - Create account (logs signup event)
 - POST /api/auth/login - Log in (logs login event)
 - POST /api/auth/logout - Log out
+- POST /api/auth/forgot-password - Request password reset email (always returns 200 to prevent enumeration)
+- POST /api/auth/reset-password - Reset password with token (validates token, 1-hour expiry)
 - GET /api/auth/me - Current user (includes activeTrialCount, trialLimit, billingEnabled, emailScanningEnabled, gmailConnected, lastEmailScanAt)
 - PATCH /api/auth/settings - Update timezone OR toggle emailScanningEnabled (Pro only)
 - GET /api/trials - List user's trials
@@ -119,6 +123,7 @@ shared/
 - **reminders**: id, trialId, userId, remindAt, type (THREE_DAYS/TWO_DAYS/ONE_DAY), status (PENDING/SENT/SKIPPED/FAILED), sentAt, provider, providerMessageId, lastError, createdAt
 - **analytics_events**: id, userId, event, metadata (JSON string), createdAt
 - **suggested_trials**: id, userId, provider, messageId (unique per user+messageId), fromEmail, fromDomain, subject, receivedAt, serviceGuess, startDateGuess (nullable, explicit only), startDateSource ("explicit"|"none"), endDateGuess, amountGuess, currencyGuess, confidence (0-100), status (new/added/ignored), createdAt
+- **password_reset_tokens**: id (UUID PK), userId (FK → users), token (text unique), expiresAt (timestamp), usedAt (timestamp nullable), createdAt
 - **reviews**: id, rating (1-5), text, name, location, source (manual/in_app/import), isApproved, isFeatured, userId, createdAt
 
 ## Environment Variables

@@ -7,6 +7,8 @@ import { AuthProvider } from "@/lib/auth";
 import Landing from "@/pages/landing";
 import AuthLogin from "@/pages/auth-login";
 import AuthSignup from "@/pages/auth-signup";
+import AuthForgotPassword from "@/pages/auth-forgot-password";
+import AuthResetPassword from "@/pages/auth-reset-password";
 import Dashboard from "@/pages/dashboard";
 import TrialNew from "@/pages/trial-new";
 import TrialDetail from "@/pages/trial-detail";
@@ -24,6 +26,8 @@ function Router() {
       <Route path="/" component={Landing} />
       <Route path="/auth/login" component={AuthLogin} />
       <Route path="/auth/signup" component={AuthSignup} />
+      <Route path="/auth/forgot-password" component={AuthForgotPassword} />
+      <Route path="/auth/reset-password" component={AuthResetPassword} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/trials/new" component={TrialNew} />
       <Route path="/trials/:id" component={TrialDetail} />

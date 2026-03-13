@@ -1,6 +1,6 @@
 import { eq, and, lte, sql, count, desc } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, type User, type Trial, type Reminder, type Review, type SuggestedTrial } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -57,6 +57,11 @@ export interface IStorage {
   markSuggestedTrialAdded(id: string, userId: string): Promise<SuggestedTrial | undefined>;
   markSuggestedTrialIgnored(id: string, userId: string): Promise<SuggestedTrial | undefined>;
   getSuggestedTrialById(id: string, userId: string): Promise<SuggestedTrial | undefined>;
+
+  createPasswordResetToken(userId: string, token: string, expiresAt: Date): Promise<PasswordResetToken>;
+  getPasswordResetToken(token: string): Promise<PasswordResetToken | undefined>;
+  consumePasswordResetToken(token: string, newPasswordHash: string): Promise<boolean>;
+  updateUserPassword(userId: string, passwordHash: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -376,6 +381,28 @@ export class DatabaseStorage implements IStorage {
       and(eq(suggestedTrials.id, id), eq(suggestedTrials.userId, userId))
     ).returning();
     return row;
+  }
+
+  async createPasswordResetToken(userId: string, token: string, expiresAt: Date): Promise<PasswordResetToken> {
+    const [row] = await db.insert(passwordResetTokens).values({ userId, token, expiresAt }).returning();
+    return row;
+  }
+
+  async getPasswordResetToken(token: string): Promise<PasswordResetToken | undefined> {
+    const [row] = await db.select().from(passwordResetTokens).where(eq(passwordResetTokens.token, token)).limit(1);
+    return row;
+  }
+
+  async consumePasswordResetToken(token: string, newPasswordHash: string): Promise<boolean> {
+    const resetToken = await this.getPasswordResetToken(token);
+    if (!resetToken || resetToken.usedAt || resetToken.expiresAt < new Date()) return false;
+    await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(eq(passwordResetTokens.token, token));
+    await db.update(users).set({ passwordHash: newPasswordHash }).where(eq(users.id, resetToken.userId));
+    return true;
+  }
+
+  async updateUserPassword(userId: string, passwordHash: string): Promise<void> {
+    await db.update(users).set({ passwordHash }).where(eq(users.id, userId));
   }
 }
 

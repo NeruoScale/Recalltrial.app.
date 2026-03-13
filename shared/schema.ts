@@ -131,6 +131,17 @@ export const insertSuggestedTrialSchema = createInsertSchema(suggestedTrials).om
 export type SuggestedTrial = typeof suggestedTrials.$inferSelect;
 export type InsertSuggestedTrial = z.infer<typeof insertSuggestedTrialSchema>;
 
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  token: text("token").notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
+
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 
 export const reviews = pgTable("reviews", {

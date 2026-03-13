@@ -52,5 +52,21 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] TWO_DAYS enum:", err.message);
   }
 
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id varchar NOT NULL REFERENCES users(id),
+        token text NOT NULL UNIQUE,
+        expires_at timestamp NOT NULL,
+        used_at timestamp,
+        created_at timestamp DEFAULT now() NOT NULL
+      );
+    `);
+    console.log("[migrate] password_reset_tokens table OK");
+  } catch (err: any) {
+    console.error("[migrate] password_reset_tokens:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

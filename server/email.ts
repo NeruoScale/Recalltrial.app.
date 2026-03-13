@@ -104,6 +104,55 @@ export async function sendReminderEmail(trial: Trial, user: User, reminderType: 
   }
 }
 
+export async function sendPasswordResetEmail(to: string, resetUrl: string): Promise<EmailSendResult> {
+  const subject = "[RecallTrial] Reset your password";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;padding:20px;color:#111827;line-height:1.5;">
+  <div style="max-width:500px;margin:0 auto;">
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:24px;">Reset your password</h1>
+    <p style="margin-bottom:16px;">We received a request to reset the password for your RecallTrial account.</p>
+    <p style="margin-bottom:24px;">Click the button below to choose a new password. This link expires in 1 hour.</p>
+    <a href="${resetUrl}" style="display:inline-block;background:#2563eb;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;font-size:16px;">
+      Reset Password
+    </a>
+    <p style="margin-top:24px;color:#6b7280;font-size:14px;">If you didn't request this, you can safely ignore this email. Your password won't change.</p>
+    <div style="margin-top:48px;padding-top:24px;border-top:1px solid #e5e7eb;color:#6b7280;font-size:13px;">
+      <p>RecallTrial — Never get charged for a free trial again.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  if (!resend) {
+    console.log(`[Email] Would send password reset to ${to}: ${resetUrl}`);
+    return { success: true, messageId: "console-only" };
+  }
+
+  const fromEmail = getFromEmail();
+  const replyTo = getReplyToEmail();
+
+  try {
+    const sendOptions: any = { from: fromEmail, to, subject, html };
+    if (replyTo) sendOptions.replyTo = replyTo;
+    const result = await resend.emails.send(sendOptions);
+    if (result?.error) {
+      const errorMessage = result.error.message || JSON.stringify(result.error);
+      console.error(`[Email] Password reset send failed:`, errorMessage);
+      return { success: false, error: errorMessage };
+    }
+    const messageId = result?.data?.id || undefined;
+    console.log(`[Email] Password reset email sent to ${to} (id: ${messageId})`);
+    return { success: true, messageId };
+  } catch (err: any) {
+    const errorMessage = err?.message || String(err);
+    console.error(`[Email] Password reset email failed:`, errorMessage);
+    return { success: false, error: errorMessage };
+  }
+}
+
 export async function sendTestEmail(to: string, subject?: string, message?: string): Promise<EmailSendResult & { usedFromEmail: string; usedReplyToEmail: string | null }> {
   const fromEmail = getFromEmail();
   const replyTo = getReplyToEmail();
