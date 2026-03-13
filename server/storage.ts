@@ -395,19 +395,22 @@ export class DatabaseStorage implements IStorage {
 
   async consumePasswordResetToken(token: string, newPasswordHash: string): Promise<boolean> {
     const now = new Date();
-    const [claimed] = await db.update(passwordResetTokens)
-      .set({ usedAt: now })
-      .where(
-        and(
-          eq(passwordResetTokens.token, token),
-          sql`${passwordResetTokens.usedAt} IS NULL`,
-          sql`${passwordResetTokens.expiresAt} > ${now}`
+    const result = await db.transaction(async (tx) => {
+      const [claimed] = await tx.update(passwordResetTokens)
+        .set({ usedAt: now })
+        .where(
+          and(
+            eq(passwordResetTokens.token, token),
+            sql`${passwordResetTokens.usedAt} IS NULL`,
+            sql`${passwordResetTokens.expiresAt} > ${now}`
+          )
         )
-      )
-      .returning();
-    if (!claimed) return false;
-    await db.update(users).set({ passwordHash: newPasswordHash }).where(eq(users.id, claimed.userId));
-    return true;
+        .returning();
+      if (!claimed) return false;
+      await tx.update(users).set({ passwordHash: newPasswordHash }).where(eq(users.id, claimed.userId));
+      return true;
+    });
+    return result;
   }
 
   async updateUserPassword(userId: string, passwordHash: string): Promise<void> {

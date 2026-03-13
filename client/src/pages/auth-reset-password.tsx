@@ -22,7 +22,7 @@ export default function AuthResetPassword() {
 
   useEffect(() => {
     if (success) {
-      const timer = setTimeout(() => setLocation("/auth/login"), 3000);
+      const timer = setTimeout(() => setLocation("/auth/login?reset=success"), 3000);
       return () => clearTimeout(timer);
     }
   }, [success, setLocation]);
@@ -84,7 +84,7 @@ export default function AuthResetPassword() {
                 <p className="text-sm text-muted-foreground" data-testid="text-reset-success">
                   You can now log in with your new password. Redirecting to login...
                 </p>
-                <Button className="w-full" onClick={() => setLocation("/auth/login")} data-testid="button-go-to-login">
+                <Button className="w-full" onClick={() => setLocation("/auth/login?reset=success")} data-testid="button-go-to-login">
                   Go to login
                 </Button>
               </div>

@@ -15,10 +15,19 @@ export default function AuthLogin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resetSuccess, setResetSuccess] = useState(false);
 
   useEffect(() => {
     if (user) setLocation("/dashboard");
   }, [user, setLocation]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reset") === "success") {
+      setResetSuccess(true);
+      window.history.replaceState({}, "", "/auth/login");
+    }
+  }, []);
 
   if (user) return null;
 
@@ -47,6 +56,11 @@ export default function AuthLogin() {
             <CardDescription>Log in to manage your trials</CardDescription>
           </CardHeader>
           <CardContent>
+            {resetSuccess && (
+              <div className="mb-4 p-3 rounded-md bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 text-center" data-testid="text-reset-success-banner">
+                <p className="text-sm text-green-700 dark:text-green-400">Your password has been reset successfully. Log in with your new password.</p>
+              </div>
+            )}
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
