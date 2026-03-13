@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Shield, Mail, Database, Bell, Clock, ExternalLink, ArrowRight, Zap, Star, Check } from "lucide-react";
 import type { Review } from "@shared/schema";
 import screenshotDashboard from "@assets/Screenshot_2026-03-06_033344_1772839862379.png";
@@ -296,6 +297,86 @@ export default function Landing() {
                   </CardContent>
                 </Card>
               ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="py-16 px-4" data-testid="section-faq">
+          <div className="max-w-2xl mx-auto">
+            <div className="text-center mb-10">
+              <h2 className="text-2xl font-bold mb-2">Frequently Asked Questions</h2>
+              <p className="text-muted-foreground">Everything you need to know about RecallTrial</p>
+            </div>
+            <Accordion type="single" collapsible className="space-y-3">
+              {[
+                {
+                  q: "How does RecallTrial help me avoid free trial charges?",
+                  a: "RecallTrial lets you track your free trials in one place and sends reminders before they renew, so you can cancel in time and avoid surprise charges.",
+                },
+                {
+                  q: "Do I need to connect my bank account?",
+                  a: "No. RecallTrial does not require bank access. You can add trials manually, and email scanning is optional for Pro users.",
+                },
+                {
+                  q: "Do I need to connect my email inbox?",
+                  a: "No. You can use RecallTrial without connecting your inbox. Email scanning is an optional Pro feature that helps detect subscription-related emails automatically.",
+                },
+                {
+                  q: "How do reminders work?",
+                  a: "RecallTrial sends reminders before your trial or subscription renews. Current reminders are scheduled 3 days, 2 days, and 1 day before the renewal date.",
+                },
+                {
+                  q: "Can I cancel subscriptions directly in RecallTrial?",
+                  a: "RecallTrial helps you open the cancel page quickly, but cancellation still happens on the service provider's website.",
+                },
+                {
+                  q: "Is my data safe?",
+                  a: "Yes. RecallTrial is built with privacy in mind. We never require bank credentials, and email scanning is optional and limited to subscription-related metadata.",
+                },
+                {
+                  q: "What happens if RecallTrial can't detect the start date?",
+                  a: "If a start date is not clearly found, RecallTrial leaves it blank as \"Not detected\" so you can add it manually instead of showing incorrect information.",
+                },
+                {
+                  q: "What plans does RecallTrial offer?",
+                  a: "RecallTrial includes a free plan for tracking a limited number of active trials, with paid plans for unlimited tracking and advanced features like email scanning.",
+                },
+                {
+                  q: "Can I add trials manually?",
+                  a: "Yes. You can add a service, renewal date, and cancel link manually in seconds without connecting any external account.",
+                },
+                {
+                  q: "What does email scanning actually read?",
+                  a: "Email scanning only looks at limited metadata such as sender, subject, received date, and short snippets to detect possible subscriptions. It does not read full email bodies.",
+                },
+              ].map((item, i) => (
+                <AccordionItem
+                  key={i}
+                  value={`faq-${i}`}
+                  className="border rounded-lg px-5 data-[state=open]:bg-muted/30"
+                  data-testid={`faq-item-${i}`}
+                >
+                  <AccordionTrigger className="text-left font-medium text-sm md:text-base hover:no-underline py-4">
+                    {item.q}
+                  </AccordionTrigger>
+                  <AccordionContent className="text-sm text-muted-foreground pb-4 leading-relaxed">
+                    {item.a}
+                  </AccordionContent>
+                </AccordionItem>
+              ))}
+            </Accordion>
+
+            <div className="mt-12 text-center">
+              <p className="text-sm text-muted-foreground mb-4">Still have questions?</p>
+              <Button
+                variant="outline"
+                className="rounded-full px-6"
+                onClick={() => window.location.href = "mailto:ayoubsikebir@outlook.com"}
+                data-testid="button-contact-support"
+              >
+                <Mail className="h-4 w-4 mr-2" />
+                Contact Support
+              </Button>
             </div>
           </div>
         </section>

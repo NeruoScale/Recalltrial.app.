@@ -1,0 +1,75 @@
+Please add a new FAQ section to the RecallTrial landing page inspired by the attached screenshots.
+
+Goal:
+Add a clean “Frequently Asked Questions” section that matches RecallTrial branding and improves trust/conversion.
+
+Section title:
+Frequently Asked Questions
+
+Subtitle:
+Everything you need to know about RecallTrial
+
+Requirements:
+1) Add the FAQ section near the lower part of the landing page, before the footer.
+2) Use an accordion layout like in the screenshots:
+   - each question in a rounded card
+   - plus icon on the right
+   - click expands/collapses answer
+   - clean minimal style matching current design
+3) Keep the wording focused on RecallTrial, not SubDupes.
+
+Add these FAQ questions and answers:
+
+Q1: How does RecallTrial help me avoid free trial charges?
+A: RecallTrial lets you track your free trials in one place and sends reminders before they renew, so you can cancel in time and avoid surprise charges.
+
+Q2: Do I need to connect my bank account?
+A: No. RecallTrial does not require bank access. You can add trials manually, and email scanning is optional for Pro users.
+
+Q3: Do I need to connect my email inbox?
+A: No. You can use RecallTrial without connecting your inbox. Email scanning is an optional Pro feature that helps detect subscription-related emails automatically.
+
+Q4: How do reminders work?
+A: RecallTrial sends reminders before your trial or subscription renews. Current reminders are scheduled 3 days, 2 days, and 1 day before the renewal date.
+
+Q5: Can I cancel subscriptions directly in RecallTrial?
+A: RecallTrial helps you open the cancel page quickly, but cancellation still happens on the service provider’s website.
+
+Q6: Is my data safe?
+A: Yes. RecallTrial is built with privacy in mind. We never require bank credentials, and email scanning is optional and limited to subscription-related metadata.
+
+Q7: What happens if RecallTrial can’t detect the start date?
+A: If a start date is not clearly found, RecallTrial leaves it blank as “Not detected” so you can add it manually instead of showing incorrect information.
+
+Q8: What plans does RecallTrial offer?
+A: RecallTrial includes a free plan for tracking a limited number of active trials, with paid plans for unlimited tracking and advanced features like email scanning.
+
+Q9: Can I add trials manually?
+A: Yes. You can add a service, renewal date, and cancel link manually in seconds without connecting any external account.
+
+Q10: What does email scanning actually read?
+A: Email scanning only looks at limited metadata such as sender, subject, received date, and short snippets to detect possible subscriptions. It does not read full email bodies.
+
+4) Add a “Still have questions?” block under the FAQ section.
+5) Add a button:
+   Contact Support
+6) Make this button open the user’s email app with:
+   mailto:ayoubsikebir@outlook.com
+7) Also show a small helper line under the button or above it:
+   Still have questions?
+8) Keep the style consistent with the screenshots:
+   - centered section title
+   - accordion cards
+   - rounded contact support button
+   - clean spacing
+   - desktop + mobile responsive
+
+Important:
+- Do not change the rest of the page layout.
+- Only add this FAQ + contact support area cleanly into the landing page.
+- Make sure the accordion works properly on mobile.
+
+Deliverable:
+- confirm which files were updated
+- confirm FAQ accordion was added
+- confirm Contact Support button uses mailto:ayoubsikebir@outlook.com
