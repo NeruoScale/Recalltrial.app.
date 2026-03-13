@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Link, useLocation } from "wouter";
-import { Bell, Loader2, CheckCircle2 } from "lucide-react";
+import { Bell, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -15,9 +15,17 @@ export default function AuthResetPassword() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   const params = new URLSearchParams(window.location.search);
   const token = params.get("token");
+
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setLocation("/auth/login"), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [success, setLocation]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,11 +38,12 @@ export default function AuthResetPassword() {
       return;
     }
     setLoading(true);
+    setTokenError(null);
     try {
       await apiRequest("POST", "/api/auth/reset-password", { token, password });
       setSuccess(true);
     } catch (err: any) {
-      toast({ title: "Reset failed", description: err.message || "Invalid or expired reset link.", variant: "destructive" });
+      setTokenError(err.message || "Invalid or expired reset link. Please request a new one.");
     } finally {
       setLoading(false);
     }
@@ -59,6 +68,7 @@ export default function AuthResetPassword() {
           <CardContent>
             {!token ? (
               <div className="text-center space-y-4">
+                <AlertCircle className="h-12 w-12 text-destructive mx-auto" />
                 <p className="text-sm text-destructive" data-testid="text-missing-token">
                   Invalid reset link. Please request a new password reset.
                 </p>
@@ -72,7 +82,7 @@ export default function AuthResetPassword() {
               <div className="text-center space-y-4">
                 <CheckCircle2 className="h-12 w-12 text-green-500 mx-auto" />
                 <p className="text-sm text-muted-foreground" data-testid="text-reset-success">
-                  You can now log in with your new password.
+                  You can now log in with your new password. Redirecting to login...
                 </p>
                 <Button className="w-full" onClick={() => setLocation("/auth/login")} data-testid="button-go-to-login">
                   Go to login
@@ -80,6 +90,17 @@ export default function AuthResetPassword() {
               </div>
             ) : (
               <>
+                {tokenError && (
+                  <div className="mb-4 p-3 rounded-md bg-destructive/10 border border-destructive/20 text-center space-y-2" data-testid="text-token-error">
+                    <div className="flex items-center justify-center gap-2">
+                      <AlertCircle className="h-4 w-4 text-destructive" />
+                      <p className="text-sm text-destructive">{tokenError}</p>
+                    </div>
+                    <Link href="/auth/forgot-password" className="text-sm text-primary font-medium hover:underline" data-testid="link-request-new-reset">
+                      Request a new reset link
+                    </Link>
+                  </div>
+                )}
                 <form onSubmit={handleSubmit} className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="password">New password</Label>
