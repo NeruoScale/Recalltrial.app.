@@ -139,7 +139,8 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.errors[0].message });
       }
-      const { email, password } = parsed.data;
+      const { email: rawEmail, password } = parsed.data;
+      const email = rawEmail.trim().toLowerCase();
       const existing = await storage.getUserByEmail(email);
       if (existing) {
         return res.status(409).json({ message: "Email already registered" });
@@ -161,7 +162,8 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.errors[0].message });
       }
-      const { email, password } = parsed.data;
+      const { email: rawEmail, password } = parsed.data;
+      const email = rawEmail.trim().toLowerCase();
       const user = await storage.getUserByEmail(email);
       if (!user) {
         return res.status(401).json({ message: "Invalid email or password" });
