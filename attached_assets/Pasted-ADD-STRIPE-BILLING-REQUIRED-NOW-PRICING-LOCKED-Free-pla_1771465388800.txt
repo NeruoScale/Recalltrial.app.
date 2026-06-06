@@ -1,0 +1,107 @@
+ADD STRIPE BILLING (REQUIRED NOW)
+
+PRICING (LOCKED)
+- Free plan: up to 3 ACTIVE trials.
+- Pro Monthly: $3.99/month
+- Pro Yearly: $39/year
+- Pro unlocks unlimited active trials + extra reminder (6 hours) + reminder history.
+
+STRIPE IMPLEMENTATION REQUIREMENTS
+Use Stripe Subscriptions with Stripe Checkout (hosted checkout).
+Implement:
+1) Stripe products/prices:
+   - recalltrial_pro_monthly (USD 3.99 / month recurring)
+   - recalltrial_pro_yearly (USD 39 / year recurring)
+   Create these in Stripe Dashboard OR via Stripe API (document steps in README).
+
+2) Database changes (Prisma):
+Add to User model:
+- plan: enum FREE|PRO (default FREE)
+- stripeCustomerId: string? (unique nullable)
+- stripeSubscriptionId: string? (unique nullable)
+- subscriptionStatus: enum ACTIVE|CANCELED|PAST_DUE|INCOMPLETE (nullable)
+- currentPeriodEnd: DateTime? (nullable)
+- createdAt already exists
+
+Add enums:
+enum Plan { FREE PRO }
+enum SubscriptionStatus { ACTIVE CANCELED PAST_DUE INCOMPLETE }
+
+3) Upgrade flow (UI)
+- Add "Upgrade" button in header + pricing page.
+- When user hits limit (3 active trials), block creation and show upgrade modal.
+- Modal copy:
+  “You’ve reached the free limit (3 active trials). Upgrade to Pro for unlimited trials and priority reminders.”
+
+4) Checkout endpoints
+Create route handlers:
+- POST /api/billing/create-checkout-session
+  Input: { priceId: string } (monthly or yearly)
+  Auth required
+  Behavior:
+   - Find/create Stripe Customer for user (store stripeCustomerId).
+   - Create Checkout Session mode=subscription with selected priceId
+   - success_url = APP_URL + "/billing/success?session_id={CHECKOUT_SESSION_ID}"
+   - cancel_url = APP_URL + "/pricing"
+   - Return session.url
+
+- GET /billing/success page
+  - Shows “Payment successful” and “Go to dashboard”.
+  - Does NOT trust query alone; relies on webhook to activate plan.
+
+5) Webhook endpoint (critical)
+- POST /api/webhooks/stripe
+  - Verify Stripe signature using STRIPE_WEBHOOK_SECRET
+  - Handle events:
+    a) checkout.session.completed
+       - Retrieve subscription + customer
+       - Update user:
+         plan = PRO
+         stripeSubscriptionId
+         subscriptionStatus = ACTIVE (or derived from subscription.status)
+         currentPeriodEnd
+    b) customer.subscription.updated
+       - Update subscriptionStatus + currentPeriodEnd accordingly
+    c) customer.subscription.deleted
+       - Downgrade user:
+         plan = FREE
+         subscriptionStatus = CANCELED
+         currentPeriodEnd = null
+       - If user has >3 active trials, do NOT delete data; keep them but block creating new ones and show “Upgrade to manage more than 3 active trials.” Optionally require user to archive/cancel extra trials to get back within free limits.
+
+Important: Map Stripe customer email to user carefully; prefer metadata:
+- When creating checkout session set metadata: { userId }
+- And/or set subscription metadata: { userId }
+
+6) Enforce plan limits
+- Server-side enforcement on create trial:
+  If user.plan=FREE AND count(ACTIVE trials) >= 3 -> return 403 with code "PLAN_LIMIT_REACHED"
+- UI catches this and shows upgrade modal.
+
+7) Pricing page
+- /pricing page showing Free vs Pro monthly/yearly with two buttons:
+  - “Upgrade Monthly”
+  - “Upgrade Yearly”
+- Show annual as “Best value”.
+- If user already PRO, show “You’re on Pro” and hide upgrade buttons.
+
+8) Environment variables (must list in README)
+- STRIPE_SECRET_KEY
+- STRIPE_WEBHOOK_SECRET
+- STRIPE_PRICE_ID_MONTHLY
+- STRIPE_PRICE_ID_YEARLY
+- APP_URL
+- DATABASE_URL
+- CRON_KEY
+- EMAIL_PROVIDER_API_KEY (Resend) or SMTP vars
+
+9) README additions
+- Steps to create Stripe products/prices and copy Price IDs
+- How to run Stripe CLI webhook forwarding for local dev
+- How to set webhook endpoint URL on Replit deployment
+
+QUALITY REQUIREMENTS
+- Webhook signature verification is mandatory.
+- Never set user to PRO based solely on client-side success redirect.
+- Must be idempotent: same webhook event should not break state.
+- Strong error handling and logging for webhook processing.

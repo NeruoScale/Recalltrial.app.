@@ -1,0 +1,110 @@
+We need to upgrade the RecallTrial web app to support 3 pricing plans + Stripe test mode (sandbox). Current stack: Flask + SSR templates. Please implement end-to-end billing in Stripe TEST mode, including Checkout + webhook handling + plan enforcement.
+
+1) Plans + Rules
+
+Create 3 plans in the app:
+
+Free ($0)
+
+Max 3 active trials/reminders total
+
+Email reminders (3 days + 1 day before renewal)
+
+Cancel link storage
+
+Plus ($3.99/month)
+
+Unlimited trials/reminders
+
+Calendar add (.ics download or “Add to Calendar” button stays enabled)
+
+Reminder customization (optional: allow user to toggle 3d / 1d reminders)
+
+Pro ($7.99/month)
+
+Everything in Plus
+
+Email scanning: Coming later (opt-in) (UI only for now; no real scanning yet)
+
+Show label: “Email scanning is optional. Coming later as an opt-in feature. Your inbox stays private.”
+
+2) Database Changes
+
+Add fields to user model:
+
+plan enum: free | plus | pro (default free)
+
+stripe_customer_id
+
+stripe_subscription_id
+
+plan_status (active, past_due, canceled) optional
+
+plan_renewal_at optional
+
+Add server logic to enforce limits:
+
+If plan=free, block creating a new trial when active trials >= 3.
+
+Plus/Pro unlimited.
+
+3) UI Updates
+
+Add a Pricing page (route /pricing) with 3 cards and “Upgrade” buttons.
+
+Add “Current plan” badge in Settings.
+
+When Free user hits limit, show CTA: “Upgrade to Plus to add unlimited trials + calendar.”
+
+4) Stripe Test Mode (Sandbox) Activation
+
+Re-enable Stripe sandbox:
+
+Use secrets: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET
+
+Add the keys to Replit Secrets and ensure app reads them correctly.
+
+Confirm we are using Stripe test keys (sk_test…).
+
+5) Checkout + Webhooks
+
+Implement:
+
+Stripe Checkout Session for Plus and Pro (recurring monthly)
+
+Success URL: /billing/success
+
+Cancel URL: /pricing
+
+Webhook endpoint: /stripe/webhook
+Handle events:
+
+checkout.session.completed → set user plan + store customer/subscription IDs
+
+customer.subscription.updated and customer.subscription.deleted → update plan status; if canceled, revert to Free
+
+Make webhook verification strict using STRIPE_WEBHOOK_SECRET
+
+6) Manage Subscription
+
+Add “Manage billing” button that opens Stripe Customer Portal (test mode) OR at minimum implement “Cancel subscription” action via API.
+
+7) Testing Checklist
+
+Free user can create up to 3 trials; 4th is blocked.
+
+Upgrade to Plus removes limit instantly.
+
+Cancel subscription returns user to Free and re-applies limits.
+
+Ensure reminders still send as before (Resend integration unchanged).
+
+Deliverables:
+
+Updated backend routes + Stripe integration
+
+Updated templates for pricing/settings
+
+Migration or safe DB update for existing users
+
+Notes in README: how to set Stripe test keys + webhook forwarding for local testing

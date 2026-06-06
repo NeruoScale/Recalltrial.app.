@@ -1,0 +1,101 @@
+GOAL
+========================================
+Add a Reviews section to increase trust and conversions, and optionally collect reviews from users inside the app. Reviews shown publicly must be admin-approved.
+
+========================================
+REQUIREMENTS (MVP = MUST DO)
+========================================
+
+A) Database Model (SQLite via SQLAlchemy)
+Create a Review model/table with fields:
+- id (int, PK)
+- created_at (datetime, default now)
+- rating (int, 1..5, required)
+- text (string/text, required, max ~300 chars)
+- name (string, optional, max ~60)
+- location (string, optional, max ~60)
+- source (string, default "manual")  # manual / in_app / import
+- is_approved (bool, default False)
+- is_featured (bool, default False)
+
+Add migration/init-db support:
+- If project has an init-db command, ensure Review table is created there too.
+- If no migration system exists, use db.create_all() path consistent with the app.
+
+B) Public Reviews Section (Landing Page)
+1) Add a “Reviews” section on the main landing page (or the most marketing-facing page).
+2) Show only approved reviews:
+   - Display as modern cards: stars, review text, name/location (if provided).
+   - Show 6 reviews max by default; if more exist, show a “View more” button that expands or links to /reviews.
+3) Add a small trust line like:
+   - “Trusted by people who hate surprise renewals.”
+4) Provide a fallback if no reviews exist yet:
+   - show 3–6 placeholder reviews stored in code OR seed a few in init-db as approved.
+
+C) Public Reviews Page
+Create route:
+- GET /reviews
+Show all approved reviews with pagination or simple “load more” (keep it simple).
+
+D) Admin Moderation (MVP must have)
+Create a hidden admin page to manage reviews:
+- GET /admin/reviews
+- List all reviews (approved + pending)
+- Actions:
+  - Approve
+  - Reject/Delete
+  - Toggle featured
+- Basic protection:
+  - Use a simple ADMIN_PIN or ADMIN_SECRET env var check, or reuse existing session auth if the app already has admin login.
+  - Do NOT leave /admin open.
+Add CSRF protection to admin actions if CSRF exists in the app; otherwise implement minimal CSRF for admin forms.
+
+========================================
+OPTIONAL (DO IF EASY, BUT NOT REQUIRED)
+========================================
+
+E) In-app Review Submission
+1) Add a “Leave a Review” button in the app UI (e.g., settings/footer).
+2) Route:
+- GET /review/new  -> form (rating, text, name optional, location optional)
+- POST /review/new -> create Review row with is_approved=False, source="in_app"
+3) After submit:
+- show success message: “Thanks! Your review will appear after approval.”
+
+Validation rules:
+- rating must be 1–5
+- text required (min 10 chars), max 300
+- sanitize/strip HTML (store plain text)
+- simple spam guard: basic rate limit using session (e.g., max 2 submissions/day per session)
+
+========================================
+UI / DESIGN
+========================================
+- Keep it modern: clean spacing, rounded cards, subtle shadow, responsive grid.
+- Match the existing app style (colors/fonts).
+- Add star rendering (★★★★★) based on rating.
+- Ensure good mobile layout.
+
+========================================
+DELIVERABLES
+========================================
+1) List files changed (backend + templates + css/js).
+2) Confirm how admin protection works and which env var is required.
+3) Provide the exact URLs:
+   - Public landing section location
+   - /reviews
+   - /admin/reviews
+   - /review/new (if implemented)
+4) Run a quick smoke test:
+   - Seed review shows on landing
+   - Submitting review creates pending record
+   - Admin approve makes it visible publicly
+   - Delete works
+
+========================================
+CONSTRAINTS
+========================================
+- Do not add heavy dependencies unless absolutely necessary.
+- Keep code consistent with existing patterns in the project.
+- Ensure public pages never show unapproved reviews.
+Start by searching the current templates to find the landing page and where to insert the section.

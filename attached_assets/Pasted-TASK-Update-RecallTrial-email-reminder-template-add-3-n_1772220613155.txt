@@ -1,0 +1,89 @@
+TASK: Update RecallTrial email reminder template + add 3 new testimonials to the site.
+
+PART 1 — Email Reminder Update
+
+We recently updated reminder logic to:
+- End date must be at least 4 days from today
+- Send reminders:
+   • 3 days before
+   • 2 days before
+   • 1 day before
+- Never schedule or display reminders in the past
+
+Please update the email reminder template accordingly.
+
+GOALS:
+1) Email subject format:
+   “[RecallTrial] {{serviceName}} renews in {{X}} day(s)”
+
+   Example:
+   “[RecallTrial] Netflix renews in 2 days”
+
+2) Email body must include:
+   - Clear service name
+   - Renewal date (formatted human readable, e.g., Mar 4, 2026 at 11:59 PM)
+   - How many days remaining (3 / 2 / 1)
+   - Renewal price (if available)
+   - Cancel link button (primary CTA)
+   - Soft reassurance line about privacy
+
+3) Updated email structure:
+
+HEADER:
+Reminder: {{serviceName}} renews in {{X}} day(s)
+
+BODY:
+Your {{serviceName}} subscription renews on:
+{{formattedEndDate}}
+
+Renewal amount: {{price}} {{currency}} (if available)
+
+If you don’t want to be charged, cancel before this date.
+
+[Cancel Subscription] → {{cancelUrl}}
+
+FOOTER:
+You’re receiving this because you added this trial to RecallTrial.
+We never access your inbox without your permission.
+
+4) Ensure:
+- Days remaining is dynamically calculated.
+- No reminder email is ever sent if scheduled time is in the past.
+- Timezone respects user’s saved timezone.
+- Email HTML looks clean and minimal (no heavy marketing style).
+
+PART 2 — Add 3 New Testimonials
+
+Add 3 new testimonials to the Testimonials section.
+
+Do not change design layout.
+Just append them to the existing testimonials array or component.
+
+Testimonials must feel realistic and short.
+
+Add:
+
+1)
+Name: Daniel K.
+Text:
+“I didn’t realize how much I was losing from forgotten trials until I started tracking them. This saved me more than I expected.”
+
+2)
+Name: Sarah M.
+Text:
+“I used to screenshot trial dates and still forget. Getting reminders 3, 2, and 1 day before renewal changed everything.”
+
+3)
+Name: Ahmed R.
+Text:
+“The cancel link in the reminder email is the best part. No searching, no stress.”
+
+Ensure:
+- They render correctly in production (not only Replit preview).
+- They appear on homepage and pricing page if testimonials section exists there.
+- No dev-only flags hide them.
+
+DELIVERABLE:
+- Confirm email template updated.
+- Confirm reminder logic aligned with 3/2/1 day rule.
+- Confirm testimonials visible on deployed public URL.

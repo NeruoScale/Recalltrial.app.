@@ -1,0 +1,155 @@
+We already have Gmail scanning working with:
+- Gmail search over last 90 days
+- metadata-only read (subject, snippet, sender, date)
+- service extraction (sender domain)
+- end date parsing (regex + duration)
+- price parsing (regex)
+- confidence scoring + dedupe
+- discard if end date is in past
+
+Now we need to upgrade detection accuracy to ~99% and reduce false positives.
+Implement these improvements:
+
+========================================
+1) TWO-PHASE GMAIL SEARCH (reduce noise)
+========================================
+
+Phase A (high precision): search last 90 days with ONLY strong lifecycle terms and exclude promotions.
+Use something like:
+("free trial has started" OR "trial started" OR "trial ends" OR "trial expires" OR "subscription started" OR "subscription is now active" OR "renews on" OR "next billing date" OR "will be charged on" OR "auto-renewal" OR "cancel before")
+AND (-category:promotions)
+
+Phase B (broad): include weaker terms such as receipt/invoice/billing, but DO NOT accept results unless validated by strict rules (see section 3).
+("trial" OR "subscription" OR "renewal" OR "invoice" OR "receipt" OR "billing")
+AND (-category:social)
+
+Combine Phase A + Phase B results, de-dupe by message_id before processing.
+
+========================================
+2) KEYWORD ENGINE (not just flat scoring)
+========================================
+
+Define:
+
+A) REQUIRED TRIGGERS (must-have at least one in subject+snippet)
+- "trial has started"
+- "trial started"
+- "your trial"
+- "trial ends"
+- "trial expires"
+- "subscription started"
+- "subscription is now active"
+- "renews on"
+- "renewal"
+- "next billing date"
+- "will be charged"
+- "cancel before"
+- "auto-renewal"
+
+B) STRONG NEGATIVES (hard reject)
+Reject if subject/snippet contains:
+- shipping, shipped, delivery, tracking, order delivered
+- job, interview, application, candidate
+- court, hearing, trial date (legal)
+- webinar, event, meetup
+- newsletter, digest, blog, announcement
+- discount, promo, sale, offer, % off
+
+C) RECEIPT FILTER (avoid one-time purchases)
+If "receipt" or "invoice" appears, require at least ONE subscription-lifecycle phrase:
+("renews", "recurring", "monthly", "annual", "subscription", "membership", "auto-renew", "next billing date", "trial ends", "trial expires", "cancel before", "will be charged")
+Otherwise ignore.
+
+========================================
+3) VALIDITY RULE (ONLY active or future)
+========================================
+
+We only want suggestions that are still active or ending in the future.
+
+Accept if:
+- extracted endDate >= today
+OR
+- we detect renewal/billing language that implies ongoing subscription (renews / recurring / auto-renew / next billing date)
+OR
+- extracted "next billing date" is in the future
+
+Reject if:
+- extracted endDate exists AND endDate < today AND no renewal/billing language
+
+========================================
+4) DATE EXTRACTION UPGRADE (robust + confidence)
+========================================
+
+Improve regex to detect:
+- "next billing date: {date}"
+- "renews on {date}"
+- "will be charged on {date}"
+- "cancel by {date}"
+- "valid until {date}"
+- "trial ends {date}"
+- "ends on the 6th" (infer month/year from received date window)
+- relative forms: "ends in X days" (use email received date)
+
+Assign dateConfidence:
+- absolute date with year = high
+- absolute date without year = medium (infer year)
+- relative date = medium
+- duration-based end date (7/14/30 day trial) = low-medium
+
+========================================
+5) SERVICE NAME RESOLUTION (avoid Stripe/PayPal mislabel)
+========================================
+
+If sender domain is a payment processor or platform (stripe.com, paypal.com, apple.com, google.com),
+attempt extracting merchant/service from snippet using patterns like:
+- "You subscribed to {SERVICE}"
+- "Your {SERVICE} subscription"
+- "Payment to {SERVICE}"
+- "from {SERVICE}"
+
+Fallback to domain if merchant not found.
+Normalize service names (remove Inc, LLC, punctuation).
+
+========================================
+6) DEDUPE IMPROVEMENT
+========================================
+
+Stop deduping only by service name.
+Dedupe by:
+- normalizedServiceName + (price if found) + (endDate if found)
+Keep up to 2 suggestions per service if they differ by price or endDate.
+
+========================================
+7) SCORING (optional but better)
+========================================
+
+Keep confidence scoring but update it:
++30 for lifecycle trigger
++15 for renewal/billing phrases
++10 if date extracted
++10 if price extracted
+-40 for strong negative
+-25 for receipt without recurring indicators
+
+Only keep suggestion if:
+- no strong negative AND
+- (trigger exists) AND
+- passes validity rule
+
+========================================
+8) OUTPUT REQUIREMENTS
+========================================
+
+For each suggested trial/subscription store:
+- serviceName (resolved)
+- message_id
+- confidence
+- extractedEndDate (if any)
+- extractedNextBillingDate (if any)
+- price + currency (if any)
+- detectionReason (which phrases matched)
+- isOngoing (true if renewal terms found)
+
+Make sure we still only read metadata/snippet (no full body).
+
+Implement these changes in server/gmail.ts scanning logic + any helper functions needed.

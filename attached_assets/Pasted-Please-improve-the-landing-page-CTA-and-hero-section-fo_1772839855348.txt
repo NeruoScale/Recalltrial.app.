@@ -1,0 +1,73 @@
+Please improve the landing page CTA and hero section for RecallTrial based on the attached screenshots.
+
+Goal:
+Increase homepage conversion by making the value clearer, reducing hesitation, and showing the product visually.
+
+Changes to make:
+
+1) Hero copy
+Keep the main headline as:
+“Never get charged for a free trial again.”
+
+Replace the subtext with:
+“Track trials in seconds and get reminders before they renew.”
+
+Change the main CTA button text from:
+“Get Started Free”
+to:
+“Start Tracking My Trials”
+
+Add small text directly under the CTA:
+“Free plan • No credit card required”
+
+2) Add micro-proof under the CTA
+Directly under the CTA area, add 3 short trust bullets:
+✔ Free plan available
+✔ Takes less than 20 seconds
+✔ No bank connection required
+
+Keep styling minimal and clean, aligned with the current design system.
+
+3) Add visual product proof in the hero
+The hero section currently feels too empty.
+Update the layout to:
+[ hero text + CTA on one side ] + [ product screenshot / dashboard preview on the other side ]
+
+Use an existing clean screenshot/mockup from the app if available, ideally:
+- Dashboard with trials list
+or
+- Trial detail screen
+or
+- Suggested trials email scanning section
+
+Make sure the screenshot looks modern, framed, and fits naturally inside the hero.
+Desktop: side-by-side layout
+Mobile: stack vertically with text first and screenshot below
+
+4) Improve trust / testimonial credibility
+In the testimonials section, replace city-based identities like:
+- Sarah J. – New York
+- Mike D. – London
+- Alex P. – San Francisco
+
+With more believable early-stage labels like:
+- Early beta user
+- Product Hunt user
+- Startup founder
+
+Do not change testimonial text unless needed for layout consistency.
+
+5) Keep current design language
+Do NOT redesign the whole page.
+Do NOT change branding, colors, or overall visual identity.
+Just improve clarity, CTA strength, and trust.
+
+6) Deliverable
+After updating:
+- confirm which files were changed
+- confirm hero CTA copy updated
+- confirm screenshot added to hero
+- confirm testimonial identity labels updated
+
+Priority:
+Conversion improvement over decoration.

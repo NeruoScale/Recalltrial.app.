@@ -1,0 +1,93 @@
+TASK: Implement “Email Scanning” for PRO plan only (Gmail opt-in), using privacy-first approach.
+
+CONTEXT:
+RecallTrial has plans: Free / Plus / Pro.
+Email scanning must be available ONLY to Pro users and ONLY when explicitly enabled by user (opt-in).
+Goal: detect subscription/trial emails and suggest trials/reminders automatically.
+
+1) UI / UX
+- Add Settings section: “Email scanning (Pro)”
+- If user is not Pro:
+  - Show locked card: “Upgrade to Pro to enable email scanning”
+  - Button: “Upgrade to Pro” (reuse billing flow)
+- If user is Pro:
+  - Show toggle: “Enable email scanning”
+  - Show button: “Connect Gmail”
+  - Show status: Connected/Disconnected + last scan time
+  - Show disclaimer text:
+    “Optional and opt-in. We only scan subscription-related emails. We store minimal metadata. You can disconnect anytime.”
+
+2) Access Control (hard requirement)
+- All endpoints for connect/scan/list suggestions MUST enforce:
+  - user.plan == "pro"
+  - AND user.emailScanningEnabled == true
+- If not, return 403 with { code: "PRO_REQUIRED" }
+
+3) Gmail Integration (OAuth, read-only)
+- Implement Google OAuth for Gmail with minimal scope:
+  - https://www.googleapis.com/auth/gmail.readonly
+- Store tokens securely (refresh token encrypted at rest if possible).
+- Add env vars:
+  - GOOGLE_CLIENT_ID
+  - GOOGLE_CLIENT_SECRET
+  - GOOGLE_REDIRECT_URI (must match deployed URL)
+- Add routes:
+  - GET /api/gmail/connect  -> redirects to Google OAuth consent
+  - GET /api/gmail/callback -> saves tokens, marks gmailConnected=true
+  - POST /api/gmail/disconnect -> revoke token + set gmailConnected=false
+
+4) Scanning Logic (privacy-first)
+- Do NOT fetch entire inbox.
+- Use Gmail search query to fetch only relevant messages, last 60 days:
+  query example:
+  newer_than:60d (subject:(trial OR subscription OR renewal OR receipt OR invoice OR "will be charged") OR "free trial" OR "renews on")
+- For each matched message:
+  - Read headers + snippet only (avoid storing full body).
+  - Extract:
+    - service/domain guess (from From header domain)
+    - possible renewal/end date (basic regex/date parse)
+    - possible amount/currency (basic regex)
+  - Store only minimal extracted metadata + messageId
+
+5) Suggested Trials feature
+- Create DB table/model: suggested_trials
+  fields:
+  - id, userId, provider ("gmail"), messageId (unique per user),
+    fromEmail, fromDomain, subject (optional), receivedAt,
+    serviceGuess, endDateGuess, amountGuess, currencyGuess,
+    cancelUrlGuess (optional), confidence (0-100),
+    status ("new"|"added"|"ignored"), createdAt
+- Add API:
+  - GET /api/suggested-trials -> list “new” suggestions
+  - POST /api/suggested-trials/:id/add -> converts suggestion into a real Trial
+  - POST /api/suggested-trials/:id/ignore -> marks ignored
+- On “add”, create Trial record with:
+  - serviceName = serviceGuess
+  - serviceUrl = derived from fromDomain (https://domain)
+  - endDate = endDateGuess (if missing, prompt user to confirm)
+  - cancelUrl left empty unless extracted/known
+  - Then generate reminders (3/2/1 days) per current rules
+
+6) Scanning schedule + manual scan
+- Add “Scan now” button for Pro users to trigger scan manually.
+- Also add a cron job endpoint /api/cron/email-scan protected by CRON_KEY:
+  - scan Pro users who enabled scanning and are connected
+  - rate limit: max N users per run to avoid Gmail API issues
+- Store lastScanAt per user.
+
+7) Safety / Compliance
+- Never scan unless user explicitly enabled scanning.
+- Add disconnect flow.
+- Add audit logs: when scanning runs, how many emails matched, how many suggestions created.
+- Handle Gmail API errors cleanly (token expired, revoked, quota exceeded).
+
+8) Acceptance tests
+- Free/Plus cannot access gmail connect/scan endpoints (403).
+- Pro can enable scanning, connect Gmail, run scan, see suggestions.
+- “Add” creates Trial and reminders (3/2/1 days).
+- “Disconnect” stops scanning and removes tokens.
+
+DELIVERABLES
+- Working Pro-only Gmail connect + scan + suggestions UI
+- Backend enforcement + DB models/migrations
+- README instructions to set Google OAuth credentials and redirect URI for deployed domain
