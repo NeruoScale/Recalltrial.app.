@@ -622,9 +622,29 @@ export async function registerRoutes(
 
   app.post("/api/billing/sync", requireBilling, requireAuth, async (req: Request, res: Response) => {
     try {
+      let user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+
+      // If stripeCustomerId is missing, search Stripe by email to recover it
+      if (!user.stripeCustomerId) {
+        try {
+          const { getUncachableStripeClient } = await import("./stripeClient");
+          const stripe = await getUncachableStripeClient();
+          const customers = await stripe.customers.list({ email: user.email, limit: 1 });
+          if (customers.data.length > 0) {
+            const customerId = customers.data[0].id;
+            await storage.updateUserStripeInfo(user.id, { stripeCustomerId: customerId });
+            console.log(`[billing/sync] Recovered stripeCustomerId ${customerId} for user ${user.id}`);
+          }
+        } catch (stripeErr) {
+          console.error("[billing/sync] Stripe customer lookup failed:", stripeErr);
+        }
+      }
+
       const { syncUserSubscriptionByUserId } = await import("./stripeWebhookHandler");
       await syncUserSubscriptionByUserId(req.session.userId!);
-      const user = await storage.getUserById(req.session.userId!);
+
+      user = await storage.getUserById(req.session.userId!)!;
       if (!user) return res.status(401).json({ message: "User not found" });
       const activeCount = await storage.countActiveTrials(user.id);
       return res.json({
@@ -632,11 +652,59 @@ export async function registerRoutes(
         email: user.email,
         timezone: user.timezone,
         plan: user.plan,
+        subscriptionStatus: user.subscriptionStatus,
+        currentPeriodEnd: user.currentPeriodEnd,
         activeTrialCount: activeCount,
         trialLimit: getTrialLimit(user.plan),
       });
     } catch (err) {
       console.error("Billing sync error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.post("/api/billing/sync-by-email", requireBilling, async (req: Request, res: Response) => {
+    const adminKey = process.env.ADMIN_KEY;
+    if (!adminKey) return res.status(500).json({ message: "ADMIN_KEY not configured" });
+    const key = req.headers["x-admin-key"];
+    if (key !== adminKey) return res.status(403).json({ message: "Forbidden" });
+
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== "string") {
+        return res.status(400).json({ message: "email is required" });
+      }
+
+      const user = await storage.getUserByEmail(email.trim().toLowerCase());
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { getUncachableStripeClient } = await import("./stripeClient");
+      const stripe = await getUncachableStripeClient();
+
+      // Find Stripe customer by email
+      const customers = await stripe.customers.list({ email: user.email, limit: 1 });
+      if (customers.data.length === 0) {
+        return res.status(404).json({ message: "No Stripe customer found for this email" });
+      }
+
+      const customerId = customers.data[0].id;
+      await storage.updateUserStripeInfo(user.id, { stripeCustomerId: customerId });
+      console.log(`[sync-by-email] Set stripeCustomerId=${customerId} for user ${user.id}`);
+
+      const { syncUserSubscriptionFromStripe } = await import("./stripeWebhookHandler");
+      await syncUserSubscriptionFromStripe(customerId);
+
+      const updated = await storage.getUserById(user.id);
+      return res.json({
+        id: updated!.id,
+        email: updated!.email,
+        plan: updated!.plan,
+        subscriptionStatus: updated!.subscriptionStatus,
+        currentPeriodEnd: updated!.currentPeriodEnd,
+        stripeCustomerId: updated!.stripeCustomerId,
+      });
+    } catch (err) {
+      console.error("sync-by-email error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });
