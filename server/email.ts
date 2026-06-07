@@ -5,7 +5,7 @@ import { format, parseISO } from "date-fns";
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 function getFromEmail(): string {
-  return process.env.RESEND_FROM_EMAIL || "RecallTrial <onboarding@resend.dev>";
+  return process.env.FROM_EMAIL || "RecallTrial <onboarding@resend.dev>";
 }
 
 function getReplyToEmail(): string | undefined {
