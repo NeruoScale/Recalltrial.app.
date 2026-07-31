@@ -2,25 +2,65 @@ type DataLayerEvent = Record<string, unknown>;
 
 declare global {
   interface Window {
-    dataLayer: DataLayerEvent[];
+    dataLayer?: DataLayerEvent[];
   }
 }
 
-function pushToDataLayer(event: DataLayerEvent) {
-  if (typeof window === "undefined") return;
-  window.dataLayer = window.dataLayer || [];
-  window.dataLayer.push(event);
+function pushToDataLayer(event: DataLayerEvent): void {
+  try {
+    if (typeof window === "undefined") return;
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(event);
+  } catch {
+    // GTM/dataLayer unavailable (blocked, not yet loaded, etc.) — never let analytics break the app
+  }
 }
 
-export function trackPageView(path: string, title?: string) {
+export function trackPageView(path: string): void {
   pushToDataLayer({
     event: "page_view",
     page_path: path,
-    page_location: window.location.href,
-    page_title: title ?? document.title,
+    page_location: typeof window !== "undefined" ? window.location.href : undefined,
+    page_title: typeof document !== "undefined" ? document.title : undefined,
   });
 }
 
-export function trackEvent(eventName: string, params: Record<string, unknown> = {}) {
-  pushToDataLayer({ event: eventName, ...params });
+export function trackSignUp(method: string = "email"): void {
+  pushToDataLayer({
+    event: "sign_up",
+    method,
+  });
+}
+
+export function trackLogin(method: string = "email"): void {
+  pushToDataLayer({
+    event: "login",
+    method,
+  });
+}
+
+export function trackTrialCreated(serviceName: string, category?: string): void {
+  pushToDataLayer({
+    event: "trial_created",
+    service_name: serviceName,
+    ...(category ? { category } : {}),
+  });
+}
+
+export function trackBeginCheckout(plan: string, value: number, currency: string): void {
+  pushToDataLayer({
+    event: "begin_checkout",
+    currency: currency.toUpperCase(),
+    value,
+    items: [{ item_name: plan, item_category: "subscription", price: value }],
+  });
+}
+
+export function trackPurchase(plan: string, value: number, currency: string): void {
+  pushToDataLayer({
+    event: "purchase",
+    currency: currency.toUpperCase(),
+    value,
+    items: [{ item_name: plan, item_category: "subscription", price: value }],
+  });
 }

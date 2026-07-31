@@ -15,6 +15,7 @@ import { format, addDays, differenceInDays, differenceInHours, subHours } from "
 import { CURRENCIES } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { trackTrialCreated } from "@/lib/analytics";
 
 type ServiceResult = {
   name: string;
@@ -63,9 +64,10 @@ export default function TrialNew() {
       const res = await apiRequest("POST", "/api/trials", data);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({ queryKey: ["/api/trials"] });
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      trackTrialCreated(variables.serviceName);
       toast({ title: "Trial added successfully" });
       setLocation("/dashboard");
     },

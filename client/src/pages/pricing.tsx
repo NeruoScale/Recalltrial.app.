@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Bell, ArrowLeft, Check, Loader2, Sparkles, Shield, Mail } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { trackBeginCheckout } from "@/lib/analytics";
 
 type PriceInfo = { priceId: string; amount: number; currency: string; interval: string };
 type PricesData = {
@@ -46,8 +47,10 @@ export default function PricingPage() {
       setLocation("/auth/signup");
       return;
     }
-    const priceId = prices?.[planId as keyof PricesData]?.[billing]?.priceId;
+    const priceInfo = prices?.[planId as keyof PricesData]?.[billing];
+    const priceId = priceInfo?.priceId;
     if (priceId) {
+      trackBeginCheckout(planId, priceInfo.amount / 100, priceInfo.currency);
       checkoutMutation.mutate(priceId);
     } else {
       toast({ title: "Unable to start checkout", variant: "destructive" });

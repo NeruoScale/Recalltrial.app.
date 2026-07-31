@@ -2,6 +2,7 @@ import { createContext, useContext, type ReactNode } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest, getQueryFn } from "./queryClient";
 import { useLocation } from "wouter";
+import { trackSignUp, trackLogin } from "./analytics";
 
 type AuthUser = {
   id: string;
@@ -43,6 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      trackLogin();
       setLocation("/dashboard");
     },
   });
@@ -53,6 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      trackSignUp();
       setLocation("/dashboard");
     },
   });
