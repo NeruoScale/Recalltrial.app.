@@ -142,6 +142,14 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
 
 export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 
+export const processedPurchaseEvents = pgTable("processed_purchase_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  checkoutSessionId: text("checkout_session_id").notNull().unique(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type ProcessedPurchaseEvent = typeof processedPurchaseEvents.$inferSelect;
+
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 
 export const reviews = pgTable("reviews", {

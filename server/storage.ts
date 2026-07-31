@@ -1,6 +1,6 @@
 import { eq, and, lte, sql, count, desc, inArray } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -29,6 +29,7 @@ export interface IStorage {
   getStripePrices(): Promise<any[]>;
 
   logEvent(userId: string | null, event: string, metadata?: Record<string, any>): Promise<void>;
+  claimPurchaseEvent(checkoutSessionId: string): Promise<boolean>;
   getMetrics(): Promise<{
     totalUsers: number;
     totalTrials: number;
@@ -217,6 +218,14 @@ export class DatabaseStorage implements IStorage {
     } catch (err) {
       console.error("Failed to log analytics event:", err);
     }
+  }
+
+  async claimPurchaseEvent(checkoutSessionId: string): Promise<boolean> {
+    const result = await db.insert(processedPurchaseEvents)
+      .values({ checkoutSessionId })
+      .onConflictDoNothing()
+      .returning({ id: processedPurchaseEvents.id });
+    return result.length > 0;
   }
 
   async getMetrics(): Promise<{

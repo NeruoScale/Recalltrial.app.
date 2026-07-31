@@ -113,9 +113,11 @@ shared/
 - **Google Cloud setup needed:** Enable Gmail API, create OAuth 2.0 credentials, add redirect URI
 
 ## Analytics
-- **analytics_events** table tracks: signup, login, trial_created, trial_canceled, cancel_link_clicked, email_scan
+- **analytics_events** table tracks: signup, login, trial_created, trial_canceled, cancel_link_clicked, email_scan, purchase
 - Each event has userId, event name, JSON metadata, timestamp
 - Admin metrics endpoint at GET /api/admin/metrics (protected by ADMIN_KEY env var)
+- **Client-side (GTM/GA4):** page_view, sign_up, login, trial_created, begin_checkout pushed to `window.dataLayer` from `client/src/lib/analytics.ts`, consumed by a GTM container (GTM-PVH8XF5P) forwarding to GA4.
+- **Server-side purchase tracking:** the `checkout.session.completed` Stripe webhook (server/index.ts) calls `trackCheckoutSessionPurchase` (server/purchaseTracking.ts), which is the source of truth for purchase conversions (not the client-side `/billing/success` page). It: verifies `payment_status === "paid"`, deduplicates via the `processed_purchase_events` table (unique on checkout session id), resolves the plan (PLUS/PRO) via `resolvePurchasePlan` (server/stripeWebhookHandler.ts), writes a `purchase` row to `analytics_events`, and sends a `purchase` event to GA4 via the Measurement Protocol (server/ga4.ts).
 
 ## Database Models
 - **users**: id, email, passwordHash, timezone, plan (FREE/PLUS/PRO/PREMIUM), stripeCustomerId, stripeSubscriptionId, subscriptionStatus, currentPeriodEnd, emailScanningEnabled, gmailConnected, gmailAccessToken, gmailRefreshToken, gmailTokenExpiry, lastEmailScanAt, createdAt
@@ -125,6 +127,7 @@ shared/
 - **suggested_trials**: id, userId, provider, messageId (unique per user+messageId), fromEmail, fromDomain, subject, receivedAt, serviceGuess, startDateGuess (nullable, explicit only), startDateSource ("explicit"|"none"), endDateGuess, amountGuess, currencyGuess, confidence (0-100), status (new/added/ignored), createdAt
 - **password_reset_tokens**: id (UUID PK), userId (FK → users), token (text unique), expiresAt (timestamp), usedAt (timestamp nullable), createdAt
 - **reviews**: id, rating (1-5), text, name, location, source (manual/in_app/import), isApproved, isFeatured, userId, createdAt
+- **processed_purchase_events**: id (UUID PK), checkoutSessionId (text, unique — dedup key for purchase-event tracking), createdAt
 
 ## Environment Variables
 - DATABASE_URL - PostgreSQL connection string
@@ -141,6 +144,8 @@ shared/
 - STRIPE_PLUS_YEARLY_PRICE_ID - Stripe price ID for Plus yearly (15% off)
 - STRIPE_PRO_MONTHLY_PRICE_ID - Stripe price ID for Pro monthly
 - STRIPE_PRO_YEARLY_PRICE_ID - Stripe price ID for Pro yearly (15% off)
+- GA4_MEASUREMENT_ID - GA4 Measurement ID (for server-side purchase events via Measurement Protocol)
+- GA4_API_SECRET - GA4 Measurement Protocol API secret (created in GA4 Admin → Data Streams → Measurement Protocol API secrets)
 - GOOGLE_CLIENT_ID - Google OAuth client ID (for Gmail scanning)
 - GOOGLE_CLIENT_SECRET - Google OAuth client secret (for Gmail scanning)
 - GOOGLE_REDIRECT_URI - OAuth redirect URI, must be set to {APP_URL}/api/gmail/callback in Google Cloud Console

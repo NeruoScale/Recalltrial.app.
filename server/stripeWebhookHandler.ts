@@ -71,6 +71,14 @@ const STATUS_MAP: Record<string, "ACTIVE" | "CANCELED" | "PAST_DUE" | "INCOMPLET
   unpaid: "PAST_DUE",
 };
 
+export async function resolvePurchasePlan(subscriptionId: string): Promise<"PLUS" | "PRO"> {
+  let plan = await determinePlanFromSubscriptionLocal(subscriptionId);
+  if (plan === "PLUS") {
+    plan = await determinePlanFromStripeAPI(subscriptionId);
+  }
+  return plan;
+}
+
 export async function syncUserSubscriptionFromStripe(stripeCustomerId: string): Promise<void> {
   try {
     const [user] = await db.select().from(users).where(eq(users.stripeCustomerId, stripeCustomerId)).limit(1);

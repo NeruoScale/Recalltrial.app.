@@ -59,6 +59,8 @@ app.post(
           if (userId) {
             setTimeout(() => syncUserSubscriptionByUserId(userId), 2000);
           }
+          const { trackCheckoutSessionPurchase } = await import("./purchaseTracking");
+          setTimeout(() => trackCheckoutSessionPurchase(eventData), 2000);
         } else if (event.type?.startsWith('customer.subscription.')) {
           const customerId = eventData?.customer;
           if (customerId) {

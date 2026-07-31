@@ -68,5 +68,18 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] password_reset_tokens:", err.message);
   }
 
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS processed_purchase_events (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        checkout_session_id text NOT NULL UNIQUE,
+        created_at timestamp DEFAULT now() NOT NULL
+      );
+    `);
+    console.log("[migrate] processed_purchase_events table OK");
+  } catch (err: any) {
+    console.error("[migrate] processed_purchase_events:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
