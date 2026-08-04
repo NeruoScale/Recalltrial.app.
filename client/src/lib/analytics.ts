@@ -11,8 +11,10 @@ function pushToDataLayer(event: DataLayerEvent): void {
     if (typeof window === "undefined") return;
     window.dataLayer = window.dataLayer || [];
     window.dataLayer.push(event);
-  } catch {
-    // GTM/dataLayer unavailable (blocked, not yet loaded, etc.) — never let analytics break the app
+  } catch (err) {
+    // Never let analytics break the app — but surface the failure instead of swallowing it silently,
+    // so a blocked/broken dataLayer is debuggable instead of invisible.
+    console.error("[analytics] dataLayer.push failed:", err, event);
   }
 }
 
