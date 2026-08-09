@@ -806,6 +806,7 @@ export async function registerRoutes(
   async function processRemindersNow() {
     const now = new Date();
     const dueReminders = await storage.getDueReminders(now);
+    console.log(`[Cron] processRemindersNow triggered at ${now.toISOString()} — ${dueReminders.length} due reminder(s) found`);
     let emailsAttempted = 0;
     let emailsSent = 0;
     let failedCount = 0;
