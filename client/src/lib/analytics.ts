@@ -28,6 +28,8 @@ export function trackPageView(path: string): void {
 }
 
 export function trackSignUp(method: string = "email"): void {
+  // TEMP: verify the sign_up push actually fires in GTM Preview. Remove once confirmed.
+  console.log("[Analytics] sign_up fired", { method });
   pushToDataLayer({
     event: "sign_up",
     method,
