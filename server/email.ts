@@ -20,7 +20,7 @@ function buildReminderEmail(trial: Trial, user: User, reminderType: string): { s
     "TWENTY_FOUR_HOURS": 1,
   };
   const daysRemaining = daysMap[reminderType] || 1;
-  const endFullFormatted = format(parseISO(trial.endDate), "MMM d, yyyy 'at' 11:59 PM");
+  const endFullFormatted = format(parseISO(trial.endDate), "MMM d, yyyy 'at' 11:59");
   const cancelLink = trial.cancelUrl || trial.serviceUrl;
 
   const subject = `[RecallTrial] ${trial.serviceName} renews in ${daysRemaining} day${daysRemaining !== 1 ? "s" : ""}`;

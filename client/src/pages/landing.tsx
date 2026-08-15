@@ -371,7 +371,7 @@ export default function Landing() {
               <Button
                 variant="outline"
                 className="rounded-full px-6"
-                onClick={() => window.location.href = "mailto:ayoubsikebir@outlook.com"}
+                onClick={() => window.location.href = "mailto:support@recalltrial.app"}
                 data-testid="button-contact-support"
               >
                 <Mail className="h-4 w-4 mr-2" />
