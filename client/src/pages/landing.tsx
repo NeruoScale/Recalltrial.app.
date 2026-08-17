@@ -281,9 +281,9 @@ export default function Landing() {
             <h2 className="text-2xl font-bold text-center mb-8">Built on trust</h2>
             <div className="space-y-4">
               {[
-                { icon: Shield, title: "No bank access required", desc: "We never ask for your payment details or bank credentials." },
-                { icon: Mail, title: "Email scanning is optional", desc: "Coming later as an opt-in feature. Your inbox stays private." },
-                { icon: Database, title: "You control your data", desc: "Delete your account and all data anytime. No questions asked." },
+                { icon: Shield, title: "No bank access required", desc: "We never see your payment details. All billing is handled securely by Stripe." },
+                { icon: Mail, title: "Privacy-first email scanning", desc: "We only scan for trial confirmations. We never read, store, or share your emails." },
+                { icon: Database, title: "You control your data", desc: "Delete your account and all your data instantly, anytime. No questions asked." },
               ].map((item) => (
                 <Card key={item.title}>
                   <CardContent className="flex items-start gap-4 py-4">

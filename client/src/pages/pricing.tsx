@@ -108,7 +108,7 @@ export default function PricingPage() {
       description: "Everything + email scanning",
       features: [
         "Everything in Plus",
-        "Email scanning (coming soon, opt-in)",
+        "Email scanning (automatic, opt-in)",
         "Priority support",
         "Your inbox stays private",
       ],
@@ -204,19 +204,24 @@ export default function PricingPage() {
                       Current Plan
                     </Button>
                   ) : isUpgrade && plan.id !== "free" ? (
-                    <Button
-                      className="w-full"
-                      variant={plan.highlight ? "default" : "outline"}
-                      onClick={() => handleUpgrade(plan.id)}
-                      disabled={checkoutMutation.isPending}
-                      data-testid={`button-plan-${plan.id}`}
-                    >
-                      {checkoutMutation.isPending ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <>Upgrade to {plan.name}</>
-                      )}
-                    </Button>
+                    <>
+                      <Button
+                        className="w-full"
+                        variant={plan.highlight ? "default" : "outline"}
+                        onClick={() => handleUpgrade(plan.id)}
+                        disabled={checkoutMutation.isPending}
+                        data-testid={`button-plan-${plan.id}`}
+                      >
+                        {checkoutMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <>Start 14-day free trial</>
+                        )}
+                      </Button>
+                      <p className="text-xs text-muted-foreground text-center mt-2">
+                        then {plan.monthlyPrice}/month
+                      </p>
+                    </>
                   ) : (
                     <Button variant="outline" disabled className="w-full" data-testid={`button-plan-${plan.id}`}>
                       {isCurrent ? "Current Plan" : plan.id === "free" ? "Free" : `Upgrade to ${plan.name}`}
@@ -229,8 +234,9 @@ export default function PricingPage() {
         </div>
 
         <div className="text-center mt-8 text-sm text-muted-foreground space-y-1">
+          <p>No charge for 14 days. Cancel anytime.</p>
           <p>All plans include email reminders, cancel link storage, and fuzzy service search.</p>
-          <p>Email scanning is optional and coming later as an opt-in feature. Your inbox stays private.</p>
+          <p>Email scanning is opt-in and automatic. Your inbox stays private.</p>
           <p>Powered by Stripe. Cancel anytime.</p>
         </div>
       </main>
