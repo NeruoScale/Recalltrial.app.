@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, date, decimal, pgEnum, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, date, decimal, pgEnum, integer, boolean, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -149,6 +149,40 @@ export const processedPurchaseEvents = pgTable("processed_purchase_events", {
 });
 
 export type ProcessedPurchaseEvent = typeof processedPurchaseEvents.$inferSelect;
+
+// Phase 2 (Subscription Intelligence, PHASE1_AUDIT.md §3-4): evidence log only.
+// No `subscriptions` table yet — subscriptionId stays nullable/unreferenced
+// until that table exists. Nothing in the app writes to this table yet.
+export const subscriptionEventTypeEnum = pgEnum("subscription_event_type", [
+  "trial_started", "trial_ending", "subscription_started", "subscription_renewed",
+  "payment_received", "invoice_received", "price_changed", "cancellation_requested",
+  "cancellation_confirmed", "subscription_expired", "subscription_paused",
+  "unknown_subscription_event",
+]);
+
+export const subscriptionEvents = pgTable("subscription_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  subscriptionId: varchar("subscription_id"),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  eventType: subscriptionEventTypeEnum("event_type").notNull(),
+  sourceMessageId: text("source_message_id").notNull(),
+  extractedPrice: decimal("extracted_price", { precision: 10, scale: 2 }),
+  extractedCurrency: text("extracted_currency"),
+  extractedDate: date("extracted_date"),
+  previousPrice: decimal("previous_price", { precision: 10, scale: 2 }),
+  newPrice: decimal("new_price", { precision: 10, scale: 2 }),
+  confidence: integer("confidence").notNull().default(0),
+  detectionSource: text("detection_source").notNull().default("deterministic"),
+  aiModel: text("ai_model"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  unique("subscription_events_user_message_type_unique").on(
+    table.userId, table.sourceMessageId, table.eventType
+  ),
+]);
+
+export type SubscriptionEvent = typeof subscriptionEvents.$inferSelect;
+export type InsertSubscriptionEvent = typeof subscriptionEvents.$inferInsert;
 
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 

@@ -55,13 +55,13 @@ export async function revokeToken(accessToken: string): Promise<void> {
 
 // ─── Domain utilities ─────────────────────────────────────────────────────────
 
-function extractDomainFromEmail(email: string): string {
+export function extractDomainFromEmail(email: string): string {
   const match = email.match(/@([^>\s]+)/);
   return match ? match[1].toLowerCase().trim() : "";
 }
 
 /** Extract eTLD+1 root domain for deduplication. e.g. billing.bubble.io → bubble.io */
-function getRootDomain(domain: string): string {
+export function getRootDomain(domain: string): string {
   const parts = domain.split(".");
   if (parts.length <= 2) return domain;
   // Handle .co.uk, .com.au etc.
@@ -75,29 +75,29 @@ function getRootDomain(domain: string): string {
 
 // ─── Filter helpers ───────────────────────────────────────────────────────────
 
-function hasStrongPositive(text: string): boolean {
+export function hasStrongPositive(text: string): boolean {
   return STRONG_POSITIVES.some((p) => text.includes(p));
 }
 
-function hasSoftNegative(text: string): boolean {
+export function hasSoftNegative(text: string): boolean {
   return SOFT_NEGATIVES.some((n) => text.includes(n));
 }
 
-function hasNegativeOverride(text: string): boolean {
+export function hasNegativeOverride(text: string): boolean {
   return SOFT_NEGATIVE_OVERRIDES.some((o) => text.includes(o));
 }
 
-function hasRequiredTrigger(text: string): boolean {
+export function hasRequiredTrigger(text: string): boolean {
   return REQUIRED_TRIGGERS.some((t) => text.includes(t));
 }
 
-function passesReceiptFilter(text: string): boolean {
+export function passesReceiptFilter(text: string): boolean {
   const hasReceipt = text.includes("receipt") || text.includes("invoice");
   if (!hasReceipt) return true;
   return RECURRING_INDICATORS.some((r) => text.includes(r));
 }
 
-function hasOngoingSignal(text: string): boolean {
+export function hasOngoingSignal(text: string): boolean {
   return ["renews", "recurring", "auto-renew", "auto renew", "next billing", "will be charged"].some(
     (k) => text.includes(k)
   );
@@ -116,7 +116,7 @@ function isPaymentProcessor(domain: string): boolean {
 
 // ─── Service name resolution ──────────────────────────────────────────────────
 
-function resolveServiceName(domain: string, snippet: string): string {
+export function resolveServiceName(domain: string, snippet: string): string {
   if (isPaymentProcessor(domain)) {
     const patterns = [
       /you subscribed to ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?)(?:\.|,|!|\s+for|\s+at|\s+\$)/i,
@@ -145,9 +145,9 @@ function resolveServiceName(domain: string, snippet: string): string {
 
 // ─── Date extraction ──────────────────────────────────────────────────────────
 
-type EndDateSource = "explicit" | "relative" | "duration" | "none";
+export type EndDateSource = "explicit" | "relative" | "duration" | "none";
 
-function extractDate(
+export function extractDate(
   text: string,
   receivedAt: Date
 ): { date: string | null; source: EndDateSource } {
@@ -240,7 +240,7 @@ function extractDate(
 // ─── Start date extraction ─────────────────────────────────────────────────────
 // Only extract if an explicit start date phrase is present. Never defaults to today.
 
-function extractStartDate(text: string): { date: string | null; source: "explicit" | "none" } {
+export function extractStartDate(text: string): { date: string | null; source: "explicit" | "none" } {
   // Explicit start date patterns — use /i flag for case-insensitive matching
   const startPatterns = [
     /(?:trial started|trial begins?|started|activated|subscription started|billing starts?|effective)\s+(?:on\s+)?([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
@@ -265,7 +265,7 @@ function extractStartDate(text: string): { date: string | null; source: "explici
 
 // ─── Amount extraction ────────────────────────────────────────────────────────
 
-function extractAmount(text: string): { amount: string | null; currency: string } {
+export function extractAmount(text: string): { amount: string | null; currency: string } {
   const match = text.match(/(?:[\$\£\€])\s*(\d+(?:\.\d{2})?)|\b(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP|QAR)\b/i);
   if (match) {
     const amount = match[1] || match[2];
@@ -317,6 +317,77 @@ export function scoreConfidenceDetailed(
   return { score: Math.min(Math.max(score, 0), 95), breakdown };
 }
 
+// ─── Subscription-event detection (Phase 2 Step 5, parallel to trial detection) ─
+//
+// Independent classification pass, reusing only the existing keyword/regex
+// primitives above — no new keyword vocabulary introduced here. Deliberately
+// does NOT classify price_changed, cancellation_requested/confirmed,
+// subscription_expired, or subscription_paused: those need either signals
+// that don't exist in gmailKeywords.ts yet (cancellation/expiry phrasing —
+// that's Phase 3's job, not this step's) or comparison against a prior
+// known price/status via entity resolution against a `subscriptions` table
+// that doesn't exist yet (Phase 4). Returning `unknown_subscription_event`
+// for genuinely subscription-relevant-but-unclassified signals is honest
+// about that boundary rather than guessing.
+
+export type SubscriptionEventType =
+  | "trial_started" | "trial_ending" | "subscription_started" | "subscription_renewed"
+  | "payment_received" | "invoice_received" | "price_changed" | "cancellation_requested"
+  | "cancellation_confirmed" | "subscription_expired" | "subscription_paused"
+  | "unknown_subscription_event";
+
+export type SubscriptionEventCandidate = {
+  eventType: SubscriptionEventType;
+  extractedPrice: string | null;
+  extractedCurrency: string | null;
+  extractedDate: string | null;
+  confidence: number;
+};
+
+export function detectSubscriptionEvent(
+  subject: string,
+  snippet: string,
+  from: string,
+  dateHeader: string
+): SubscriptionEventCandidate | null {
+  const combined = (subject + " " + snippet).toLowerCase();
+  const receivedAt = dateHeader ? new Date(dateHeader) : new Date();
+
+  // Same baseline relevance gate as the trial pipeline: must have SOME
+  // subscription-lifecycle signal at all, or there's nothing to log.
+  if (!hasStrongPositive(combined) && !hasRequiredTrigger(combined)) return null;
+
+  const { date: extractedDate, source: endDateSource } = extractDate(combined, receivedAt);
+  const { amount, currency } = extractAmount(combined);
+
+  let eventType: SubscriptionEventType;
+  if (["trial started", "free trial started", "trial has started", "trial begins", "your free trial", "trial period started"].some((k) => combined.includes(k))) {
+    eventType = "trial_started";
+  } else if (["trial ends", "trial ending", "trial expires", "trial expiring", "trial will end", "trial period ends"].some((k) => combined.includes(k))) {
+    eventType = "trial_ending";
+  } else if (["subscription confirmed", "subscription is active", "subscription activated", "subscription has been activated", "subscription is now active", "your plan is now active"].some((k) => combined.includes(k))) {
+    eventType = "subscription_started";
+  } else if (["renews on", "renewal", "auto-renewal", "auto renew", "auto-renew", "next billing"].some((k) => combined.includes(k))) {
+    eventType = "subscription_renewed";
+  } else if (["payment received", "charge successful", "card charged", "you will be charged", "will be charged on"].some((k) => combined.includes(k))) {
+    eventType = "payment_received";
+  } else if (combined.includes("invoice")) {
+    eventType = "invoice_received";
+  } else {
+    eventType = "unknown_subscription_event";
+  }
+
+  const { score: confidence } = scoreConfidenceDetailed(subject, snippet, from, !!extractedDate, !!amount, endDateSource);
+
+  return {
+    eventType,
+    extractedPrice: amount,
+    extractedCurrency: currency,
+    extractedDate,
+    confidence,
+  };
+}
+
 // ─── Gmail list with pagination ───────────────────────────────────────────────
 
 async function listMessages(
@@ -349,7 +420,12 @@ async function listMessages(
 export async function scanGmailForTrials(
   accessToken: string,
   refreshToken: string | null,
-  tokenExpiry: Date | null
+  tokenExpiry: Date | null,
+  // Added for Phase 2 Step 5's parallel subscription-event write path only.
+  // Existing return shape and existing trial-write behavior are unchanged;
+  // this is purely additive so the two existing callers can pass user.id,
+  // which they already have in scope.
+  userId?: string
 ): Promise<Array<Omit<SuggestedTrial, "id" | "userId" | "createdAt" | "status">>> {
   const oauth2Client = getOAuthClient();
   oauth2Client.setCredentials({
@@ -399,6 +475,12 @@ export async function scanGmailForTrials(
 
   const rawResults: RawResult[] = [];
 
+  // Phase 2 Step 5: parallel subscription-event detector counters, reported
+  // once as a single structured log line after the loop finishes.
+  let subDetectorProcessed = 0;
+  let subDetectorCandidates = 0;
+  let subDetectorWritten = 0;
+
   for (const { id: msgId, phase } of allMessages) {
     try {
       const msgRes = await gmail.users.messages.get({
@@ -420,6 +502,45 @@ export async function scanGmailForTrials(
 
       const fromDomain = extractDomainFromEmail(from);
       if (!fromDomain || fromDomain.endsWith("gmail.com")) continue;
+
+      // ── Parallel subscription-event detection (Phase 2 Step 5) ──
+      // Runs on every candidate message that survives only the domain check
+      // above — deliberately BEFORE the trial-specific filters below, so a
+      // message the trial pipeline rejects (e.g. fails passesReceiptFilter
+      // or the trial-specific hasStrongPositive/hasRequiredTrigger gate)
+      // still gets an independent chance at subscription-event
+      // classification. Isolated in its own try/catch: a failure here must
+      // never block or roll back the existing trial-suggestion pipeline
+      // below, which is completely unmodified from this point on.
+      if (userId) {
+        subDetectorProcessed++;
+        try {
+          const candidate = detectSubscriptionEvent(subject, snippet, from, dateStr);
+          if (candidate) {
+            subDetectorCandidates++;
+            // Dynamic import: keeps gmail.ts free of a module-load-time
+            // dependency on the storage/DB layer (which constructs a live
+            // pg.Pool at import time), so the pure detection functions stay
+            // safely importable in tests without a DATABASE_URL or DB-layer
+            // alias resolution. Same lazy-import pattern already used
+            // elsewhere in this codebase (e.g. stripeClient.ts).
+            const { storage } = await import("./storage");
+            const written = await storage.createSubscriptionEvent({
+              userId,
+              sourceMessageId: msgId,
+              eventType: candidate.eventType,
+              extractedPrice: candidate.extractedPrice,
+              extractedCurrency: candidate.extractedCurrency,
+              extractedDate: candidate.extractedDate,
+              confidence: candidate.confidence,
+              detectionSource: "deterministic",
+            });
+            if (written) subDetectorWritten++;
+          }
+        } catch (subErr) {
+          console.error(`[SubDetector] failed for message ${msgId}:`, subErr);
+        }
+      }
 
       // ── Filter: soft negatives (unless overridden by strong positive) ──
       if (hasSoftNegative(combined) && !hasNegativeOverride(combined)) continue;
@@ -494,6 +615,12 @@ export async function scanGmailForTrials(
     } catch {
       // skip individual message errors
     }
+  }
+
+  if (userId) {
+    console.log(
+      `[SubDetector] processed ${subDetectorProcessed} messages, ${subDetectorCandidates} candidates, ${subDetectorWritten} written`
+    );
   }
 
   // ── D: Dedupe by eTLD+1 root domain + price + date (allow up to 2 per root domain) ──

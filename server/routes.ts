@@ -329,7 +329,8 @@ export async function registerRoutes(
       const suggestions = await scanGmailForTrials(
         user.gmailAccessToken,
         user.gmailRefreshToken,
-        user.gmailTokenExpiry
+        user.gmailTokenExpiry,
+        user.id
       );
 
       let newCount = 0;
@@ -610,6 +611,7 @@ export async function registerRoutes(
         metadata: { userId: user.id },
         subscription_data: {
           metadata: { userId: user.id },
+          trial_period_days: 14,
         },
       });
 
@@ -733,6 +735,22 @@ export async function registerRoutes(
       return res.json(metrics);
     } catch (err) {
       console.error("Metrics error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 2 Step 7 (PHASE1_AUDIT.md, subscription-detection observation
+  // only — nothing in the app reads subscription_events besides this).
+  app.get("/api/admin/subscription-events/metrics", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const metrics = await storage.getSubscriptionEventMetrics();
+      return res.json(metrics);
+    } catch (err) {
+      console.error("Subscription-event metrics error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });
@@ -992,7 +1010,8 @@ export async function registerRoutes(
           const suggestions = await scanGmailForTrials(
             user.gmailAccessToken,
             user.gmailRefreshToken,
-            user.gmailTokenExpiry
+            user.gmailTokenExpiry,
+            user.id
           );
           for (const s of suggestions) {
             await storage.upsertSuggestedTrial({ ...s, userId: user.id });

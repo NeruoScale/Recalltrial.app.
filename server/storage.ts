@@ -1,6 +1,6 @@
 import { eq, and, lte, sql, count, desc, inArray } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -16,6 +16,25 @@ export interface IStorage {
   getTrialByIdPublic(trialId: string): Promise<Trial | undefined>;
   createTrial(data: Omit<Trial, "id" | "createdAt" | "canceledAt">): Promise<Trial>;
   cancelTrial(trialId: string, userId: string): Promise<Trial | undefined>;
+
+  // Phase 2 (Subscription Intelligence, PHASE1_AUDIT.md §18): parallel,
+  // observation-only write path.
+  createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<boolean>;
+  getSubscriptionEventMetrics(): Promise<{
+    totalCount: number;
+    byEventType: { eventType: string; count: number }[];
+    byDetectionSource: { detectionSource: string; count: number }[];
+    averageConfidence: number;
+    recentEvents: {
+      eventType: string;
+      extractedPrice: string | null;
+      extractedCurrency: string | null;
+      extractedDate: string | null;
+      confidence: number;
+      detectionSource: string;
+      createdAt: Date;
+    }[];
+  }>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -337,13 +356,88 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProUsersWithScanningEnabled(): Promise<User[]> {
+    // Ordered by lastEmailScanAt (NULLS FIRST) so scanning rotates fairly
+    // across users instead of always favoring whichever rows Postgres
+    // happens to return first. lastEmailScanAt is only ever set by
+    // updateLastEmailScan(), called after a user's scan fully completes
+    // (routes.ts, POST /api/cron/email-scan) — so it represents completed
+    // scan time, making "oldest completed scan first" the correct ordering
+    // for who gets scanned next when a batch is capped.
     return db.select().from(users).where(
       and(
         inArray(users.plan, ["PRO", "PREMIUM"]),
         eq(users.emailScanningEnabled, true),
         eq(users.gmailConnected, true),
       )
-    );
+    ).orderBy(sql`${users.lastEmailScanAt} ASC NULLS FIRST`);
+  }
+
+  async createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<boolean> {
+    const result = await db.insert(subscriptionEvents).values(data)
+      .onConflictDoNothing({
+        target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
+      })
+      .returning({ id: subscriptionEvents.id });
+    return result.length > 0;
+  }
+
+  async getSubscriptionEventMetrics(): Promise<{
+    totalCount: number;
+    byEventType: { eventType: string; count: number }[];
+    byDetectionSource: { detectionSource: string; count: number }[];
+    averageConfidence: number;
+    recentEvents: {
+      eventType: string;
+      extractedPrice: string | null;
+      extractedCurrency: string | null;
+      extractedDate: string | null;
+      confidence: number;
+      detectionSource: string;
+      createdAt: Date;
+    }[];
+  }> {
+    const [totalRow] = await db.select({ count: sql<number>`count(*)::int` }).from(subscriptionEvents);
+
+    const byEventType = await db
+      .select({ eventType: subscriptionEvents.eventType, count: sql<number>`count(*)::int` })
+      .from(subscriptionEvents)
+      .groupBy(subscriptionEvents.eventType)
+      .orderBy(sql`count(*) desc`);
+
+    const byDetectionSource = await db
+      .select({ detectionSource: subscriptionEvents.detectionSource, count: sql<number>`count(*)::int` })
+      .from(subscriptionEvents)
+      .groupBy(subscriptionEvents.detectionSource)
+      .orderBy(sql`count(*) desc`);
+
+    const [avgRow] = await db
+      .select({ avg: sql<number>`coalesce(avg(${subscriptionEvents.confidence}), 0)::float` })
+      .from(subscriptionEvents);
+
+    // Extracted/structured fields only — no sourceMessageId, no userId, no
+    // raw email content. This is an aggregate observability endpoint, not
+    // a per-user data view.
+    const recentEvents = await db
+      .select({
+        eventType: subscriptionEvents.eventType,
+        extractedPrice: subscriptionEvents.extractedPrice,
+        extractedCurrency: subscriptionEvents.extractedCurrency,
+        extractedDate: subscriptionEvents.extractedDate,
+        confidence: subscriptionEvents.confidence,
+        detectionSource: subscriptionEvents.detectionSource,
+        createdAt: subscriptionEvents.createdAt,
+      })
+      .from(subscriptionEvents)
+      .orderBy(desc(subscriptionEvents.createdAt))
+      .limit(5);
+
+    return {
+      totalCount: totalRow?.count ?? 0,
+      byEventType: byEventType.map((r) => ({ eventType: r.eventType, count: r.count })),
+      byDetectionSource: byDetectionSource.map((r) => ({ detectionSource: r.detectionSource, count: r.count })),
+      averageConfidence: avgRow?.avg ?? 0,
+      recentEvents,
+    };
   }
 
   async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {
