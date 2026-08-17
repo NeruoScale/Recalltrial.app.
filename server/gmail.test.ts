@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Step 6: verify failure isolation in the REAL scanGmailForTrials() code
 // path (not a refactor/extraction) — mock googleapis so no network call
@@ -70,17 +70,14 @@ describe("detection: subscription / renewal", () => {
     expect(hasRequiredTrigger(text)).toBe(true);
   });
 
-  // KNOWN BUG, not fixed in this step (out of scope for the test-foundation task):
-  // extractDate() does `new Date(dateString)` (parsed in the process's LOCAL
-  // timezone) then `.toISOString().slice(0,10)` (serialized in UTC), with no
-  // explicit UTC anchoring. Whenever the process's local TZ is positively
-  // offset from UTC, an explicit date can silently roll back one calendar
-  // day. Reproduced here: this environment is UTC+1 (Africa/Casablanca),
-  // and "Aug 20, 2026" round-trips to "2026-08-19". Left as `it.fails` so
-  // the suite documents the bug without hiding it or blocking on it —
-  // if this ever starts passing, that's a signal the bug was fixed and
-  // this should be promoted to a real `it`.
-  it.fails("extracts an explicit 'renews on' date", () => {
+  // Was `it.fails` during Phase 2: extractDate() did `new Date(dateString)`
+  // (local-time parse) then `.toISOString()` (UTC serialize), which could
+  // silently roll a date back one day depending on the host's timezone.
+  // Fixed by parsing calendar components as plain integers and never
+  // round-tripping through an ambiguous local-time Date parse — see the
+  // timezone-safe helpers above extractDate() in gmail.ts. Promoted to a
+  // real assertion now that it's fixed.
+  it("extracts an explicit 'renews on' date", () => {
     const { date, source } = extractDate("your subscription renews on Aug 20, 2026", RECEIVED);
     expect(source).toBe("explicit");
     expect(date).toBe("2026-08-20");
@@ -159,9 +156,131 @@ describe("dates: no invented dates", () => {
     expect(source).toBe("none");
   });
 
-  // Same known bug as above (local-time parse + UTC serialize), reproduced
-  // in extractStartDate() too.
-  it.fails("extracts an explicit start date when present", () => {
+  // Same fix as above, applied to extractStartDate() too. Promoted from
+  // `it.fails` now that it's fixed.
+  it("extracts an explicit start date when present", () => {
+    const { date, source } = extractStartDate("your trial started on Aug 1, 2026");
+    expect(source).toBe("explicit");
+    expect(date).toBe("2026-08-01");
+  });
+});
+
+describe("timezone boundary regression (UTC+ and UTC-)", () => {
+  // Proves the fix by reproducing the exact mechanism of the original bug:
+  // Node respects a runtime process.env.TZ change for local-time Date
+  // construction/methods. Etc/GMT POSIX zone signs are inverted from their
+  // plain-English meaning — "Etc/GMT-14" IS UTC+14, "Etc/GMT+12" IS UTC-12 —
+  // chosen as the two most extreme standard offsets so the boundary is
+  // unambiguous in both directions, not a coincidence of a milder offset.
+  const ORIGINAL_TZ = process.env.TZ;
+
+  afterEach(() => {
+    if (ORIGINAL_TZ === undefined) delete process.env.TZ;
+    else process.env.TZ = ORIGINAL_TZ;
+  });
+
+  // Explicit-year dates deliberately use 2030, not RECEIVED's 2026: the
+  // explicit-date branch rolls a date forward a year if it's already
+  // passed relative to the REAL wall-clock date the test happens to run
+  // on (matching the original code's own behavior, unrelated to this fix)
+  // — a same-year-as-RECEIVED date would silently stop being "in the
+  // future" and become a different, wrong assertion once real time passes
+  // it. A year comfortably out avoids that class of test rot.
+
+  it("extractDate: explicit month-name date is stable under UTC+14", () => {
+    process.env.TZ = "Etc/GMT-14"; // UTC+14 — the direction that caused the original bug
+    const { date, source } = extractDate("your subscription renews on Aug 20, 2030", RECEIVED);
+    expect(source).toBe("explicit");
+    expect(date).toBe("2030-08-20");
+  });
+
+  it("extractDate: explicit month-name date is stable under UTC-12", () => {
+    process.env.TZ = "Etc/GMT+12"; // UTC-12 — the opposite extreme
+    const { date, source } = extractDate("your subscription renews on Aug 20, 2030", RECEIVED);
+    expect(source).toBe("explicit");
+    expect(date).toBe("2030-08-20");
+  });
+
+  it("extractDate: bare MM/DD/YYYY is stable under UTC+14", () => {
+    process.env.TZ = "Etc/GMT-14";
+    const { date, source } = extractDate("renewal scheduled 08/20/2030 for your account", RECEIVED);
+    expect(source).toBe("explicit");
+    expect(date).toBe("2030-08-20");
+  });
+
+  it("extractDate: bare MM/DD/YYYY is stable under UTC-12", () => {
+    process.env.TZ = "Etc/GMT+12";
+    const { date, source } = extractDate("renewal scheduled 08/20/2030 for your account", RECEIVED);
+    expect(source).toBe("explicit");
+    expect(date).toBe("2030-08-20");
+  });
+
+  it("extractDate: bare YYYY-MM-DD is stable under UTC+14", () => {
+    process.env.TZ = "Etc/GMT-14";
+    const { date, source } = extractDate("renewal scheduled 2030-08-20 for your account", RECEIVED);
+    expect(source).toBe("explicit");
+    expect(date).toBe("2030-08-20");
+  });
+
+  it("extractDate: bare YYYY-MM-DD is stable under UTC-12", () => {
+    process.env.TZ = "Etc/GMT+12";
+    const { date, source } = extractDate("renewal scheduled 2030-08-20 for your account", RECEIVED);
+    expect(source).toBe("explicit");
+    expect(date).toBe("2030-08-20");
+  });
+
+  it("extractDate: 'short month+day, no year' produces the identical result under UTC+14 and UTC-12", () => {
+    // No year in the input by design (that's the case being tested), so the
+    // function always infers the real current UTC year — a hardcoded
+    // expected year would be exactly as fragile as the ordinal-day case
+    // below. Cross-timezone consistency is the correct thing to assert.
+    process.env.TZ = "Etc/GMT-14";
+    const plus14 = extractDate("thanks for being a customer, see you Dec 25", RECEIVED);
+    process.env.TZ = "Etc/GMT+12";
+    const minus12 = extractDate("thanks for being a customer, see you Dec 25", RECEIVED);
+    expect(plus14.source).toBe("explicit");
+    expect(plus14.date).toEqual(minus12.date);
+    expect(plus14.date).toMatch(/^\d{4}-12-25$/);
+  });
+
+  it("extractDate: 'on the Nth' ordinal produces the identical result under UTC+14 and UTC-12", () => {
+    // This branch compares its candidate date against the real wall-clock
+    // "today", so a hardcoded expected calendar value would be fragile
+    // (correct today, silently wrong once real time passes it) — asserting
+    // cross-timezone consistency directly targets what's actually being
+    // proven here (timezone-invariance) without that coupling.
+    process.env.TZ = "Etc/GMT-14";
+    const plus14 = extractDate("your subscription renews on the 15th", RECEIVED);
+    process.env.TZ = "Etc/GMT+12";
+    const minus12 = extractDate("your subscription renews on the 15th", RECEIVED);
+    expect(plus14.source).toBe("relative");
+    expect(plus14.date).toEqual(minus12.date);
+    expect(plus14.source).toEqual(minus12.source);
+  });
+
+  it("extractDate: month-duration is stable under UTC+14", () => {
+    process.env.TZ = "Etc/GMT-14";
+    const { date, source } = extractDate("start your 1-month trial today", RECEIVED);
+    expect(source).toBe("duration");
+    expect(date).toBe("2026-09-01"); // RECEIVED = 2026-08-01
+  });
+
+  it("extractDate: month-duration is stable under UTC-12", () => {
+    process.env.TZ = "Etc/GMT+12";
+    const { date, source } = extractDate("start your 1-month trial today", RECEIVED);
+    expect(source).toBe("duration");
+    expect(date).toBe("2026-09-01");
+  });
+
+  it("extractStartDate: explicit month-name date is stable under UTC+14", () => {
+    process.env.TZ = "Etc/GMT-14";
+    const { date, source } = extractStartDate("your trial started on Aug 1, 2026");
+    expect(source).toBe("explicit");
+    expect(date).toBe("2026-08-01");
+  });
+
+  it("extractStartDate: explicit month-name date is stable under UTC-12", () => {
+    process.env.TZ = "Etc/GMT+12";
     const { date, source } = extractStartDate("your trial started on Aug 1, 2026");
     expect(source).toBe("explicit");
     expect(date).toBe("2026-08-01");

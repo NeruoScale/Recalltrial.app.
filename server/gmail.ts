@@ -147,11 +147,89 @@ export function resolveServiceName(domain: string, snippet: string): string {
 
 export type EndDateSource = "explicit" | "relative" | "duration" | "none";
 
+// ─── Timezone-safe calendar-date helpers ───────────────────────────────────────
+//
+// Root cause of the original bug: `new Date(dateString)` parses a bare date
+// string (e.g. "Aug 20, 2026") in the process's LOCAL timezone, but
+// `.toISOString()` always serializes in UTC. Whenever the local timezone is
+// positively offset from UTC, that round-trip can silently roll the date
+// back one calendar day. The fix is to never let a date-only value pass
+// through an ambiguous local-time Date parse at all: extract year/month/day
+// as plain integers directly from the regex match, and only ever construct
+// Date objects via Date.UTC (or read them via getUTC*), so every date in
+// this module means exactly one calendar day regardless of the host's
+// timezone. receivedAt itself is exempt from this — it comes from parsing
+// an RFC 2822 email "Date" header, which always carries an explicit
+// offset/zone, so `new Date(rfc2822String)` is already unambiguous.
+
+const MONTH_NAMES: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+type CalendarDate = { year: number; month: number; day: number };
+
+/**
+ * Parses a date substring already isolated by a regex match — one of
+ * "Month D[, YYYY]", "MM/DD/YYYY", or "YYYY-MM-DD" — into plain calendar
+ * components. `year` is null when the substring had no 4-digit year (the
+ * "Month D" no-year case). Never touches `new Date(string)`.
+ */
+function parseCalendarDateComponents(raw: string): { year: number | null; month: number; day: number } | null {
+  const cleaned = raw.replace(/(?:st|nd|rd|th)\b/gi, "").trim();
+
+  let m = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return { year: +m[1], month: +m[2], day: +m[3] };
+
+  m = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return { year: +m[3], month: +m[1], day: +m[2] };
+
+  m = cleaned.match(/^([A-Za-z]+)\.?\s+(\d{1,2}),?\s*(\d{4})?$/);
+  if (m) {
+    const month = MONTH_NAMES[m[1].slice(0, 3).toLowerCase()];
+    if (!month) return null;
+    return { year: m[3] ? +m[3] : null, month, day: +m[2] };
+  }
+
+  return null;
+}
+
+/** "YYYY-MM-DD", zero timezone dependency. Rejects overflow (e.g. Feb 30) rather than silently normalizing it. */
+function formatCalendarDate(year: number, month: number, day: number): string | null {
+  const ts = Date.UTC(year, month - 1, day);
+  const check = new Date(ts);
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    return null;
+  }
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function utcDateParts(d: Date): CalendarDate {
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+function isBeforeUTC(a: CalendarDate, b: CalendarDate): boolean {
+  return Date.UTC(a.year, a.month - 1, a.day) < Date.UTC(b.year, b.month - 1, b.day);
+}
+
+/**
+ * Resolves an explicit-or-inferred year against `today` the same way the
+ * original code did: reject years before today's (a clearly past date isn't
+ * a usable renewal/trial-end date), and if the resulting date has already
+ * passed this year, assume it refers to next year's occurrence.
+ */
+function resolveFutureCalendarDate(year: number, month: number, day: number, today: CalendarDate): string | null {
+  if (year < today.year) return null;
+  const candidate: CalendarDate = { year, month, day };
+  const resolved = isBeforeUTC(candidate, today) ? { year: year + 1, month, day } : candidate;
+  return formatCalendarDate(resolved.year, resolved.month, resolved.day);
+}
+
 export function extractDate(
   text: string,
   receivedAt: Date
 ): { date: string | null; source: EndDateSource } {
-  const today = new Date();
+  const today = utcDateParts(new Date());
 
   // High-priority context patterns (explicit dates with lifecycle context)
   const explicitPatterns = [
@@ -161,26 +239,58 @@ export function extractDate(
     /will be charged on ([A-Za-z]+ \d{1,2},?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4})/i,
     /(?:trial ends?|trial expires?|ends?|expir(?:es?|ation)|valid until|cancel (?:by|before)|charged on|due on)\s+(?:on\s+)?([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i,
     /(?:trial ends?|trial expires?|ends?|expir(?:es?|ation)|valid until|cancel (?:by|before))\s+(?:on\s+)?([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?)/i,
-    // Standard date formats in context
-    /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})\b/i,
-    /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/,
-    /\b(\d{4})-(\d{2})-(\d{2})\b/,
   ];
 
   for (const pattern of explicitPatterns) {
     const match = text.match(pattern);
-    if (match) {
-      const raw = (match[1] || match[0]).replace(/(?:st|nd|rd|th)/i, "").trim();
-      const withYear = raw.match(/\d{4}/) ? raw : `${raw}, ${today.getFullYear()}`;
-      const d = new Date(withYear);
-      if (!isNaN(d.getTime()) && d.getFullYear() >= today.getFullYear()) {
-        if (d < today) d.setFullYear(today.getFullYear() + 1);
-        return { date: d.toISOString().slice(0, 10), source: "explicit" };
+    if (match?.[1]) {
+      const components = parseCalendarDateComponents(match[1]);
+      if (components) {
+        const year = components.year ?? today.year;
+        const formatted = resolveFutureCalendarDate(year, components.month, components.day, today);
+        if (formatted) return { date: formatted, source: "explicit" };
       }
     }
   }
 
+  // Standard date formats without contextual phrasing (bare dates). Each
+  // pattern captures month/day/year as separate groups — read explicitly
+  // per pattern rather than assuming a single capture group covers the
+  // whole date (a bare `match[1]` alone here would only ever be the first
+  // component, e.g. just "Aug" or just "2026").
+  const bareMonthName = text.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})\b/i);
+  if (bareMonthName) {
+    const month = MONTH_NAMES[bareMonthName[1].slice(0, 3).toLowerCase()];
+    const day = parseInt(bareMonthName[2]);
+    const year = parseInt(bareMonthName[3]);
+    if (month) {
+      const formatted = resolveFutureCalendarDate(year, month, day, today);
+      if (formatted) return { date: formatted, source: "explicit" };
+    }
+  }
+
+  const bareSlash = text.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (bareSlash) {
+    const month = parseInt(bareSlash[1]);
+    const day = parseInt(bareSlash[2]);
+    const year = parseInt(bareSlash[3]);
+    const formatted = resolveFutureCalendarDate(year, month, day, today);
+    if (formatted) return { date: formatted, source: "explicit" };
+  }
+
+  const bareIso = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (bareIso) {
+    const year = parseInt(bareIso[1]);
+    const month = parseInt(bareIso[2]);
+    const day = parseInt(bareIso[3]);
+    const formatted = resolveFutureCalendarDate(year, month, day, today);
+    if (formatted) return { date: formatted, source: "explicit" };
+  }
+
   // Relative: "ends in X days", "trial ends tomorrow", "ends in 3 days"
+  // These add plain milliseconds to receivedAt's absolute timestamp — already
+  // timezone-safe (receivedAt came from an unambiguous RFC 2822 parse) — so
+  // .toISOString() here was never the bug; left unchanged.
   const tomorrowMatch = text.match(/(?:ends?|expir(?:es?)|trial ends?)\s+tomorrow/i);
   if (tomorrowMatch) {
     const d = new Date(receivedAt.getTime() + 86400000);
@@ -193,14 +303,19 @@ export function extractDate(
     return { date: d.toISOString().slice(0, 10), source: "relative" };
   }
 
-  // Ordinal day: "on the 6th" → infer month from receivedAt
+  // Ordinal day: "on the 6th" → infer month from receivedAt. This one WAS
+  // buggy (setDate/getMonth are local-time methods) — rewritten on
+  // receivedAt's UTC calendar parts, compared against UTC-today.
   const ordinalDayMatch = text.match(/(?:ends?|expir(?:es?)|cancel by|renews?)\s+on the (\d{1,2})(?:st|nd|rd|th)/i);
   if (ordinalDayMatch) {
     const day = parseInt(ordinalDayMatch[1]);
-    const d = new Date(receivedAt);
-    d.setDate(day);
-    if (d < today) d.setMonth(d.getMonth() + 1);
-    if (!isNaN(d.getTime())) return { date: d.toISOString().slice(0, 10), source: "relative" };
+    const rec = utcDateParts(receivedAt);
+    const candidate: CalendarDate = { year: rec.year, month: rec.month, day };
+    const resolved = isBeforeUTC(candidate, today)
+      ? (rec.month === 12 ? { year: rec.year + 1, month: 1, day } : { year: rec.year, month: rec.month + 1, day })
+      : candidate;
+    const formatted = formatCalendarDate(resolved.year, resolved.month, resolved.day);
+    if (formatted) return { date: formatted, source: "relative" };
   }
 
   // Duration-based: "14-day free trial", "30 day trial", "1-month trial"
@@ -211,11 +326,16 @@ export function extractDate(
     return { date: d.toISOString().slice(0, 10), source: "duration" };
   }
 
+  // Month-duration: setMonth/getMonth (local-time) replaced with
+  // Date.UTC-based month arithmetic on receivedAt's UTC parts. Date.UTC
+  // auto-normalizes day-of-month overflow the same way local setMonth did
+  // (e.g. Jan 31 + 1 month), preserving the original overflow behavior —
+  // just anchored consistently in UTC instead of mixing local and UTC.
   const monthDuration = text.match(/(\d+)[-\s]month(?:s)?\s+(?:free\s+)?(?:trial|plan|subscription)/i);
   if (monthDuration) {
-    const d = new Date(receivedAt);
-    d.setMonth(d.getMonth() + parseInt(monthDuration[1]));
-    return { date: d.toISOString().slice(0, 10), source: "duration" };
+    const rec = utcDateParts(receivedAt);
+    const ts = Date.UTC(rec.year, (rec.month - 1) + parseInt(monthDuration[1]), rec.day);
+    return { date: new Date(ts).toISOString().slice(0, 10), source: "duration" };
   }
 
   const weekDuration = text.match(/(\d+)[-\s]week(?:s)?\s+(?:free\s+)?trial/i);
@@ -227,10 +347,11 @@ export function extractDate(
   // Short month+day without year: "Mar 6", "March 6"
   const shortMatch = text.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})\b/i);
   if (shortMatch) {
-    const d = new Date(`${shortMatch[0]}, ${today.getFullYear()}`);
-    if (!isNaN(d.getTime())) {
-      if (d < today) d.setFullYear(today.getFullYear() + 1);
-      return { date: d.toISOString().slice(0, 10), source: "explicit" };
+    const month = MONTH_NAMES[shortMatch[1].slice(0, 3).toLowerCase()];
+    const day = parseInt(shortMatch[2]);
+    if (month) {
+      const formatted = resolveFutureCalendarDate(today.year, month, day, today);
+      if (formatted) return { date: formatted, source: "explicit" };
     }
   }
 
@@ -251,11 +372,11 @@ export function extractStartDate(text: string): { date: string | null; source: "
 
   for (const pattern of startPatterns) {
     const match = text.match(pattern);
-    if (match && match[1]) {
-      const raw = match[1].replace(/(?:st|nd|rd|th)/i, "").trim();
-      const d = new Date(raw);
-      if (!isNaN(d.getTime())) {
-        return { date: d.toISOString().slice(0, 10), source: "explicit" };
+    if (match?.[1]) {
+      const components = parseCalendarDateComponents(match[1]);
+      if (components && components.year) {
+        const formatted = formatCalendarDate(components.year, components.month, components.day);
+        if (formatted) return { date: formatted, source: "explicit" };
       }
     }
   }
