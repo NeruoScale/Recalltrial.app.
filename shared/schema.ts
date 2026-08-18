@@ -199,6 +199,21 @@ export const subscriptionEvents = pgTable("subscription_events", {
   paymentProcessor: text("payment_processor"),
   merchantConfidence: integer("merchant_confidence"),
   merchantResolutionStatus: merchantResolutionStatusEnum("merchant_resolution_status"),
+  // Phase 3B.5: canonical event identity. When the same (userId,
+  // sourceMessageId) is reclassified under a different eventType, BOTH rows
+  // are preserved (never deleted) — the old row gets isCanonical=false +
+  // supersededBy, the new row becomes the canonical one. canonicalEventId
+  // is shared by every row in a reclassification chain and always equals
+  // the id of whichever row is CURRENTLY canonical, so any row in the
+  // chain resolves to "what's current" in one lookup. No self-referencing
+  // FK declared here at the Drizzle level (self-references need the
+  // AnyPgColumn callback pattern and add complexity for no real benefit
+  // here) — the real FK constraint is added via raw SQL in migrate.ts,
+  // consistent with how every other constraint in this file is enforced.
+  canonicalEventId: varchar("canonical_event_id"),
+  classificationGeneration: integer("classification_generation").notNull().default(1),
+  isCanonical: boolean("is_canonical").notNull().default(true),
+  supersededBy: varchar("superseded_by"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   unique("subscription_events_user_message_type_unique").on(
@@ -236,6 +251,46 @@ export const entityResolutionCandidates = pgTable("entity_resolution_candidates"
 
 export type EntityResolutionCandidate = typeof entityResolutionCandidates.$inferSelect;
 export type InsertEntityResolutionCandidate = typeof entityResolutionCandidates.$inferInsert;
+
+// Phase 3B.5: SHADOW SUBSCRIPTIONS ONLY. isShadow is always true today —
+// nothing in the app reads this table to affect trials, reminders, or any
+// production UX. entityKey exists purely to make idempotent upserts
+// possible via a plain 2-column unique constraint (userId, entityKey)
+// instead of a Postgres expression index — it's
+// COALESCE(canonicalMerchantDomain, canonicalMerchantName) computed at
+// write time, not a new independent piece of evidence.
+export const shadowSubscriptionStatusEnum = pgEnum("shadow_subscription_status", [
+  "active", "trial", "past_due", "canceled", "unknown",
+]);
+
+export const subscriptions = pgTable("subscriptions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  entityKey: text("entity_key").notNull(),
+  canonicalMerchantName: text("canonical_merchant_name").notNull(),
+  canonicalMerchantDomain: text("canonical_merchant_domain"),
+  merchantConfidence: integer("merchant_confidence"),
+  resolutionMethod: text("resolution_method").notNull(),
+  resolutionStatus: entityResolutionStatusEnum("resolution_status").notNull(),
+  planName: text("plan_name"),
+  subscriptionStatus: shadowSubscriptionStatusEnum("subscription_status").notNull().default("unknown"),
+  amount: decimal("amount", { precision: 10, scale: 2 }),
+  currency: text("currency"),
+  billingInterval: text("billing_interval"),
+  nextBillingDate: date("next_billing_date"),
+  lastBillingDate: date("last_billing_date"),
+  sourceCanonicalEventId: varchar("source_canonical_event_id").notNull().references(() => subscriptionEvents.id),
+  isShadow: boolean("is_shadow").notNull().default(true),
+  potentialFalseMerge: boolean("potential_false_merge").notNull().default(false),
+  potentialFalseSplit: boolean("potential_false_split").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  unique("subscriptions_user_entity_key_unique").on(table.userId, table.entityKey),
+]);
+
+export type ShadowSubscription = typeof subscriptions.$inferSelect;
+export type InsertShadowSubscription = typeof subscriptions.$inferInsert;
 
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 

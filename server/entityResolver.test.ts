@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveEntity } from "./entityResolver";
+import { resolveEntity, isEligibleForShadowSubscription, deriveShadowSubscription } from "./entityResolver";
 import type { SubscriptionEvent } from "@shared/schema";
 
 let idCounter = 0;
@@ -245,5 +245,88 @@ describe("Purity / determinism (excluding proposedSubscriptionId, which is a fre
     expect(a[0].resolutionMethod).toBe(b[0].resolutionMethod);
     expect(a[0].resolutionStatus).toBe(b[0].resolutionStatus);
     expect(a[0].events.map((e) => e.id)).toEqual(b[0].events.map((e) => e.id));
+  });
+});
+
+describe("Phase 3B.5: shadow subscription eligibility (HARD SAFETY RULE)", () => {
+  it("processor-only merchant (processor_body_match) -> resolved, but NOT eligible for a shadow subscription", () => {
+    const events = [
+      makeEvent({ canonicalMerchantName: null, canonicalMerchantDomain: null, paymentProcessor: "Stripe", extractedMerchant: "SomeApp", merchantConfidence: 50 }),
+      makeEvent({ canonicalMerchantName: null, canonicalMerchantDomain: null, paymentProcessor: "Stripe", extractedMerchant: "SomeApp", merchantConfidence: 50 }),
+    ];
+    const [group] = resolveEntity(events);
+    expect(group.resolutionMethod).toBe("processor_body_match");
+    expect(group.resolutionStatus).toBe("resolved");
+    expect(isEligibleForShadowSubscription(group)).toBe(false);
+    expect(deriveShadowSubscription(group)).toBeNull();
+  });
+
+  it("Google Play name-only merchant (name_match via Google processor) -> resolved, but NOT eligible for a shadow subscription", () => {
+    // Mirrors the real production shape (Proton/Urban, Phase 3B.4 data):
+    // canonicalMerchantName set, no domain, paymentProcessor="Google".
+    const events = [
+      makeEvent({ canonicalMerchantName: "Proton", canonicalMerchantDomain: null, paymentProcessor: "Google", merchantConfidence: 70 }),
+      makeEvent({ canonicalMerchantName: "Proton", canonicalMerchantDomain: null, paymentProcessor: "Google", merchantConfidence: 70 }),
+      makeEvent({ canonicalMerchantName: "Proton", canonicalMerchantDomain: null, paymentProcessor: "Google", merchantConfidence: 70 }),
+    ];
+    const [group] = resolveEntity(events);
+    expect(group.resolutionMethod).toBe("name_match");
+    expect(group.resolutionStatus).toBe("resolved");
+    expect(isEligibleForShadowSubscription(group)).toBe(false);
+    expect(deriveShadowSubscription(group)).toBeNull();
+  });
+
+  it("domain_match merchant -> eligible, shadow subscription created with the right fields", () => {
+    const events = [
+      makeEvent({
+        userId: "user-anthropic", canonicalMerchantName: "Anthropic", canonicalMerchantDomain: "anthropic.com",
+        paymentProcessor: null, merchantConfidence: 95, eventType: "subscription_invoice",
+        extractedPrice: "20.00", extractedCurrency: "USD",
+      }),
+      makeEvent({
+        userId: "user-anthropic", canonicalMerchantName: "Anthropic", canonicalMerchantDomain: "anthropic.com",
+        paymentProcessor: null, merchantConfidence: 95, eventType: "subscription_invoice",
+        extractedPrice: "20.00", extractedCurrency: "USD",
+      }),
+    ];
+    const [group] = resolveEntity(events);
+    expect(group.resolutionMethod).toBe("domain_match");
+    expect(group.resolutionStatus).toBe("resolved");
+    expect(isEligibleForShadowSubscription(group)).toBe(true);
+
+    const candidate = deriveShadowSubscription(group);
+    expect(candidate).not.toBeNull();
+    expect(candidate!.userId).toBe("user-anthropic");
+    expect(candidate!.canonicalMerchantName).toBe("Anthropic");
+    expect(candidate!.canonicalMerchantDomain).toBe("anthropic.com");
+    expect(candidate!.entityKey).toBe("anthropic.com");
+    expect(candidate!.isShadow).toBe(true);
+    expect(candidate!.resolutionStatus).toBe("resolved");
+  });
+
+  it("name_match with a non-Google/Apple processor and >=2 events IS eligible (strong corroboration)", () => {
+    const events = [
+      makeEvent({ canonicalMerchantName: "Sellthetrend", canonicalMerchantDomain: null, paymentProcessor: "Stripe", merchantConfidence: 75 }),
+      makeEvent({ canonicalMerchantName: "Sellthetrend", canonicalMerchantDomain: null, paymentProcessor: "Stripe", merchantConfidence: 75 }),
+    ];
+    const [group] = resolveEntity(events);
+    expect(group.resolutionMethod).toBe("name_match");
+    expect(isEligibleForShadowSubscription(group)).toBe(true);
+    expect(deriveShadowSubscription(group)).not.toBeNull();
+  });
+
+  it("does not cross-contaminate userId across two different users' eligible groups", () => {
+    const events = [
+      makeEvent({ userId: "user-a", canonicalMerchantName: "Netflix", canonicalMerchantDomain: "netflix.com", merchantConfidence: 90 }),
+      makeEvent({ userId: "user-a", canonicalMerchantName: "Netflix", canonicalMerchantDomain: "netflix.com", merchantConfidence: 90 }),
+      makeEvent({ userId: "user-b", canonicalMerchantName: "Netflix", canonicalMerchantDomain: "netflix.com", merchantConfidence: 90 }),
+      makeEvent({ userId: "user-b", canonicalMerchantName: "Netflix", canonicalMerchantDomain: "netflix.com", merchantConfidence: 90 }),
+    ];
+    const groups = resolveEntity(events);
+    expect(groups).toHaveLength(2);
+    const candidates = groups.map((g) => deriveShadowSubscription(g));
+    expect(candidates.every((c) => c !== null)).toBe(true);
+    const userIds = candidates.map((c) => c!.userId).sort();
+    expect(userIds).toEqual(["user-a", "user-b"]);
   });
 });

@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { eq, and, lte, sql, count, desc, inArray } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription } from "@shared/schema";
+import { decideCanonicalization } from "./canonicalEvents";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -41,6 +43,23 @@ export interface IStorage {
   // the "why" on each.
   getAllSubscriptionEventsForResolution(): Promise<SubscriptionEvent[]>;
   saveEntityResolutionCandidates(candidates: InsertEntityResolutionCandidate[]): Promise<number>;
+
+  // Phase 3B.5: shadow subscriptions — see the implementation for the "why"
+  // on each. isShadow is always true; nothing here is read by production UX.
+  upsertShadowSubscription(data: InsertShadowSubscription): Promise<ShadowSubscription>;
+  getShadowSubscriptionMetrics(): Promise<{
+    canonicalEvents: number;
+    supersededClassifications: number;
+    shadowSubscriptions: number;
+    subscriptionsByResolutionStatus: { resolutionStatus: string; count: number }[];
+    subscriptionsByEvidenceClass: { resolutionMethod: string; count: number }[];
+    processorOnlySkipped: number;
+    ambiguousSkipped: number;
+    perUserBreakdown: { userId: string; count: number }[];
+    perMerchantBreakdown: { canonicalMerchantName: string; count: number }[];
+    potentialFalseMerges: number;
+    potentialFalseSplits: number;
+  }>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -389,19 +408,88 @@ export class DatabaseStorage implements IStorage {
     // extractedDate/confidence/etc, established by Phase 3B.1/3B.2's
     // classification, are deliberately left untouched on conflict rather
     // than silently re-applied from a later scan.
-    const result = await db.insert(subscriptionEvents).values(data)
-      .onConflictDoUpdate({
-        target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
-        set: {
-          canonicalMerchantName: data.canonicalMerchantName,
-          canonicalMerchantDomain: data.canonicalMerchantDomain,
-          paymentProcessor: data.paymentProcessor,
-          merchantConfidence: data.merchantConfidence,
-          merchantResolutionStatus: data.merchantResolutionStatus,
-        },
+    //
+    // Phase 3B.5: a re-scan that lands on a DIFFERENT eventType than the
+    // message's current canonical row is a reclassification, not an
+    // independent event — see server/canonicalEvents.ts for the decision
+    // logic. This whole method runs in a transaction so the "old row
+    // superseded + new row canonical" state change is atomic.
+    return db.transaction(async (tx) => {
+      const existingRows = await tx
+        .select()
+        .from(subscriptionEvents)
+        .where(and(eq(subscriptionEvents.userId, data.userId), eq(subscriptionEvents.sourceMessageId, data.sourceMessageId)));
+
+      const decision = decideCanonicalization(existingRows, data.eventType);
+
+      if (decision.kind === "same_classification") {
+        const result = await tx.insert(subscriptionEvents).values(data)
+          .onConflictDoUpdate({
+            target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
+            set: {
+              canonicalMerchantName: data.canonicalMerchantName,
+              canonicalMerchantDomain: data.canonicalMerchantDomain,
+              paymentProcessor: data.paymentProcessor,
+              merchantConfidence: data.merchantConfidence,
+              merchantResolutionStatus: data.merchantResolutionStatus,
+            },
+          })
+          .returning({ id: subscriptionEvents.id });
+        return result.length > 0;
+      }
+
+      // first_generation or reclassification: this scan produces a new
+      // canonical row. A pre-generated id lets canonicalEventId point at
+      // "this row's own id" within the same insert. The onConflictDoUpdate
+      // target is a safety net for the rare cycling case (eventType goes
+      // A -> B -> A again) — it resurrects the old A row as canonical
+      // instead of violating the (userId, sourceMessageId, eventType)
+      // unique constraint by inserting a second row with the same
+      // eventType; canonicalEventId there self-references the target row's
+      // own (unchanged) id rather than the discarded `excluded.id`.
+      const newRowId = randomUUID();
+      const generation = decision.kind === "reclassification" ? decision.newGeneration : 1;
+
+      const [canonicalRow] = await tx.insert(subscriptionEvents).values({
+        ...data,
+        id: newRowId,
+        classificationGeneration: generation,
+        isCanonical: true,
+        canonicalEventId: newRowId,
+        supersededBy: null,
       })
-      .returning({ id: subscriptionEvents.id });
-    return result.length > 0;
+        .onConflictDoUpdate({
+          target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
+          set: {
+            classificationGeneration: generation,
+            isCanonical: true,
+            canonicalEventId: sql`${subscriptionEvents.id}`,
+            supersededBy: null,
+            canonicalMerchantName: data.canonicalMerchantName,
+            canonicalMerchantDomain: data.canonicalMerchantDomain,
+            paymentProcessor: data.paymentProcessor,
+            merchantConfidence: data.merchantConfidence,
+            merchantResolutionStatus: data.merchantResolutionStatus,
+          },
+        })
+        .returning({ id: subscriptionEvents.id });
+
+      if (!canonicalRow) return false;
+
+      if (decision.kind === "reclassification") {
+        await tx.update(subscriptionEvents)
+          .set({ isCanonical: false, supersededBy: canonicalRow.id, canonicalEventId: canonicalRow.id })
+          .where(eq(subscriptionEvents.id, decision.oldCanonicalRow.id));
+
+        if (decision.chainRowIdsToRelink.length > 0) {
+          await tx.update(subscriptionEvents)
+            .set({ canonicalEventId: canonicalRow.id })
+            .where(inArray(subscriptionEvents.id, decision.chainRowIdsToRelink));
+        }
+      }
+
+      return true;
+    });
   }
 
   async getSubscriptionEventMetrics(): Promise<{
@@ -468,8 +556,12 @@ export class DatabaseStorage implements IStorage {
   // Phase 3B.4: entity resolution SHADOW MODE only — read-only source data
   // for server/entityResolver.ts, and a snapshot-style write of its
   // proposed groupings. Nothing here is read by any other part of the app.
+  //
+  // Phase 3B.5: scoped to isCanonical=true only — a message's superseded
+  // classification generations must never be treated as independent events
+  // by the resolver (a hard boundary of this phase).
   async getAllSubscriptionEventsForResolution(): Promise<SubscriptionEvent[]> {
-    return db.select().from(subscriptionEvents);
+    return db.select().from(subscriptionEvents).where(eq(subscriptionEvents.isCanonical, true));
   }
 
   async saveEntityResolutionCandidates(candidates: InsertEntityResolutionCandidate[]): Promise<number> {
@@ -485,6 +577,127 @@ export class DatabaseStorage implements IStorage {
       const inserted = await tx.insert(entityResolutionCandidates).values(candidates).returning({ id: entityResolutionCandidates.id });
       return inserted.length;
     });
+  }
+
+  // Phase 3B.5: SHADOW SUBSCRIPTIONS ONLY — isShadow is always true today.
+  // Upsert on (userId, entityKey) so repeated resolver runs are idempotent:
+  // same input always converges to the same row instead of piling up
+  // duplicates (Step 3's requirement).
+  async upsertShadowSubscription(data: InsertShadowSubscription): Promise<ShadowSubscription> {
+    const [row] = await db.insert(subscriptions).values(data)
+      .onConflictDoUpdate({
+        target: [subscriptions.userId, subscriptions.entityKey],
+        set: {
+          canonicalMerchantName: data.canonicalMerchantName,
+          canonicalMerchantDomain: data.canonicalMerchantDomain,
+          merchantConfidence: data.merchantConfidence,
+          resolutionMethod: data.resolutionMethod,
+          resolutionStatus: data.resolutionStatus,
+          planName: data.planName,
+          subscriptionStatus: data.subscriptionStatus,
+          amount: data.amount,
+          currency: data.currency,
+          billingInterval: data.billingInterval,
+          nextBillingDate: data.nextBillingDate,
+          lastBillingDate: data.lastBillingDate,
+          sourceCanonicalEventId: data.sourceCanonicalEventId,
+          potentialFalseMerge: data.potentialFalseMerge,
+          potentialFalseSplit: data.potentialFalseSplit,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getShadowSubscriptionMetrics(): Promise<{
+    canonicalEvents: number;
+    supersededClassifications: number;
+    shadowSubscriptions: number;
+    subscriptionsByResolutionStatus: { resolutionStatus: string; count: number }[];
+    subscriptionsByEvidenceClass: { resolutionMethod: string; count: number }[];
+    processorOnlySkipped: number;
+    ambiguousSkipped: number;
+    perUserBreakdown: { userId: string; count: number }[];
+    perMerchantBreakdown: { canonicalMerchantName: string; count: number }[];
+    potentialFalseMerges: number;
+    potentialFalseSplits: number;
+  }> {
+    const [canonicalRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(subscriptionEvents)
+      .where(eq(subscriptionEvents.isCanonical, true));
+
+    const [supersededRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(subscriptionEvents)
+      .where(eq(subscriptionEvents.isCanonical, false));
+
+    const [shadowRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .where(eq(subscriptions.isShadow, true));
+
+    const subscriptionsByResolutionStatus = await db
+      .select({ resolutionStatus: subscriptions.resolutionStatus, count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .groupBy(subscriptions.resolutionStatus)
+      .orderBy(sql`count(*) desc`);
+
+    const subscriptionsByEvidenceClass = await db
+      .select({ resolutionMethod: subscriptions.resolutionMethod, count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .groupBy(subscriptions.resolutionMethod)
+      .orderBy(sql`count(*) desc`);
+
+    // processor_only and ambiguous candidates are ones entityResolver.ts
+    // already decided are NOT shadow-eligible — they live in the Phase 3B.4
+    // entity_resolution_candidates snapshot table, never in `subscriptions`.
+    const [processorOnlyRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(entityResolutionCandidates)
+      .where(eq(entityResolutionCandidates.resolutionMethod, "processor_body_match"));
+
+    const [ambiguousRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(entityResolutionCandidates)
+      .where(eq(entityResolutionCandidates.resolutionStatus, "ambiguous"));
+
+    const perUserBreakdown = await db
+      .select({ userId: subscriptions.userId, count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .groupBy(subscriptions.userId)
+      .orderBy(sql`count(*) desc`);
+
+    const perMerchantBreakdown = await db
+      .select({ canonicalMerchantName: subscriptions.canonicalMerchantName, count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .groupBy(subscriptions.canonicalMerchantName)
+      .orderBy(sql`count(*) desc`);
+
+    const [falseMergeRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .where(eq(subscriptions.potentialFalseMerge, true));
+
+    const [falseSplitRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(subscriptions)
+      .where(eq(subscriptions.potentialFalseSplit, true));
+
+    return {
+      canonicalEvents: canonicalRow?.count ?? 0,
+      supersededClassifications: supersededRow?.count ?? 0,
+      shadowSubscriptions: shadowRow?.count ?? 0,
+      subscriptionsByResolutionStatus,
+      subscriptionsByEvidenceClass,
+      processorOnlySkipped: processorOnlyRow?.count ?? 0,
+      ambiguousSkipped: ambiguousRow?.count ?? 0,
+      perUserBreakdown,
+      perMerchantBreakdown,
+      potentialFalseMerges: falseMergeRow?.count ?? 0,
+      potentialFalseSplits: falseSplitRow?.count ?? 0,
+    };
   }
 
   async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {

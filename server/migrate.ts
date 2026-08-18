@@ -232,5 +232,115 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] entity_resolution_candidates:", err.message);
   }
 
+  // ── Phase 3B.5 Step 1: canonical event identity columns ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events
+        ADD COLUMN IF NOT EXISTS canonical_event_id varchar,
+        ADD COLUMN IF NOT EXISTS classification_generation integer NOT NULL DEFAULT 1,
+        ADD COLUMN IF NOT EXISTS is_canonical boolean NOT NULL DEFAULT true,
+        ADD COLUMN IF NOT EXISTS superseded_by varchar;
+    `);
+    console.log("[migrate] subscription_events canonical-identity columns OK");
+  } catch (err: any) {
+    console.error("[migrate] canonical-identity columns:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.table_constraints
+          WHERE constraint_name = 'subscription_events_superseded_by_fkey'
+        ) THEN
+          ALTER TABLE subscription_events
+            ADD CONSTRAINT subscription_events_superseded_by_fkey
+            FOREIGN KEY (superseded_by) REFERENCES subscription_events(id);
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] subscription_events.superseded_by FK OK");
+  } catch (err: any) {
+    console.error("[migrate] superseded_by FK:", err.message);
+  }
+
+  // ── Phase 3B.5 Step 2/3: shadow subscriptions table + idempotency constraint ──
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'shadow_subscription_status') THEN
+          CREATE TYPE shadow_subscription_status AS ENUM ('active', 'trial', 'past_due', 'canceled', 'unknown');
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] shadow_subscription_status enum OK");
+  } catch (err: any) {
+    console.error("[migrate] shadow_subscription_status enum:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id varchar NOT NULL REFERENCES users(id),
+        entity_key text NOT NULL,
+        canonical_merchant_name text NOT NULL,
+        canonical_merchant_domain text,
+        merchant_confidence integer,
+        resolution_method text NOT NULL,
+        resolution_status entity_resolution_status NOT NULL,
+        plan_name text,
+        subscription_status shadow_subscription_status NOT NULL DEFAULT 'unknown',
+        amount decimal(10, 2),
+        currency text,
+        billing_interval text,
+        next_billing_date date,
+        last_billing_date date,
+        source_canonical_event_id varchar NOT NULL REFERENCES subscription_events(id),
+        is_shadow boolean NOT NULL DEFAULT true,
+        potential_false_merge boolean NOT NULL DEFAULT false,
+        potential_false_split boolean NOT NULL DEFAULT false,
+        created_at timestamp DEFAULT now() NOT NULL,
+        updated_at timestamp DEFAULT now() NOT NULL,
+        CONSTRAINT subscriptions_user_entity_key_unique UNIQUE (user_id, entity_key)
+      );
+    `);
+    console.log("[migrate] subscriptions (shadow) table OK");
+  } catch (err: any) {
+    console.error("[migrate] subscriptions table:", err.message);
+  }
+
+  // ── Phase 3B.5 Step 5: canonicalize existing multi-generation groups ──
+  // Idempotent by construction: scoped to WHERE canonical_event_id IS NULL,
+  // so already-processed rows (including every row touched by a previous
+  // run of this same migration) are left untouched on re-runs. Handles
+  // single-row groups too (they just get canonical_event_id set to their
+  // own id, generation stays 1, is_canonical stays true) — no special-casing
+  // needed for "was this message ever reclassified or not."
+  try {
+    const result = await db.execute(sql`
+      WITH ranked AS (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (PARTITION BY user_id, source_message_id ORDER BY created_at ASC) AS gen,
+          COUNT(*) OVER (PARTITION BY user_id, source_message_id) AS total,
+          FIRST_VALUE(id) OVER (PARTITION BY user_id, source_message_id ORDER BY created_at DESC) AS latest_id
+        FROM subscription_events
+        WHERE canonical_event_id IS NULL
+      )
+      UPDATE subscription_events se
+      SET
+        classification_generation = ranked.gen,
+        is_canonical = (ranked.gen = ranked.total),
+        superseded_by = CASE WHEN ranked.gen = ranked.total THEN NULL ELSE ranked.latest_id END,
+        canonical_event_id = ranked.latest_id
+      FROM ranked
+      WHERE se.id = ranked.id;
+    `);
+    console.log(`[migrate] Phase 3B.5 canonicalization backfill: ${result.rowCount ?? 0} rows processed`);
+  } catch (err: any) {
+    console.error("[migrate] canonicalization backfill:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

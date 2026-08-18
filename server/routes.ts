@@ -741,14 +741,20 @@ export async function registerRoutes(
 
   // Phase 2 Step 7 (PHASE1_AUDIT.md, subscription-detection observation
   // only — nothing in the app reads subscription_events besides this).
+  // Phase 3B.5 Step 4: extended with canonical-event-identity and shadow-
+  // subscription metrics — still observation only, no production behavior
+  // reads this endpoint's response.
   app.get("/api/admin/subscription-events/metrics", async (req: Request, res: Response) => {
     const adminKey = req.headers["x-admin-key"] || req.query.key;
     if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
       return res.status(403).json({ message: "Forbidden" });
     }
     try {
-      const metrics = await storage.getSubscriptionEventMetrics();
-      return res.json(metrics);
+      const [metrics, shadowMetrics] = await Promise.all([
+        storage.getSubscriptionEventMetrics(),
+        storage.getShadowSubscriptionMetrics(),
+      ]);
+      return res.json({ ...metrics, ...shadowMetrics });
     } catch (err) {
       console.error("Subscription-event metrics error:", err);
       return res.status(500).json({ message: "Internal error" });

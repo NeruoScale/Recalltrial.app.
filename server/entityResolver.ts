@@ -1,19 +1,22 @@
-// ─── Entity resolution — SHADOW MODE ONLY (Phase 3B.4) ─────────────────────────
+// ─── Entity resolution — SHADOW MODE ONLY (Phase 3B.4 / 3B.5) ──────────────────
 //
 // Groups subscription_events belonging to the same real-world subscription
 // into a proposed entity. This is a dry-run/shadow pass:
 //
 //   raw email -> classified event -> proposed entity resolution -> shadow output
 //
-// NOT (yet): raw email -> entity resolution -> subscription. No subscriptions
-// table exists, nothing here writes to one, nothing here changes reminder
-// scheduling or any other user-facing behavior. Output is written only to
-// entity_resolution_candidates, an explicitly observation-only table nothing
-// else reads from.
+// NOT (yet): raw email -> entity resolution -> subscription that drives
+// production UX. A real `subscriptions` table exists as of Phase 3B.5, but
+// every row is isShadow=true and nothing else in the app reads it — it
+// still doesn't touch trials, reminders, or any user-facing behavior.
 //
-// Deterministic only — no AI, no randomness, no I/O. Same input always
-// produces the same output (proposedSubscriptionId aside, which is a fresh
-// UUID per call by design — see resolveEntity's docstring).
+// Deterministic only — no AI, no randomness. Same input always produces the
+// same grouping/status/confidence output (proposedSubscriptionId aside,
+// which is a fresh UUID per resolveEntity() call by design). The Phase
+// 3B.5 additions below (isEligibleForShadowSubscription/
+// deriveShadowSubscription) read the real wall-clock time to classify a
+// date as past/future — that one piece is not pure across different call
+// times, same as any "is this due yet" check would be.
 
 import { randomUUID } from "crypto";
 import type { SubscriptionEvent } from "@shared/schema";
@@ -259,4 +262,133 @@ function resolveForOneUser(events: SubscriptionEvent[]): EntityResolutionResult[
       potentialFalseSplit,
     };
   });
+}
+
+// ─── Phase 3B.5: shadow subscription eligibility ───────────────────────────────
+//
+// HARD SAFETY RULE, implemented exactly as specified — every branch below
+// maps to one bullet, on purpose, so the rule stays traceable rather than
+// collapsing into one opaque boolean expression:
+//   1. resolutionStatus must be "resolved"
+//   2. evidence class must be eligible:
+//        domain_match / domain_match_with_product_hint -> eligible
+//        name_match + strong corroboration              -> eligible
+//        processor_body_match ("processor_only")         -> NOT eligible
+//        Google Play / App Store name-only match          -> NOT eligible
+//        ambiguous_platform_name                          -> NOT eligible
+//   3. no conflicting merchant identity (resolutionStatus="conflict" is
+//      already excluded by rule 1, since "conflict" !== "resolved")
+//   4. same userId — structural, entityResolver already never merges
+//      across users (see the byUser grouping in resolveEntity())
+//   5. canonicalMerchantDomain present (domain_match) OR multiple
+//      independent signals (name_match, i.e. >1 corroborating event)
+
+const PLAY_STORE_PROCESSORS = new Set(["google", "apple"]);
+
+export function isEligibleForShadowSubscription(group: EntityResolutionResult): boolean {
+  if (group.resolutionStatus !== "resolved") return false; // rules 1 & 3
+
+  switch (group.resolutionMethod) {
+    case "domain_match":
+    case "domain_match_with_product_hint":
+      return !!group.canonicalMerchantDomain; // rule 5, domain clause
+
+    case "name_match": {
+      // "Google Play merchant name only -> NOT eligible": even a
+      // multi-event name_match is excluded when the identity only came
+      // through as a Play/App Store marketplace name — the real
+      // merchant's own domain is hidden behind the platform, so this
+      // isn't independent corroboration the way two different senders
+      // both saying "Spotify" would be.
+      if (group.paymentProcessor && PLAY_STORE_PROCESSORS.has(group.paymentProcessor.toLowerCase())) {
+        return false;
+      }
+      return group.events.length >= 2; // rule 5, "multiple independent signals"
+    }
+
+    case "processor_body_match": // "processor_only" -> NOT eligible
+    case "ambiguous_platform_name":
+    case "no_corroborating_evidence":
+    default:
+      return false;
+  }
+}
+
+export type ShadowSubscriptionCandidate = {
+  userId: string;
+  entityKey: string;
+  canonicalMerchantName: string;
+  canonicalMerchantDomain: string | null;
+  merchantConfidence: number | null;
+  resolutionMethod: string;
+  resolutionStatus: "resolved";
+  subscriptionStatus: "active" | "trial" | "past_due" | "canceled" | "unknown";
+  amount: string | null;
+  currency: string | null;
+  nextBillingDate: string | null;
+  lastBillingDate: string | null;
+  sourceCanonicalEventId: string;
+  isShadow: true;
+  potentialFalseMerge: boolean;
+  potentialFalseSplit: boolean;
+};
+
+function inferSubscriptionStatus(eventType: string): ShadowSubscriptionCandidate["subscriptionStatus"] {
+  if (eventType === "subscription_cancelled") return "canceled";
+  if (eventType === "trial_started" || eventType === "trial_ending") return "trial";
+  if (eventType === "payment_failed") return "past_due";
+  if (eventType === "subscription_invoice" || eventType === "subscription_renewed" || eventType === "price_changed") return "active";
+  return "unknown";
+}
+
+/**
+ * Builds a shadow subscription candidate from an eligible, resolved group —
+ * returns null if the group fails isEligibleForShadowSubscription(). The
+ * "most recent" event within the group (by extractedDate when available,
+ * falling back to createdAt) supplies amount/currency/date/status, since
+ * that's the freshest evidence this shadow subscription reflects.
+ *
+ * planName/billingInterval are intentionally left for the caller to
+ * populate as null: no existing pipeline stage extracts either of these as
+ * a distinct signal from merchant name/price, and inventing extraction
+ * logic not asked for elsewhere in this phase would be scope creep.
+ */
+export function deriveShadowSubscription(group: EntityResolutionResult): ShadowSubscriptionCandidate | null {
+  if (!isEligibleForShadowSubscription(group)) return null;
+
+  const now = new Date();
+  const mostRecent = [...group.events].sort((a, b) => {
+    const aDate = a.extractedDate ? new Date(a.extractedDate).getTime() : new Date(a.createdAt).getTime();
+    const bDate = b.extractedDate ? new Date(b.extractedDate).getTime() : new Date(b.createdAt).getTime();
+    return bDate - aDate;
+  })[0];
+
+  let nextBillingDate: string | null = null;
+  let lastBillingDate: string | null = null;
+  if (mostRecent.extractedDate) {
+    const d = new Date(mostRecent.extractedDate);
+    if (d.getTime() >= now.getTime()) nextBillingDate = mostRecent.extractedDate;
+    else lastBillingDate = mostRecent.extractedDate;
+  }
+
+  const entityKey = (group.canonicalMerchantDomain || group.canonicalMerchantName).trim().toLowerCase();
+
+  return {
+    userId: mostRecent.userId,
+    entityKey,
+    canonicalMerchantName: group.canonicalMerchantName,
+    canonicalMerchantDomain: group.canonicalMerchantDomain,
+    merchantConfidence: mostRecent.merchantConfidence,
+    resolutionMethod: group.resolutionMethod,
+    resolutionStatus: "resolved",
+    subscriptionStatus: inferSubscriptionStatus(mostRecent.eventType),
+    amount: mostRecent.extractedPrice,
+    currency: mostRecent.extractedCurrency,
+    nextBillingDate,
+    lastBillingDate,
+    sourceCanonicalEventId: mostRecent.id,
+    isShadow: true,
+    potentialFalseMerge: group.potentialFalseMerge,
+    potentialFalseSplit: group.potentialFalseSplit,
+  };
 }
