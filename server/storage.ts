@@ -1,6 +1,6 @@
 import { eq, and, lte, sql, count, desc, inArray } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate } from "@shared/schema";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -36,6 +36,11 @@ export interface IStorage {
       createdAt: Date;
     }[];
   }>;
+
+  // Phase 3B.4: entity resolution shadow mode — see the implementation for
+  // the "why" on each.
+  getAllSubscriptionEventsForResolution(): Promise<SubscriptionEvent[]>;
+  saveEntityResolutionCandidates(candidates: InsertEntityResolutionCandidate[]): Promise<number>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -458,6 +463,28 @@ export class DatabaseStorage implements IStorage {
       averageConfidence: avgRow?.avg ?? 0,
       recentEvents,
     };
+  }
+
+  // Phase 3B.4: entity resolution SHADOW MODE only — read-only source data
+  // for server/entityResolver.ts, and a snapshot-style write of its
+  // proposed groupings. Nothing here is read by any other part of the app.
+  async getAllSubscriptionEventsForResolution(): Promise<SubscriptionEvent[]> {
+    return db.select().from(subscriptionEvents);
+  }
+
+  async saveEntityResolutionCandidates(candidates: InsertEntityResolutionCandidate[]): Promise<number> {
+    // Snapshot semantics, not an accumulating log: resolveEntity() mints a
+    // fresh proposedSubscriptionId on every call (documented as shadow-only,
+    // not stable across runs), so re-running without clearing first would
+    // just pile up redundant rows describing the same proposed groupings.
+    // Replace-on-write keeps this table representing "what we'd propose
+    // right now," which is what an observation table should show.
+    return db.transaction(async (tx) => {
+      await tx.delete(entityResolutionCandidates);
+      if (candidates.length === 0) return 0;
+      const inserted = await tx.insert(entityResolutionCandidates).values(candidates).returning({ id: entityResolutionCandidates.id });
+      return inserted.length;
+    });
   }
 
   async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {

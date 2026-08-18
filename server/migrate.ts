@@ -192,5 +192,45 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscription_events merchant columns:", err.message);
   }
 
+  // Phase 3B.4: entity resolution SHADOW MODE table. No subscriptions
+  // table, nothing reads this to change user-facing behavior — observation
+  // only, per server/entityResolver.ts's header comment.
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'entity_resolution_status') THEN
+          CREATE TYPE entity_resolution_status AS ENUM ('resolved', 'ambiguous', 'conflict', 'unresolved');
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] entity_resolution_status enum OK");
+  } catch (err: any) {
+    console.error("[migrate] entity_resolution_status enum:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS entity_resolution_candidates (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id varchar NOT NULL REFERENCES users(id),
+        proposed_subscription_id varchar NOT NULL,
+        canonical_merchant_name text NOT NULL,
+        canonical_merchant_domain text,
+        payment_processor text,
+        event_ids varchar[] NOT NULL,
+        resolution_confidence integer NOT NULL,
+        resolution_method text NOT NULL,
+        resolution_status entity_resolution_status NOT NULL,
+        potential_false_merge boolean NOT NULL DEFAULT false,
+        potential_false_split boolean NOT NULL DEFAULT false,
+        created_at timestamp DEFAULT now() NOT NULL,
+        updated_at timestamp DEFAULT now() NOT NULL
+      );
+    `);
+    console.log("[migrate] entity_resolution_candidates table OK");
+  } catch (err: any) {
+    console.error("[migrate] entity_resolution_candidates:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

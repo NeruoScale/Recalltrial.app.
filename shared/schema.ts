@@ -209,6 +209,34 @@ export const subscriptionEvents = pgTable("subscription_events", {
 export type SubscriptionEvent = typeof subscriptionEvents.$inferSelect;
 export type InsertSubscriptionEvent = typeof subscriptionEvents.$inferInsert;
 
+// Phase 3B.4: SHADOW MODE ONLY. server/entityResolver.ts's proposed
+// groupings, written here for observation only — nothing in the app reads
+// this table to change user-facing behavior, no subscriptions table
+// exists, and this does not influence reminders in any way.
+export const entityResolutionStatusEnum = pgEnum("entity_resolution_status", [
+  "resolved", "ambiguous", "conflict", "unresolved",
+]);
+
+export const entityResolutionCandidates = pgTable("entity_resolution_candidates", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  proposedSubscriptionId: varchar("proposed_subscription_id").notNull(),
+  canonicalMerchantName: text("canonical_merchant_name").notNull(),
+  canonicalMerchantDomain: text("canonical_merchant_domain"),
+  paymentProcessor: text("payment_processor"),
+  eventIds: varchar("event_ids").array().notNull(),
+  resolutionConfidence: integer("resolution_confidence").notNull(),
+  resolutionMethod: text("resolution_method").notNull(),
+  resolutionStatus: entityResolutionStatusEnum("resolution_status").notNull(),
+  potentialFalseMerge: boolean("potential_false_merge").notNull().default(false),
+  potentialFalseSplit: boolean("potential_false_split").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type EntityResolutionCandidate = typeof entityResolutionCandidates.$inferSelect;
+export type InsertEntityResolutionCandidate = typeof entityResolutionCandidates.$inferInsert;
+
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 
 export const reviews = pgTable("reviews", {
