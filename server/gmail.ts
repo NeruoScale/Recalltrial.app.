@@ -473,6 +473,13 @@ const PAYMENT_FAILED_PHRASES = [
   "card was declined", "your card was declined", "unable to process your payment",
   "payment unsuccessful", "payment did not go through", "we couldn't charge your card",
   "we could not charge your card", "your payment method was declined", "update your payment method",
+  // Phase 3B.3.1: added after "your most recent payment was unsuccessful"
+  // (real Anthropic email) matched none of the phrases above — "payment
+  // unsuccessful" (no "was") is a different substring than "payment was
+  // unsuccessful". "payment could not be processed"/"payment did not go
+  // through"/"unable to process your payment" were already covered
+  // verbatim above, so not re-added.
+  "payment was unsuccessful", "charge failed",
 ];
 
 const PRICE_CHANGE_PHRASES = [
@@ -490,8 +497,41 @@ const BILLING_DUE_PHRASES = [
   "payment due", "upcoming payment", "next payment",
 ];
 
+// Phase 3B.3.1: confirmed, evidence-based exclusions from the precision
+// analysis — not a general-purpose blocklist mechanism, just these specific
+// cases. recalltrial.app: the app's own reminder emails, sent to the same
+// inbox being scanned, were being re-detected as third-party subscription
+// evidence (real example: "[RecallTrial] YouTube Premium renews in 3
+// days" -> classified as a genuine subscription_renewed). facebook.com /
+// business-updates.facebook.com: Meta's ad-spend billing template, whose
+// own snippet opens with "This is not an invoice" — 189/214 events in one
+// scan were this exact template, matched purely because "receipt" appears
+// in the subject. Checked against both the raw sender domain and its
+// eTLD+1 root, so any subdomain of facebook.com is caught, not just this
+// one exact hostname. Scoped to the sub-detector only (see call site) —
+// does not touch the shared ingestion gate the trial pipeline also reads.
+const KNOWN_NOISE_DOMAINS = new Set([
+  "recalltrial.app",
+  "facebook.com",
+  "business-updates.facebook.com",
+]);
+
+export function isKnownNoiseDomain(domain: string): boolean {
+  return KNOWN_NOISE_DOMAINS.has(domain) || KNOWN_NOISE_DOMAINS.has(getRootDomain(domain));
+}
+
 const ONE_TIME_PURCHASE_PHRASES = [
   "one-time", "one time purchase", "single purchase", "you purchased",
+];
+
+const TRIAL_STARTED_PHRASES = [
+  "trial started", "free trial started", "trial has started", "trial begins",
+  "your free trial", "trial period started",
+];
+
+const TRIAL_ENDING_PHRASES = [
+  "trial ends", "trial ending", "trial expires", "trial expiring",
+  "trial will end", "trial period ends",
 ];
 
 // Baseline relevance signal for this detector, extending the trial
@@ -539,8 +579,16 @@ function hasBillingInterval(text: string): boolean {
   return /\b(monthly|month|\/mo\b|annual(?:ly)?|yearly|\/yr\b|\/year\b|per month|per year)\b/i.test(text);
 }
 
+// Phase 3B.3.1: RECURRING_INDICATORS (gmailKeywords.ts, shared with the
+// trial pipeline's passesReceiptFilter — left untouched here on purpose)
+// only contains the literal "renews", so "to renew your Replit Core..."
+// (real Google Play renewal email) didn't match at all — "renew" is not a
+// substring of "renews". Added as a separate regex check, local to this
+// detector only, rather than editing the shared array.
+const RENEW_WORD_FAMILY = /\b(renew|renews|renewal|renewing)\b/i;
+
 function hasRecurringLanguage(text: string): boolean {
-  return RECURRING_INDICATORS.some((r) => text.includes(r));
+  return RECURRING_INDICATORS.some((r) => text.includes(r)) || RENEW_WORD_FAMILY.test(text);
 }
 
 /** "from $19.99 to $23.99" style phrasing — only meaningful for price_changed. */
@@ -554,6 +602,22 @@ export type SubscriptionEventType =
   | "subscription_invoice" | "one_time_purchase" | "subscription_renewed"
   | "trial_started" | "trial_ending" | "subscription_cancelled"
   | "payment_failed" | "price_changed" | "unknown_subscription_event";
+
+// ─── ARCHITECTURE RULE (Phase 3B.3.1, for Phase 3B.4 entity resolution) ────────
+// "one_time_purchase" means the classifier positively determined this
+// event is NOT recurring evidence (a genuine one-off charge, or the
+// ambiguousOneTimeVsRecurring default when no recurring signal was found
+// at all — see the classification chain below). When entity resolution is
+// built, it must NOT fold one_time_purchase events into a subscription's
+// evidence graph — a one-time charge is not proof of an ongoing
+// commitment, and treating it as such would fabricate subscriptions that
+// don't exist. Rows still get written to subscription_events (for
+// analytics/audit — e.g. "how much one-time spend did we see") but must be
+// filtered out before any future subscription-graph construction. Use this
+// guard rather than re-deriving the exclusion ad hoc at each call site.
+export function isSubscriptionEvidence(eventType: SubscriptionEventType): boolean {
+  return eventType !== "one_time_purchase";
+}
 
 export type SubscriptionEventCandidate = {
   eventType: SubscriptionEventType;
@@ -643,10 +707,17 @@ export function detectSubscriptionEvent(
   let newPrice: string | null = null;
   let ambiguousOneTimeVsRecurring = false;
 
-  if (["trial started", "free trial started", "trial has started", "trial begins", "your free trial", "trial period started"].some((k) => combined.includes(k))) {
-    eventType = "trial_started";
-  } else if (["trial ends", "trial ending", "trial expires", "trial expiring", "trial will end", "trial period ends"].some((k) => combined.includes(k))) {
+  // Phase 3B.3.1: trial_ending checked BEFORE trial_started. Real example
+  // that motivated this: "Your Sell The Trend trial ends soon" (subject)
+  // with a snippet that also recaps "Your free trial ... started on Jul
+  // 11" — under started-first ordering, "your free trial" wins even though
+  // the email is unambiguously a trial-ending warning (that's the subject
+  // line). An email actively ending is the more urgent/relevant signal
+  // when both phrases co-occur.
+  if (TRIAL_ENDING_PHRASES.some((k) => combined.includes(k))) {
     eventType = "trial_ending";
+  } else if (TRIAL_STARTED_PHRASES.some((k) => combined.includes(k))) {
+    eventType = "trial_started";
   } else if (CANCELLATION_CONFIRMED_PHRASES.some((k) => combined.includes(k))) {
     eventType = "subscription_cancelled";
   } else if (PAYMENT_FAILED_PHRASES.some((k) => combined.includes(k))) {
@@ -799,6 +870,7 @@ export async function scanGmailForTrials(
   // Phase 2 Step 5: parallel subscription-event detector counters, reported
   // once as a single structured log line after the loop finishes.
   let subDetectorProcessed = 0;
+  let subDetectorExcluded = 0;
   let subDetectorCandidates = 0;
   let subDetectorWritten = 0;
 
@@ -835,6 +907,14 @@ export async function scanGmailForTrials(
       // below, which is completely unmodified from this point on.
       if (userId) {
         subDetectorProcessed++;
+        // Phase 3B.3.1: confirmed noise domains, excluded before
+        // classification even runs — scoped to this sub-detector only, not
+        // the shared domain gate above (which the trial pipeline also
+        // reads and which this task's boundaries don't permit touching).
+        if (isKnownNoiseDomain(fromDomain)) {
+          subDetectorExcluded++;
+          console.log(`[SubDetector] excluded: ${fromDomain} (noise domain)`);
+        } else {
         try {
           const candidate = detectSubscriptionEvent(subject, snippet, from, dateStr);
           if (candidate) {
@@ -889,6 +969,7 @@ export async function scanGmailForTrials(
           }
         } catch (subErr) {
           console.error(`[SubDetector] failed for message ${msgId}:`, subErr);
+        }
         }
       }
 
@@ -969,7 +1050,7 @@ export async function scanGmailForTrials(
 
   if (userId) {
     console.log(
-      `[SubDetector] processed ${subDetectorProcessed} messages, ${subDetectorCandidates} candidates, ${subDetectorWritten} written`
+      `[SubDetector] processed ${subDetectorProcessed} messages, ${subDetectorExcluded} excluded, ${subDetectorCandidates} candidates, ${subDetectorWritten} written`
     );
   }
 

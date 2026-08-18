@@ -31,6 +31,8 @@ import {
   scoreConfidenceDetailed,
   detectSubscriptionEvent,
   scanGmailForTrials,
+  isKnownNoiseDomain,
+  isSubscriptionEvidence,
 } from "./gmail";
 
 // Given email input -> detector -> expected structured output.
@@ -595,5 +597,175 @@ describe("Step 6: subscription-detector failure isolation", () => {
     expect(withFailure).toHaveLength(1);
     expect(withSuccess[0].messageId).toBe(withFailure[0].messageId);
     expect(withSuccess[0].confidence).toBe(withFailure[0].confidence);
+  });
+});
+
+describe("Phase 3B.3.1: precision patch regression tests", () => {
+  describe("1. Noise-domain exclusion at the sub-detector gate", () => {
+    it("isKnownNoiseDomain: recognizes recalltrial.app", () => {
+      expect(isKnownNoiseDomain("recalltrial.app")).toBe(true);
+    });
+
+    it("isKnownNoiseDomain: recognizes facebook.com and its known ad-billing subdomain", () => {
+      expect(isKnownNoiseDomain("facebook.com")).toBe(true);
+      expect(isKnownNoiseDomain("business-updates.facebook.com")).toBe(true);
+    });
+
+    it("isKnownNoiseDomain: does not flag an unrelated domain", () => {
+      expect(isKnownNoiseDomain("spotify.com")).toBe(false);
+    });
+
+    function mockGmailClient(message: { from: string; subject: string; date: string; snippet: string }) {
+      const messagesGet = vi.fn().mockResolvedValue({
+        data: {
+          payload: {
+            headers: [
+              { name: "From", value: message.from },
+              { name: "Subject", value: message.subject },
+              { name: "Date", value: message.date },
+            ],
+          },
+          snippet: message.snippet,
+        },
+      });
+      const messagesList = vi.fn().mockResolvedValue({
+        data: { messages: [{ id: "msg-1" }], nextPageToken: undefined },
+      });
+      (google.gmail as any).mockReturnValue({
+        users: { messages: { list: messagesList, get: messagesGet } },
+      });
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it("end-to-end: a real Meta Ads receipt is excluded before classification, never written", async () => {
+      mockGmailClient({
+        from: "Meta for Business <noreply@business-updates.facebook.com>",
+        subject: "Your Meta ads receipt (Account ID: 2234941693708795)",
+        date: new Date().toUTCString(),
+        snippet: "This is not an invoice. Transaction for SK2. Payment summary Amount billed $2.74 USD.",
+      });
+      (storage.createSubscriptionEvent as any).mockResolvedValue(true);
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      expect(storage.createSubscriptionEvent).not.toHaveBeenCalled();
+    });
+
+    it("end-to-end: RecallTrial's own reminder email is excluded before classification, never written", async () => {
+      mockGmailClient({
+        from: "RecallTrial <notifications@recalltrial.app>",
+        subject: "[RecallTrial] YouTube Premium renews in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "Your YouTube Premium subscription renews on: Aug 19, 2026. Renewal amount: 22.00 USD.",
+      });
+      (storage.createSubscriptionEvent as any).mockResolvedValue(true);
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      expect(storage.createSubscriptionEvent).not.toHaveBeenCalled();
+    });
+
+    it("end-to-end: a genuine, non-noise merchant is NOT excluded and is still written", async () => {
+      mockGmailClient({
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      });
+      (storage.createSubscriptionEvent as any).mockResolvedValue(true);
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      expect(storage.createSubscriptionEvent).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("2. 'renew' word-family classification fix", () => {
+    it("'to renew your Replit Core' (no 'subscription'/'renews'/other existing indicator) now correctly resolves as recurring, not ambiguous one_time_purchase", () => {
+      // Deliberately isolated from "subscription" (already in
+      // RECURRING_INDICATORS) so this test actually exercises the new
+      // regex path rather than passing anyway via an existing keyword —
+      // this is the real Google Play snippet shape from the precision
+      // analysis, with "subscription" replaced to isolate the mechanism.
+      // "Receipt" in the subject (also from the real email) is required
+      // for the baseline relevance gate to pass at all — my first attempt
+      // at this test dropped it and got a bare `null` back, not a
+      // resolver bug, just an under-specified test input.
+      const r = detectSubscriptionEvent(
+        "Your Google Play Order Receipt",
+        "we had trouble using your primary payment method to renew your Replit Core, backup payment method charged",
+        "googleplay-noreply@google.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT"
+      );
+      expect(r?.eventType).toBe("subscription_invoice");
+    });
+
+    it("also matches 'renewing' — a word form NOT already covered by the existing RENEWAL_WARNING_PHRASES bucket", () => {
+      // NOT testing "renewal" here: that bare word is already in
+      // RENEWAL_WARNING_PHRASES (checked earlier in the classification
+      // chain than the branch hasRecurringLanguage() lives in), so it can
+      // never actually reach this code path — it would always resolve via
+      // that earlier bucket regardless of this fix, making it an
+      // impossible/moot case to test at this specific branch.
+      const r = detectSubscriptionEvent(
+        "Your receipt",
+        "we are renewing your plan for another term, $9.99 charged",
+        "billing@service.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT"
+      );
+      expect(r?.eventType).toBe("subscription_invoice");
+    });
+  });
+
+  describe("3. Payment-failure phrase expansion", () => {
+    it("'payment was unsuccessful' (the real Anthropic wording) now correctly resolves as payment_failed", () => {
+      const r = detectSubscriptionEvent(
+        "Your subscription access has been paused",
+        "Your subscription access has been paused. Your most recent payment was unsuccessful, and your access has been paused.",
+        "no-reply@mail.anthropic.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT"
+      );
+      expect(r?.eventType).toBe("payment_failed");
+    });
+
+    it("'charge failed' also resolves as payment_failed", () => {
+      const r = detectSubscriptionEvent("Payment issue", "your charge failed, please update your billing details", "billing@service.com", "Sat, 01 Aug 2026 00:00:00 GMT");
+      expect(r?.eventType).toBe("payment_failed");
+    });
+  });
+
+  describe("4. trial_ending checked before trial_started", () => {
+    it("'trial ends soon' + 'free trial started' recap (the real Sell The Trend email) now correctly resolves as trial_ending, not trial_started", () => {
+      const r = detectSubscriptionEvent(
+        "Your Sell The Trend trial ends soon",
+        "Your free trial with Sell The Trend started on Jul 11, 2026 and will end on July 25, 2026",
+        "trial-ending@sellthetrend.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT"
+      );
+      expect(r?.eventType).toBe("trial_ending");
+    });
+
+    it("a pure trial-started email with no ending language still correctly resolves as trial_started", () => {
+      const r = detectSubscriptionEvent("Welcome", "your free trial has started, enjoy!", "billing@service.com", "Sat, 01 Aug 2026 00:00:00 GMT");
+      expect(r?.eventType).toBe("trial_started");
+    });
+  });
+
+  describe("5. isSubscriptionEvidence architecture guard", () => {
+    it("returns false for one_time_purchase", () => {
+      expect(isSubscriptionEvidence("one_time_purchase")).toBe(false);
+    });
+
+    it("returns true for every other event type", () => {
+      for (const t of [
+        "subscription_invoice", "subscription_renewed", "trial_started", "trial_ending",
+        "subscription_cancelled", "payment_failed", "price_changed", "unknown_subscription_event",
+      ] as const) {
+        expect(isSubscriptionEvidence(t)).toBe(true);
+      }
+    });
   });
 });
