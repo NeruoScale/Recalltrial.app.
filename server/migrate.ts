@@ -127,5 +127,42 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscription_events:", err.message);
   }
 
+  // Phase 3B.1/3B.2: broaden the event-type taxonomy. Additive only — the
+  // original 12 enum values stay forever (205 real rows already use them,
+  // e.g. 153 invoice_received); these 4 new values are what
+  // detectSubscriptionEvent() actually produces going forward.
+  // DO $$ ... $$ blocks can't take bind parameters (PostgreSQL limitation,
+  // not a driver quirk — a DO block's body is opaque PL/pgSQL, not plain
+  // SQL, so ${value}-style parameterization silently fails at bind time).
+  // sql.raw() is safe here since `value` only ever comes from this
+  // hardcoded local array, never external input.
+  for (const value of ["subscription_invoice", "one_time_purchase", "subscription_cancelled", "payment_failed"]) {
+    try {
+      await db.execute(sql`
+        DO $$ BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumlabel = '${sql.raw(value)}'
+              AND enumtypid = 'subscription_event_type'::regtype
+          ) THEN
+            ALTER TYPE subscription_event_type ADD VALUE '${sql.raw(value)}';
+          END IF;
+        END $$;
+      `);
+      console.log(`[migrate] subscription_event_type.${value} OK`);
+    } catch (err: any) {
+      console.error(`[migrate] subscription_event_type.${value}:`, err.message);
+    }
+  }
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events ADD COLUMN IF NOT EXISTS extracted_merchant text;
+    `);
+    console.log("[migrate] subscription_events.extracted_merchant OK");
+  } catch (err: any) {
+    console.error("[migrate] extracted_merchant:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

@@ -440,30 +440,176 @@ export function scoreConfidenceDetailed(
 
 // ─── Subscription-event detection (Phase 2 Step 5, parallel to trial detection) ─
 //
-// Independent classification pass, reusing only the existing keyword/regex
-// primitives above — no new keyword vocabulary introduced here. Deliberately
-// does NOT classify price_changed, cancellation_requested/confirmed,
-// subscription_expired, or subscription_paused: those need either signals
-// that don't exist in gmailKeywords.ts yet (cancellation/expiry phrasing —
-// that's Phase 3's job, not this step's) or comparison against a prior
-// known price/status via entity resolution against a `subscriptions` table
-// that doesn't exist yet (Phase 4). Returning `unknown_subscription_event`
-// for genuinely subscription-relevant-but-unclassified signals is honest
-// about that boundary rather than guessing.
+// Independent classification pass. Phrase lists below are LOCAL to this
+// section, not added to gmailKeywords.ts's shared STRONG_POSITIVES/
+// REQUIRED_TRIGGERS/etc — those arrays are read by the trial-suggestion
+// pipeline (scanGmailForTrials' main loop, hasStrongPositive/
+// hasRequiredTrigger gates) and must not change behavior there. Likewise
+// scoreConfidenceDetailed() above is untouched and still used only by the
+// trial pipeline; scoreSubscriptionEventConfidence() below is a separate,
+// independent function for this detector only.
+//
+// Phase 3B.1 evaluation (PHASE1_AUDIT.md-linked; see commit) found, against
+// 205 real production rows: (a) "invoice"/"receipt" is too blunt a catch-all
+// — genuinely one-time purchases and genuinely recurring invoices were both
+// landing in the same invoice_received bucket; (b) payment-due/upcoming-
+// payment/cancel-before phrases had no bucket at all and fell to
+// unknown_subscription_event even though they're clear signals; (c) the
+// shared scoreConfidenceDetailed()'s receipt-without-recurring-indicator
+// penalty was firing on genuinely-recurring invoices whenever the specific
+// recurring keyword didn't happen to co-occur in that message's short
+// snippet, capping confidence at ~50-60 even with a valid price+date.
+
+const CANCELLATION_CONFIRMED_PHRASES = [
+  "subscription cancelled", "subscription canceled", "subscription has been cancelled",
+  "subscription has been canceled", "successfully cancelled", "successfully canceled",
+  "cancellation confirmed", "your cancellation is confirmed", "you have cancelled your subscription",
+  "you have canceled your subscription", "your subscription was cancelled", "your subscription was canceled",
+  "your subscription has ended", "your plan has been cancelled", "your plan has been canceled",
+];
+
+const PAYMENT_FAILED_PHRASES = [
+  "payment failed", "payment declined", "payment could not be processed",
+  "card was declined", "your card was declined", "unable to process your payment",
+  "payment unsuccessful", "payment did not go through", "we couldn't charge your card",
+  "we could not charge your card", "your payment method was declined", "update your payment method",
+];
+
+const PRICE_CHANGE_PHRASES = [
+  "price increase", "price change", "new price", "price adjustment",
+  "prices are changing", "your subscription price has changed", "your rate is changing",
+  "we're updating our prices", "we are updating our prices", "price update",
+];
+
+const RENEWAL_WARNING_PHRASES = [
+  "renews on", "renewal", "auto-renewal", "auto renew", "auto-renew", "next billing",
+  "cancel before", "cancel by",
+];
+
+const BILLING_DUE_PHRASES = [
+  "payment due", "upcoming payment", "next payment",
+];
+
+const ONE_TIME_PURCHASE_PHRASES = [
+  "one-time", "one time purchase", "single purchase", "you purchased",
+];
+
+// Baseline relevance signal for this detector, extending the trial
+// pipeline's hasStrongPositive/hasRequiredTrigger gate with the new local
+// categories above (cancellation/payment-failed/price-changed/one-time-
+// purchase) — those phrases don't exist in the shared gmailKeywords.ts
+// arrays the trial pipeline's own gate reads, on purpose (touching those
+// arrays would change trial-detection behavior). Without this, a message
+// containing e.g. only "your subscription has been cancelled" and nothing
+// from STRONG_POSITIVES/REQUIRED_TRIGGERS would be rejected before ever
+// reaching classification, even though it's clearly subscription-relevant.
+function hasSubscriptionEventSignal(text: string): boolean {
+  return (
+    hasStrongPositive(text) ||
+    hasRequiredTrigger(text) ||
+    CANCELLATION_CONFIRMED_PHRASES.some((k) => text.includes(k)) ||
+    PAYMENT_FAILED_PHRASES.some((k) => text.includes(k)) ||
+    PRICE_CHANGE_PHRASES.some((k) => text.includes(k)) ||
+    ONE_TIME_PURCHASE_PHRASES.some((k) => text.includes(k))
+  );
+}
+
+// Mirrors resolveServiceName()'s payment-processor regex patterns above,
+// for a yes/no "did we actually find a merchant name" signal used only in
+// confidence scoring — kept separate rather than changing
+// resolveServiceName()'s return shape, since that function is also called
+// by the trial-suggestion pipeline and its contract must not change here.
+const PROCESSOR_MERCHANT_PATTERNS = [
+  /you subscribed to ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?)(?:\.|,|!|\s+for|\s+at|\s+\$)/i,
+  /your ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?) subscription/i,
+  /payment to ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?)(?:\.|,|!|\s)/i,
+  /charged by ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?)(?:\.|,|!|\s)/i,
+  /from ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?)(?:\.|,|!|\s)/i,
+];
+
+function hasClearProcessorMerchant(snippet: string): boolean {
+  return PROCESSOR_MERCHANT_PATTERNS.some((p) => p.test(snippet));
+}
+
+function hasBillingInterval(text: string): boolean {
+  return /\b(monthly|month|\/mo\b|annual(?:ly)?|yearly|\/yr\b|\/year\b|per month|per year)\b/i.test(text);
+}
+
+function hasRecurringLanguage(text: string): boolean {
+  return RECURRING_INDICATORS.some((r) => text.includes(r));
+}
+
+/** "from $19.99 to $23.99" style phrasing — only meaningful for price_changed. */
+function extractPriceChangeAmounts(text: string): { previousPrice: string | null; newPrice: string | null } {
+  const match = text.match(/from\s*[\$\£\€]?\s*(\d+(?:\.\d{2})?)[^\d]{1,15}to\s*[\$\£\€]?\s*(\d+(?:\.\d{2})?)/i);
+  if (match) return { previousPrice: match[1], newPrice: match[2] };
+  return { previousPrice: null, newPrice: null };
+}
 
 export type SubscriptionEventType =
-  | "trial_started" | "trial_ending" | "subscription_started" | "subscription_renewed"
-  | "payment_received" | "invoice_received" | "price_changed" | "cancellation_requested"
-  | "cancellation_confirmed" | "subscription_expired" | "subscription_paused"
-  | "unknown_subscription_event";
+  | "subscription_invoice" | "one_time_purchase" | "subscription_renewed"
+  | "trial_started" | "trial_ending" | "subscription_cancelled"
+  | "payment_failed" | "price_changed" | "unknown_subscription_event";
 
 export type SubscriptionEventCandidate = {
   eventType: SubscriptionEventType;
   extractedPrice: string | null;
   extractedCurrency: string | null;
   extractedDate: string | null;
+  extractedMerchant: string | null;
+  previousPrice: string | null;
+  newPrice: string | null;
   confidence: number;
 };
+
+/**
+ * Independent confidence model for subscription events (Phase 3B.3 note:
+ * this is per-event scoring, not the per-dimension confidence breakdown
+ * PHASE1_AUDIT.md §13 describes for a future phase — that's a larger design
+ * left for later; this directly implements Step 3's five boost/penalty
+ * rules against real evidence).
+ */
+function scoreSubscriptionEventConfidence(params: {
+  text: string;
+  from: string;
+  fromDomain: string;
+  hasPrice: boolean;
+  endDateSource: EndDateSource;
+  isProcessorDomain: boolean;
+  merchantClear: boolean;
+  hasInterval: boolean;
+  hasRecurring: boolean;
+  ambiguousOneTimeVsRecurring: boolean;
+}): number {
+  let score = 20;
+
+  // Explicit recurring language -> high boost
+  if (params.hasRecurring) score += 30;
+
+  // Known billing sender domain -> boost
+  if (isBillingSender(params.from)) score += 10;
+
+  // Price + billing interval both present -> boost (partial credit for price alone)
+  if (params.hasPrice && params.hasInterval) score += 20;
+  else if (params.hasPrice) score += 8;
+
+  // Date quality, same spirit as the trial-pipeline scorer but smaller
+  // weight — recurring language is the dominant signal here, not date.
+  if (params.endDateSource === "explicit") score += 10;
+  else if (params.endDateSource === "relative") score += 6;
+  else if (params.endDateSource === "duration") score += 4;
+
+  // Payment processor detected but merchant unclear -> penalty
+  if (params.isProcessorDomain && !params.merchantClear) score -= 15;
+
+  // No price detected -> penalty
+  if (!params.hasPrice) score -= 12;
+
+  // Ambiguous one-time vs recurring -> penalty
+  if (params.ambiguousOneTimeVsRecurring) score -= 15;
+
+  return Math.min(Math.max(score, 0), 95);
+}
 
 export function detectSubscriptionEvent(
   subject: string,
@@ -474,37 +620,87 @@ export function detectSubscriptionEvent(
   const combined = (subject + " " + snippet).toLowerCase();
   const receivedAt = dateHeader ? new Date(dateHeader) : new Date();
 
-  // Same baseline relevance gate as the trial pipeline: must have SOME
-  // subscription-lifecycle signal at all, or there's nothing to log.
-  if (!hasStrongPositive(combined) && !hasRequiredTrigger(combined)) return null;
+  // Must have SOME subscription-lifecycle signal at all, or there's
+  // nothing to log — extends the trial pipeline's baseline gate with this
+  // detector's own local phrase categories (see hasSubscriptionEventSignal).
+  if (!hasSubscriptionEventSignal(combined)) return null;
 
   const { date: extractedDate, source: endDateSource } = extractDate(combined, receivedAt);
   const { amount, currency } = extractAmount(combined);
+  const fromDomain = extractDomainFromEmail(from);
+  const isProcessorDomain = isPaymentProcessor(fromDomain);
+  const merchantClear = !isProcessorDomain || hasClearProcessorMerchant(snippet);
+  const extractedMerchant = resolveServiceName(fromDomain, snippet);
+  const hasInterval = hasBillingInterval(combined);
+  const hasRecurring = hasRecurringLanguage(combined);
 
   let eventType: SubscriptionEventType;
+  let previousPrice: string | null = null;
+  let newPrice: string | null = null;
+  let ambiguousOneTimeVsRecurring = false;
+
   if (["trial started", "free trial started", "trial has started", "trial begins", "your free trial", "trial period started"].some((k) => combined.includes(k))) {
     eventType = "trial_started";
   } else if (["trial ends", "trial ending", "trial expires", "trial expiring", "trial will end", "trial period ends"].some((k) => combined.includes(k))) {
     eventType = "trial_ending";
-  } else if (["subscription confirmed", "subscription is active", "subscription activated", "subscription has been activated", "subscription is now active", "your plan is now active"].some((k) => combined.includes(k))) {
-    eventType = "subscription_started";
-  } else if (["renews on", "renewal", "auto-renewal", "auto renew", "auto-renew", "next billing"].some((k) => combined.includes(k))) {
+  } else if (CANCELLATION_CONFIRMED_PHRASES.some((k) => combined.includes(k))) {
+    eventType = "subscription_cancelled";
+  } else if (PAYMENT_FAILED_PHRASES.some((k) => combined.includes(k))) {
+    eventType = "payment_failed";
+  } else if (PRICE_CHANGE_PHRASES.some((k) => combined.includes(k))) {
+    eventType = "price_changed";
+    const extracted = extractPriceChangeAmounts(combined);
+    previousPrice = extracted.previousPrice;
+    newPrice = extracted.newPrice;
+  } else if (RENEWAL_WARNING_PHRASES.some((k) => combined.includes(k))) {
     eventType = "subscription_renewed";
-  } else if (["payment received", "charge successful", "card charged", "you will be charged", "will be charged on"].some((k) => combined.includes(k))) {
-    eventType = "payment_received";
-  } else if (combined.includes("invoice")) {
-    eventType = "invoice_received";
+  } else if (BILLING_DUE_PHRASES.some((k) => combined.includes(k))) {
+    // "payment due" / "upcoming payment" / "next payment" — inherently
+    // about an existing recurring arrangement, not a one-off purchase.
+    eventType = "subscription_invoice";
+  } else if (
+    combined.includes("invoice") || combined.includes("receipt") || combined.includes("payment received") ||
+    combined.includes("charge successful") || combined.includes("card charged") ||
+    ONE_TIME_PURCHASE_PHRASES.some((k) => combined.includes(k))
+  ) {
+    // The core one-time-vs-recurring split: an explicit recurring keyword
+    // co-occurring in THIS message settles it either way. If neither a
+    // recurring nor a clearly-one-time signal is present, we genuinely
+    // can't tell — flag it as ambiguous (confidence penalty) rather than
+    // silently guessing one direction.
+    if (hasRecurring) {
+      eventType = "subscription_invoice";
+    } else if (ONE_TIME_PURCHASE_PHRASES.some((k) => combined.includes(k))) {
+      eventType = "one_time_purchase";
+    } else {
+      eventType = "one_time_purchase";
+      ambiguousOneTimeVsRecurring = true;
+    }
   } else {
     eventType = "unknown_subscription_event";
   }
 
-  const { score: confidence } = scoreConfidenceDetailed(subject, snippet, from, !!extractedDate, !!amount, endDateSource);
+  const confidence = scoreSubscriptionEventConfidence({
+    text: combined,
+    from,
+    fromDomain,
+    hasPrice: !!amount,
+    endDateSource,
+    isProcessorDomain,
+    merchantClear,
+    hasInterval,
+    hasRecurring,
+    ambiguousOneTimeVsRecurring,
+  });
 
   return {
     eventType,
     extractedPrice: amount,
     extractedCurrency: currency,
     extractedDate,
+    extractedMerchant,
+    previousPrice,
+    newPrice,
     confidence,
   };
 }
@@ -653,6 +849,9 @@ export async function scanGmailForTrials(
               extractedPrice: candidate.extractedPrice,
               extractedCurrency: candidate.extractedCurrency,
               extractedDate: candidate.extractedDate,
+              extractedMerchant: candidate.extractedMerchant,
+              previousPrice: candidate.previousPrice,
+              newPrice: candidate.newPrice,
               confidence: candidate.confidence,
               detectionSource: "deterministic",
             });

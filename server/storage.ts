@@ -30,6 +30,7 @@ export interface IStorage {
       extractedPrice: string | null;
       extractedCurrency: string | null;
       extractedDate: string | null;
+      extractedMerchant: string | null;
       confidence: number;
       detectionSource: string;
       createdAt: Date;
@@ -391,6 +392,7 @@ export class DatabaseStorage implements IStorage {
       extractedPrice: string | null;
       extractedCurrency: string | null;
       extractedDate: string | null;
+      extractedMerchant: string | null;
       confidence: number;
       detectionSource: string;
       createdAt: Date;
@@ -423,6 +425,7 @@ export class DatabaseStorage implements IStorage {
         extractedPrice: subscriptionEvents.extractedPrice,
         extractedCurrency: subscriptionEvents.extractedCurrency,
         extractedDate: subscriptionEvents.extractedDate,
+        extractedMerchant: subscriptionEvents.extractedMerchant,
         confidence: subscriptionEvents.confidence,
         detectionSource: subscriptionEvents.detectionSource,
         createdAt: subscriptionEvents.createdAt,

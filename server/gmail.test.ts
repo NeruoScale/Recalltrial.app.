@@ -306,98 +306,184 @@ describe("entity resolution: merchant vs. payment processor", () => {
   });
 });
 
-describe("detectSubscriptionEvent (Phase 2 Step 5 parallel detector)", () => {
-  it("classifies a trial-started email", () => {
-    const r = detectSubscriptionEvent(
-      "Welcome to your free trial",
-      "your free trial has started, enjoy!",
-      "billing@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r?.eventType).toBe("trial_started");
+describe("detectSubscriptionEvent (Phase 3B.2 taxonomy)", () => {
+  const DATE = "Sat, 01 Aug 2026 00:00:00 GMT";
+
+  describe("trial_started", () => {
+    it("positive: clear trial-start confirmation", () => {
+      const r = detectSubscriptionEvent("Welcome to your free trial", "your free trial has started, enjoy!", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("trial_started");
+    });
+
+    it("edge case: trial-ending language must NOT be misread as trial_started", () => {
+      const r = detectSubscriptionEvent("Your trial is ending", "your trial ends in 3 days", "billing@service.com", DATE);
+      expect(r?.eventType).not.toBe("trial_started");
+      expect(r?.eventType).toBe("trial_ending");
+    });
   });
 
-  it("classifies a trial-ending email", () => {
-    const r = detectSubscriptionEvent(
-      "Your trial is ending",
-      "your trial ends in 3 days",
-      "billing@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r?.eventType).toBe("trial_ending");
+  describe("trial_ending", () => {
+    it("positive: clear trial-ending warning", () => {
+      const r = detectSubscriptionEvent("Your trial is ending", "your trial ends in 3 days", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("trial_ending");
+    });
+
+    it("edge case: trial_ending is checked before subscription_renewed, so co-occurring renewal language doesn't hijack it", () => {
+      const r = detectSubscriptionEvent(
+        "Your trial is ending",
+        "your trial ends in 3 days and then automatically renews",
+        "billing@service.com",
+        DATE
+      );
+      expect(r?.eventType).toBe("trial_ending");
+    });
   });
 
-  it("classifies a subscription-activated email", () => {
-    const r = detectSubscriptionEvent(
-      "You're all set",
-      "your subscription is now active",
-      "noreply@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r?.eventType).toBe("subscription_started");
+  describe("subscription_cancelled", () => {
+    it("positive: explicit cancellation confirmation", () => {
+      const r = detectSubscriptionEvent("Your subscription is cancelled", "your subscription has been cancelled as requested", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("subscription_cancelled");
+    });
+
+    it("edge case: a 'cancel before X' renewal WARNING is not a cancellation confirmation", () => {
+      // This is exactly the Step 1 finding: "cancel before" is a prompt to
+      // avoid an upcoming charge, not evidence the subscription was
+      // actually cancelled. Must land in subscription_renewed instead.
+      const r = detectSubscriptionEvent("Renewal reminder", "cancel before Aug 20 to avoid being charged", "billing@service.com", DATE);
+      expect(r?.eventType).not.toBe("subscription_cancelled");
+      expect(r?.eventType).toBe("subscription_renewed");
+    });
   });
 
-  it("classifies a renewal email", () => {
-    const r = detectSubscriptionEvent(
-      "Renewal notice",
-      "your subscription renews on Aug 20, 2026",
-      "billing@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r?.eventType).toBe("subscription_renewed");
+  describe("payment_failed", () => {
+    it("positive: explicit payment failure notice", () => {
+      const r = detectSubscriptionEvent("Payment failed", "your payment failed, please update your payment method", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("payment_failed");
+    });
+
+    it("edge case: a routine 'payment due' reminder is not a failure notice", () => {
+      const r = detectSubscriptionEvent("Payment due", "your payment is due soon", "billing@service.com", DATE);
+      expect(r?.eventType).not.toBe("payment_failed");
+      expect(r?.eventType).toBe("subscription_invoice");
+    });
   });
 
-  it("classifies a payment-received email", () => {
-    const r = detectSubscriptionEvent(
-      "Payment confirmation",
-      "payment received, card charged successfully",
-      "billing@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r?.eventType).toBe("payment_received");
+  describe("price_changed", () => {
+    it("positive: explicit price-change notice with old/new amounts extracted", () => {
+      const r = detectSubscriptionEvent(
+        "Your subscription price is changing",
+        "your subscription price increase takes effect next month, from $9.99 to $12.99",
+        "billing@service.com",
+        DATE
+      );
+      expect(r?.eventType).toBe("price_changed");
+      expect(r?.previousPrice).toBe("9.99");
+      expect(r?.newPrice).toBe("12.99");
+    });
+
+    it("edge case: merely stating the current price is not a price-change notice", () => {
+      const r = detectSubscriptionEvent("Your receipt", "your monthly subscription price is $9.99, charged today", "billing@service.com", DATE);
+      expect(r?.eventType).not.toBe("price_changed");
+    });
   });
 
-  it("classifies a bare invoice email as invoice_received when nothing more specific matches", () => {
-    const r = detectSubscriptionEvent(
-      "Your invoice is ready",
-      "your invoice for this billing period is now available to view",
-      "billing@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r?.eventType).toBe("invoice_received");
+  describe("subscription_renewed", () => {
+    it("positive: explicit renewal date", () => {
+      const r = detectSubscriptionEvent("Renewal notice", "your subscription renews on Aug 20, 2026", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("subscription_renewed");
+    });
+
+    it("edge case: 'cancel before' phrased as a cancellation prompt still correctly routes here, not to subscription_cancelled", () => {
+      const r = detectSubscriptionEvent("Renewal reminder", "cancel before Aug 19 to avoid renewal", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("subscription_renewed");
+    });
   });
 
-  it("returns null for a newsletter (no subscription-lifecycle signal at all)", () => {
-    const r = detectSubscriptionEvent(
-      "What's new this week",
-      "check out our weekly update and new features",
-      "news@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r).toBeNull();
+  describe("subscription_invoice", () => {
+    it("positive: invoice language with an explicit recurring indicator", () => {
+      const r = detectSubscriptionEvent("Your invoice", "your monthly subscription invoice is ready, $9.99 charged", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("subscription_invoice");
+    });
+
+    it("edge case: 'payment due' with no invoice/receipt wording still resolves to subscription_invoice via the billing-due fold-in", () => {
+      const r = detectSubscriptionEvent("Payment due", "payment due for your account", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("subscription_invoice");
+    });
   });
 
-  it("returns null for a shipping notification", () => {
-    const r = detectSubscriptionEvent(
-      "Your order has shipped",
-      "tracking number: 1Z999AA10123456784",
-      "orders@shop.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    expect(r).toBeNull();
+  describe("one_time_purchase", () => {
+    it("positive: explicit one-time-purchase phrasing", () => {
+      const r = detectSubscriptionEvent("Thanks for your purchase", "you purchased 'Design Bundle' for $49, thank you for your one-time purchase", "billing@service.com", DATE);
+      expect(r?.eventType).toBe("one_time_purchase");
+    });
+
+    it("edge case: genuinely ambiguous invoice wording (Step 1's real production pattern) — defaults to one_time_purchase but with a measurably lower confidence penalty, not a confident guess", () => {
+      // This is the exact snippet shape Step 1's evaluation found dominating
+      // production: "invoice" present, no recurring keyword co-occurring,
+      // no explicit one-time phrase either — genuinely can't tell.
+      const clear = detectSubscriptionEvent("Your invoice", "your monthly subscription invoice is ready, $9.99 charged", "billing@service.com", DATE);
+      const ambiguous = detectSubscriptionEvent("Your invoice is ready", "your invoice for this billing period is now available to view", "billing@service.com", DATE);
+      expect(ambiguous?.eventType).toBe("one_time_purchase");
+      expect(ambiguous!.confidence).toBeLessThan(clear!.confidence);
+    });
   });
 
-  it("does not classify price_changed, cancellation_*, expired, or paused — not detectable without a subscriptions table (Phase 4/8, out of scope for this step)", () => {
-    const r = detectSubscriptionEvent(
-      "Your subscription",
-      "your subscription price has increased",
-      "billing@service.com",
-      "Sat, 01 Aug 2026 00:00:00 GMT"
-    );
-    // "subscription" alone isn't a strong positive/required trigger, so this
-    // returns null rather than a misleading guess — documents the boundary,
-    // doesn't invent a signal that doesn't exist in gmailKeywords.ts yet.
-    expect(r).toBeNull();
+  describe("unknown_subscription_event: genuine fallback only", () => {
+    it("positive: a real signal with no matching bucket", () => {
+      const r = detectSubscriptionEvent("You're all set", "your subscription is now active", "noreply@service.com", DATE);
+      expect(r?.eventType).toBe("unknown_subscription_event");
+    });
+
+    it("edge case: a different unbucketed-but-real signal, confirming this isn't one lucky case", () => {
+      const r = detectSubscriptionEvent("Billing starting soon", "your billing starts on Sept 1", "noreply@service.com", DATE);
+      expect(r?.eventType).toBe("unknown_subscription_event");
+    });
+  });
+
+  describe("baseline relevance gate (unchanged from Phase 2)", () => {
+    it("returns null for a newsletter (no subscription-lifecycle signal at all)", () => {
+      const r = detectSubscriptionEvent("What's new this week", "check out our weekly update and new features", "news@service.com", DATE);
+      expect(r).toBeNull();
+    });
+
+    it("returns null for a shipping notification", () => {
+      const r = detectSubscriptionEvent("Your order has shipped", "tracking number: 1Z999AA10123456784", "orders@shop.com", DATE);
+      expect(r).toBeNull();
+    });
+  });
+});
+
+describe("scoreSubscriptionEventConfidence rules (Step 3, via detectSubscriptionEvent's output)", () => {
+  const DATE = "Sat, 01 Aug 2026 00:00:00 GMT";
+
+  it("explicit recurring language boosts confidence", () => {
+    const withRecurring = detectSubscriptionEvent("Invoice", "your monthly subscription invoice, $9.99", "noreply@shop.com", DATE);
+    const withoutRecurring = detectSubscriptionEvent("Invoice", "your invoice, $9.99 charged", "noreply@shop.com", DATE);
+    expect(withRecurring!.confidence).toBeGreaterThan(withoutRecurring!.confidence);
+  });
+
+  it("a known billing sender domain boosts confidence", () => {
+    const billingSender = detectSubscriptionEvent("Invoice", "your monthly subscription invoice, $9.99", "billing@shop.com", DATE);
+    const genericSender = detectSubscriptionEvent("Invoice", "your monthly subscription invoice, $9.99", "hello@shop.com", DATE);
+    expect(billingSender!.confidence).toBeGreaterThan(genericSender!.confidence);
+  });
+
+  it("price + billing interval both present boosts confidence more than price alone", () => {
+    const withInterval = detectSubscriptionEvent("Invoice", "your monthly subscription invoice, $9.99/month", "noreply@shop.com", DATE);
+    const priceOnly = detectSubscriptionEvent("Invoice", "your subscription invoice, $9.99, recurring", "noreply@shop.com", DATE);
+    expect(withInterval!.confidence).toBeGreaterThan(priceOnly!.confidence);
+  });
+
+  it("a payment-processor sender with no resolvable merchant name is penalized vs. one with a clear merchant", () => {
+    const clearMerchant = detectSubscriptionEvent("Receipt", "you subscribed to Canva Pro for $12.99, monthly", "receipts@stripe.com", DATE);
+    const unclearMerchant = detectSubscriptionEvent("Receipt", "thanks for your payment of $12.99, monthly", "receipts@stripe.com", DATE);
+    expect(clearMerchant!.confidence).toBeGreaterThan(unclearMerchant!.confidence);
+  });
+
+  it("no price detected is penalized vs. the same email with a price", () => {
+    const withPrice = detectSubscriptionEvent("Invoice", "your monthly subscription invoice, $9.99", "billing@shop.com", DATE);
+    const withoutPrice = detectSubscriptionEvent("Invoice", "your monthly subscription invoice is ready to view", "billing@shop.com", DATE);
+    expect(withPrice!.confidence).toBeGreaterThan(withoutPrice!.confidence);
   });
 });
 

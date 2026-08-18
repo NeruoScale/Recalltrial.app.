@@ -152,12 +152,23 @@ export type ProcessedPurchaseEvent = typeof processedPurchaseEvents.$inferSelect
 
 // Phase 2 (Subscription Intelligence, PHASE1_AUDIT.md §3-4): evidence log only.
 // No `subscriptions` table yet — subscriptionId stays nullable/unreferenced
-// until that table exists. Nothing in the app writes to this table yet.
+// until that table exists.
+//
+// Phase 3B.1/3B.2 added subscription_invoice/one_time_purchase/
+// subscription_cancelled/payment_failed to the taxonomy detectSubscriptionEvent()
+// actually produces (see server/gmail.ts). The original Phase 2 values —
+// subscription_started, payment_received, invoice_received,
+// cancellation_requested, cancellation_confirmed, subscription_expired,
+// subscription_paused — are kept in the enum permanently even though the
+// classifier no longer produces them: 205 real production rows (153
+// invoice_received, plus others) already use these values, and Postgres
+// enum values can't be safely removed once real data depends on them.
 export const subscriptionEventTypeEnum = pgEnum("subscription_event_type", [
   "trial_started", "trial_ending", "subscription_started", "subscription_renewed",
   "payment_received", "invoice_received", "price_changed", "cancellation_requested",
   "cancellation_confirmed", "subscription_expired", "subscription_paused",
   "unknown_subscription_event",
+  "subscription_invoice", "one_time_purchase", "subscription_cancelled", "payment_failed",
 ]);
 
 export const subscriptionEvents = pgTable("subscription_events", {
@@ -169,6 +180,7 @@ export const subscriptionEvents = pgTable("subscription_events", {
   extractedPrice: decimal("extracted_price", { precision: 10, scale: 2 }),
   extractedCurrency: text("extracted_currency"),
   extractedDate: date("extracted_date"),
+  extractedMerchant: text("extracted_merchant"),
   previousPrice: decimal("previous_price", { precision: 10, scale: 2 }),
   newPrice: decimal("new_price", { precision: 10, scale: 2 }),
   confidence: integer("confidence").notNull().default(0),
