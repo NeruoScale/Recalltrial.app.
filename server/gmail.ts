@@ -527,7 +527,11 @@ const PROCESSOR_MERCHANT_PATTERNS = [
   /from ([A-Za-z0-9][A-Za-z0-9\s\-\.]{1,40}?)(?:\.|,|!|\s)/i,
 ];
 
-function hasClearProcessorMerchant(snippet: string): boolean {
+// Exported for reuse by server/merchantResolver.ts (Phase 3B.3) — same
+// "did resolveServiceName() find a genuine regex match vs. fall back to
+// title-casing the processor's own domain" signal, reused rather than
+// duplicated.
+export function hasClearProcessorMerchant(snippet: string): boolean {
   return PROCESSOR_MERCHANT_PATTERNS.some((p) => p.test(snippet));
 }
 
@@ -835,6 +839,27 @@ export async function scanGmailForTrials(
           const candidate = detectSubscriptionEvent(subject, snippet, from, dateStr);
           if (candidate) {
             subDetectorCandidates++;
+            // Phase 3B.3: canonical merchant/processor resolution, run
+            // after classification using the same raw inputs plus the
+            // classifier's own extractedMerchant guess. resolveMerchant()
+            // never influences eventType/confidence above — it only adds
+            // identity fields to what's already been decided. Dynamic
+            // import for the same reason as the `storage` import below:
+            // merchantResolver.ts itself imports from gmail.ts (reusing
+            // resolveServiceName/getRootDomain/etc per Phase 3B.3's "reuse,
+            // don't duplicate" instruction), so a static top-level import
+            // here would be circular — deferring to call-time avoids that
+            // rather than relying on function-hoisting semantics to make
+            // an otherwise-circular static import safe.
+            const { resolveMerchant } = await import("./merchantResolver");
+            const merchantResolution = resolveMerchant({
+              senderEmail: from,
+              senderDomain: fromDomain,
+              extractedMerchant: candidate.extractedMerchant,
+              subject,
+              snippet,
+              eventType: candidate.eventType,
+            });
             // Dynamic import: keeps gmail.ts free of a module-load-time
             // dependency on the storage/DB layer (which constructs a live
             // pg.Pool at import time), so the pure detection functions stay
@@ -854,6 +879,11 @@ export async function scanGmailForTrials(
               newPrice: candidate.newPrice,
               confidence: candidate.confidence,
               detectionSource: "deterministic",
+              canonicalMerchantName: merchantResolution.canonicalMerchantName,
+              canonicalMerchantDomain: merchantResolution.canonicalMerchantDomain,
+              paymentProcessor: merchantResolution.paymentProcessor,
+              merchantConfidence: merchantResolution.merchantConfidence,
+              merchantResolutionStatus: merchantResolution.merchantResolutionStatus,
             });
             if (written) subDetectorWritten++;
           }

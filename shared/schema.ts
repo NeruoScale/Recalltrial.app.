@@ -171,6 +171,14 @@ export const subscriptionEventTypeEnum = pgEnum("subscription_event_type", [
   "subscription_invoice", "one_time_purchase", "subscription_cancelled", "payment_failed",
 ]);
 
+// Phase 3B.3: server/merchantResolver.ts's output status. Nullable/no
+// default on the columns below (not just this enum) is deliberate: NULL
+// means merchant resolution never ran for that row (e.g. rows written
+// before this phase), distinct from an actual "unknown" resolution result.
+export const merchantResolutionStatusEnum = pgEnum("merchant_resolution_status", [
+  "resolved", "ambiguous", "unknown",
+]);
+
 export const subscriptionEvents = pgTable("subscription_events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   subscriptionId: varchar("subscription_id"),
@@ -186,6 +194,11 @@ export const subscriptionEvents = pgTable("subscription_events", {
   confidence: integer("confidence").notNull().default(0),
   detectionSource: text("detection_source").notNull().default("deterministic"),
   aiModel: text("ai_model"),
+  canonicalMerchantName: text("canonical_merchant_name"),
+  canonicalMerchantDomain: text("canonical_merchant_domain"),
+  paymentProcessor: text("payment_processor"),
+  merchantConfidence: integer("merchant_confidence"),
+  merchantResolutionStatus: merchantResolutionStatusEnum("merchant_resolution_status"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   unique("subscription_events_user_message_type_unique").on(

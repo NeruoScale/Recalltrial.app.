@@ -164,5 +164,33 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] extracted_merchant:", err.message);
   }
 
+  // Phase 3B.3: merchant/processor normalization columns.
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'merchant_resolution_status') THEN
+          CREATE TYPE merchant_resolution_status AS ENUM ('resolved', 'ambiguous', 'unknown');
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] merchant_resolution_status enum OK");
+  } catch (err: any) {
+    console.error("[migrate] merchant_resolution_status enum:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events
+        ADD COLUMN IF NOT EXISTS canonical_merchant_name text,
+        ADD COLUMN IF NOT EXISTS canonical_merchant_domain text,
+        ADD COLUMN IF NOT EXISTS payment_processor text,
+        ADD COLUMN IF NOT EXISTS merchant_confidence integer,
+        ADD COLUMN IF NOT EXISTS merchant_resolution_status merchant_resolution_status;
+    `);
+    console.log("[migrate] subscription_events merchant columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_events merchant columns:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
