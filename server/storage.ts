@@ -374,9 +374,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<boolean> {
+    // Phase 3B.3 note: a re-scan of a message already classified with the
+    // same (userId, sourceMessageId, eventType) — expected whenever the
+    // classifier itself hasn't changed since the last scan — used to be a
+    // silent no-op (onConflictDoNothing), which meant new columns added
+    // after a row already existed (like Phase 3B.3's merchant-resolution
+    // fields) could never backfill onto it. Now upserts, but ONLY the
+    // merchant-resolution columns on conflict — eventType/extractedPrice/
+    // extractedDate/confidence/etc, established by Phase 3B.1/3B.2's
+    // classification, are deliberately left untouched on conflict rather
+    // than silently re-applied from a later scan.
     const result = await db.insert(subscriptionEvents).values(data)
-      .onConflictDoNothing({
+      .onConflictDoUpdate({
         target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
+        set: {
+          canonicalMerchantName: data.canonicalMerchantName,
+          canonicalMerchantDomain: data.canonicalMerchantDomain,
+          paymentProcessor: data.paymentProcessor,
+          merchantConfidence: data.merchantConfidence,
+          merchantResolutionStatus: data.merchantResolutionStatus,
+        },
       })
       .returning({ id: subscriptionEvents.id });
     return result.length > 0;
