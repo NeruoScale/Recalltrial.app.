@@ -141,6 +141,25 @@ function formatCostLine(sub: SubscriptionWithCost): string {
   return `${formatMoney(sub.amount, sub.currency)} · Unknown billing frequency`;
 }
 
+// Phase 3B.9.3 Step 7: provenance line — one fixed phrase per evidence tier,
+// exactly as specified. Only rendered when billingInterval itself is known;
+// "unknown" source (or a missing interval regardless of source) always
+// falls to the plain "Billing frequency: Unknown" line.
+function formatBillingProvenance(sub: SubscriptionWithCost): string {
+  if (!sub.billingInterval) return "Billing frequency: Unknown";
+  const label = formatInterval(sub.billingInterval);
+  switch (sub.billingIntervalSource) {
+    case "confirmed_email":
+      return `${label} · Confirmed from email`;
+    case "merchant_knowledge":
+      return `${label} · Based on plan details`;
+    case "inferred":
+      return `${label} · Based on recurring billing pattern`;
+    default:
+      return "Billing frequency: Unknown";
+  }
+}
+
 function SubscriptionRow({ sub }: { sub: SubscriptionWithCost }) {
   const initial = sub.canonicalMerchantName.charAt(0).toUpperCase();
 
@@ -167,6 +186,9 @@ function SubscriptionRow({ sub }: { sub: SubscriptionWithCost }) {
           </div>
           <div className="text-sm text-muted-foreground" data-testid={`text-cost-${sub.id}`}>
             {formatCostLine(sub)}
+          </div>
+          <div className="text-xs text-muted-foreground" data-testid={`text-billing-provenance-${sub.id}`}>
+            {formatBillingProvenance(sub)}
           </div>
           <div className="text-sm text-muted-foreground">
             Next renewal: {formatDate(sub.nextBillingDate)}

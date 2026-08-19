@@ -331,6 +331,10 @@ export async function registerRoutes(
   // summary. userId scoping is unchanged (still req.session.userId).
   // Phase 3B.9.2B: also runs through calculateUpcomingCharges() (default
   // 30-day window) — same `subs` array, no extra DB query needed.
+  // Phase 3B.9.3 Step 6: each subscription's billingIntervalSource/
+  // billingIntervalConfidence are already present on `subs` (read straight
+  // from the DB row) and pass through calculateSubscriptionCosts() via its
+  // ShadowSubscription spread — no separate wiring needed here.
   app.get("/api/subscriptions", requireAuth, async (req: Request, res: Response) => {
     try {
       const [subs, user] = await Promise.all([

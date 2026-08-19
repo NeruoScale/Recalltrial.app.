@@ -200,6 +200,13 @@ export const subscriptionEvents = pgTable("subscription_events", {
   // Phase 3B.9.2A: extracted directly from message text (server/gmail.ts's
   // extractBillingInterval()) — never guessed from price or merchant.
   billingInterval: text("billing_interval"),
+  // Phase 3B.9.3: provenance for THIS event's own billingInterval value —
+  // always 'confirmed_email' when non-null (this column is only ever
+  // written by extractBillingInterval(), the Tier 1 evidence source; see
+  // server/billingIntelligence.ts for the full tier model applied at the
+  // subscription level, not the individual-event level).
+  billingIntervalSource: text("billing_interval_source"),
+  billingIntervalConfidence: text("billing_interval_confidence"),
   confidence: integer("confidence").notNull().default(0),
   detectionSource: text("detection_source").notNull().default("deterministic"),
   aiModel: text("ai_model"),
@@ -292,6 +299,13 @@ export const subscriptions = pgTable("subscriptions", {
   amount: decimal("amount", { precision: 10, scale: 2 }),
   currency: text("currency"),
   billingInterval: text("billing_interval"),
+  // Phase 3B.9.3: provenance for the subscription's CURRENT billingInterval
+  // — see server/billingIntelligence.ts for the 4-tier evidence model
+  // (confirmed_email > merchant_knowledge > inferred > unknown) that
+  // decides these two fields. Never downgraded: a higher tier is never
+  // overwritten by a lower one, even as new events arrive.
+  billingIntervalSource: text("billing_interval_source"),
+  billingIntervalConfidence: text("billing_interval_confidence"),
   nextBillingDate: date("next_billing_date"),
   lastBillingDate: date("last_billing_date"),
   sourceCanonicalEventId: varchar("source_canonical_event_id").notNull().references(() => subscriptionEvents.id),

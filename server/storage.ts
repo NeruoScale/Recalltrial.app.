@@ -4,6 +4,8 @@ import { db } from "./db";
 import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
 import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
+import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
+import { lookupMerchantKnowledge } from "./merchantKnowledge";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -945,6 +947,8 @@ export class DatabaseStorage implements IStorage {
       amount: r.amount,
       currency: r.currency,
       billingInterval: r.billing_interval,
+      billingIntervalSource: r.billing_interval_source,
+      billingIntervalConfidence: r.billing_interval_confidence,
       nextBillingDate: r.next_billing_date,
       lastBillingDate: r.last_billing_date,
       sourceCanonicalEventId: r.source_canonical_event_id,
@@ -996,7 +1000,12 @@ export class DatabaseStorage implements IStorage {
       if (transition.kind === "state_change") {
         console.log(`[Lifecycle] ${existing.canonicalMerchantName}: ${transition.from} -> ${transition.to} (${transition.reason})`);
       }
-      return { applied: transition.kind !== "no_op", transition, subscription: existing };
+      // Phase 3B.9.3: billing intelligence still runs even when the base
+      // lifecycle update itself was a no-op — new evidence for interval
+      // inference accumulates regardless of whether THIS event also
+      // triggered a state/data change.
+      const withBillingIntel = await this.runBillingIntelligence(existing);
+      return { applied: transition.kind !== "no_op", transition, subscription: withBillingIntel };
     }
 
     const [updated] = await db
@@ -1014,7 +1023,72 @@ export class DatabaseStorage implements IStorage {
       console.log(`[Lifecycle] billingInterval updated: ${billingIntervalChange.from ?? "null"} -> ${billingIntervalChange.to}`);
     }
 
-    return { applied: true, transition, subscription: updated };
+    const withBillingIntel = await this.runBillingIntelligence(updated);
+    return { applied: true, transition, subscription: withBillingIntel };
+  }
+
+  // ── Phase 3B.9.3: billing intelligence orchestration ──────────────────────────
+  //
+  // Runs Tiers 1/3/4 (inferBillingInterval(), against EVERY canonical event
+  // for this subscription — not just the one that just came in, since
+  // recurrence inference needs the full history) and falls back to Tier 2
+  // (merchant knowledge) ONLY when that comes back "unknown" — the literal
+  // STEP 3/4 rule ("only apply merchant knowledge when billingInterval is
+  // currently null/unknown"). Never writes anything when
+  // shouldUpdateBillingIntelligence() says the existing tier already beats
+  // or matches the candidate, and never writes a null interval over a
+  // known one (the tier-0 "unknown" candidate can only ever match an
+  // already-unknown current state, per the tier ranking, so this is
+  // structurally guaranteed, not just conventionally followed).
+  private async runBillingIntelligence(subscription: ShadowSubscription): Promise<ShadowSubscription> {
+    const canonicalEvents = await db
+      .select()
+      .from(subscriptionEvents)
+      .where(and(
+        eq(subscriptionEvents.userId, subscription.userId),
+        eq(subscriptionEvents.canonicalMerchantDomain, subscription.canonicalMerchantDomain ?? ""),
+        eq(subscriptionEvents.isCanonical, true)
+      ));
+
+    let candidate = inferBillingInterval(canonicalEvents);
+
+    if (candidate.billingIntervalSource === "unknown") {
+      const known = lookupMerchantKnowledge(subscription.canonicalMerchantDomain);
+      if (known) {
+        candidate = {
+          billingInterval: known.billingInterval,
+          billingIntervalSource: "merchant_knowledge",
+          billingIntervalConfidence: known.confidence,
+          evidenceCount: 0,
+          inferenceMethod: `known merchant billing pattern (${known.planName ?? known.domain})`,
+        };
+      }
+    }
+
+    if (candidate.billingInterval === null) return subscription;
+
+    const currentSource: BillingIntervalSource = (subscription.billingIntervalSource as BillingIntervalSource) || "unknown";
+    if (!shouldUpdateBillingIntelligence({ source: currentSource }, { source: candidate.billingIntervalSource })) {
+      return subscription;
+    }
+
+    const [updated] = await db
+      .update(subscriptions)
+      .set({
+        billingInterval: candidate.billingInterval,
+        billingIntervalSource: candidate.billingIntervalSource,
+        billingIntervalConfidence: candidate.billingIntervalConfidence,
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.id, subscription.id))
+      .returning();
+
+    console.log(
+      `[Lifecycle] billing intelligence: ${subscription.canonicalMerchantName} -> ${candidate.billingInterval} ` +
+      `(${candidate.billingIntervalSource}, ${candidate.billingIntervalConfidence} confidence, ${candidate.inferenceMethod})`
+    );
+
+    return updated;
   }
 
   // "Check for existing reminders before creating (no duplicates)" is

@@ -23,6 +23,13 @@ import type { ShadowSubscription } from "@shared/schema";
 
 export type CostConfidence = "High" | "Medium" | "Low";
 
+// Phase 3B.9.3 Step 5: billingIntervalSource/billingIntervalConfidence
+// (server/billingIntelligence.ts's provenance fields) already flow through
+// here automatically via the `ShadowSubscription &` spread below — cost
+// normalization itself is intentionally indifferent to provenance (it reads
+// billingInterval's VALUE only, regardless of whether that value came from
+// confirmed_email/merchant_knowledge/inferred), so no computation change
+// was needed, only this note that the fields are present in the output.
 export type SubscriptionWithCost = ShadowSubscription & {
   monthlyCost: number | null;
   annualCost: number | null;

@@ -410,5 +410,28 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] billing_interval column:", err.message);
   }
 
+  // ── Phase 3B.9.3: billing intelligence provenance columns ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events
+        ADD COLUMN IF NOT EXISTS billing_interval_source text,
+        ADD COLUMN IF NOT EXISTS billing_interval_confidence text;
+    `);
+    console.log("[migrate] subscription_events billing intelligence columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_events billing intelligence columns:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS billing_interval_source text,
+        ADD COLUMN IF NOT EXISTS billing_interval_confidence text;
+    `);
+    console.log("[migrate] subscriptions billing intelligence columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscriptions billing intelligence columns:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
