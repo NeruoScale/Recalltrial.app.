@@ -12,6 +12,7 @@ import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
 import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
 import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
+import { calculateSubscriptionCosts } from "./subscriptionCostEngine";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -324,14 +325,20 @@ export async function registerRoutes(
   // never creates/updates trials or reminders, never flips isShadow, never
   // sends email. Tenant-scoped via req.session.userId, same as every other
   // /api/trials-style route.
+  // Phase 3B.9.1: response now runs through calculateSubscriptionCosts() —
+  // pure, deterministic, no DB calls of its own — which adds
+  // monthlyCost/annualCost/costConfidence per subscription and a cost
+  // summary. userId scoping is unchanged (still req.session.userId).
   app.get("/api/subscriptions", requireAuth, async (req: Request, res: Response) => {
     try {
       const [subs, user] = await Promise.all([
         storage.getShadowSubscriptionsForUser(req.session.userId!),
         storage.getUserById(req.session.userId!),
       ]);
+      const { subscriptions: subscriptionsWithCosts, summary } = calculateSubscriptionCosts(req.session.userId!, subs);
       return res.json({
-        subscriptions: subs,
+        subscriptions: subscriptionsWithCosts,
+        summary,
         messagesScanned: user?.lastScanMessagesProcessed ?? null,
       });
     } catch (err) {

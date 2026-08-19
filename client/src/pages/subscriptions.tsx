@@ -9,18 +9,42 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Bell, LogOut, Settings, Layers, Mail, Sparkles } from "lucide-react";
 import type { ShadowSubscription } from "@shared/schema";
 
-// Phase 3B.7.3 / 3B.8 Step 4: reads exclusively from GET /api/subscriptions,
-// which reads from `subscriptions` filtered to resolutionStatus="resolved"
-// only (unresolved/ambiguous entities never appear here — enforced upstream
-// by entityResolver.ts, not by anything on this page). Some of these rows
-// are now genuinely active (isShadow=false, Phase 3B.7.4's controlled
-// promotion) rather than shadow-only previews, so the heading reads "Your
-// subscriptions" — but "Detected from your email" stays on every card as a
-// permanent provenance marker: this is email-derived data, not something
-// the user entered or confirmed themselves, regardless of promotion state.
+// Phase 3B.7.3 / 3B.8 Step 4 / 3B.9.1: reads exclusively from
+// GET /api/subscriptions, which reads from `subscriptions` filtered to
+// resolutionStatus="resolved" only (unresolved/ambiguous entities never
+// appear here — enforced upstream by entityResolver.ts, not by anything on
+// this page). Some of these rows are now genuinely active (isShadow=false,
+// Phase 3B.7.4's controlled promotion) rather than shadow-only previews, so
+// the heading reads "Your subscriptions" — but "Detected from your email"
+// stays on every card as a permanent provenance marker: this is
+// email-derived data, not something the user entered or confirmed
+// themselves, regardless of promotion state.
+//
+// Phase 3B.9.1: monthlyCost/annualCost/costConfidence and the cost summary
+// are computed server-side by server/subscriptionCostEngine.ts — this page
+// only formats/displays them, it never recomputes billing normalization
+// itself (that logic previously lived here and has been removed in favor of
+// the shared, tested engine).
+
+type SubscriptionWithCost = ShadowSubscription & {
+  monthlyCost: number | null;
+  annualCost: number | null;
+  costConfidence: "High" | "Medium" | "Low";
+};
+
+type CostSummary = {
+  totalSubscriptions: number;
+  activeSubscriptions: number;
+  monthlyRecurringCost: number | null;
+  annualRecurringCost: number | null;
+  byCurrency: Record<string, { monthly: number; annual: number }>;
+  incompleteBillingCount: number;
+  unknownCostCount: number;
+};
 
 type SubscriptionsResponse = {
-  subscriptions: ShadowSubscription[];
+  subscriptions: SubscriptionWithCost[];
+  summary: CostSummary;
   messagesScanned: number | null;
 };
 
@@ -39,13 +63,6 @@ function formatInterval(interval: string | null): string {
 function formatDate(date: string | null): string {
   if (!date) return "Unknown";
   return new Date(date).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
-function confidenceLabel(confidence: number | null): { label: "High" | "Medium" | "Low"; variant: "default" | "secondary" | "outline" } {
-  const c = confidence ?? 0;
-  if (c >= 70) return { label: "High", variant: "default" };
-  if (c >= 40) return { label: "Medium", variant: "secondary" };
-  return { label: "Low", variant: "outline" };
 }
 
 function statusLabel(status: ShadowSubscription["subscriptionStatus"]): string {
@@ -79,44 +96,33 @@ function statusBadgeClasses(status: ShadowSubscription["subscriptionStatus"]): s
   }
 }
 
-// Monthly-equivalent conversion, applied only within a single currency —
-// mixing currencies into one sum would require inventing an FX rate, which
-// this app's own architecture explicitly forbids (PHASE1_AUDIT.md §12/
-// VISION.md's "do not invent" principle). billingInterval is unpopulated by
-// any upstream pipeline stage today, so "unknown interval" is treated as
-// already-monthly (the common case) rather than excluded outright.
-function monthlyEquivalent(amount: string, interval: string | null): number {
-  const n = Number(amount);
-  if (!Number.isFinite(n)) return 0;
-  switch ((interval || "").toLowerCase()) {
-    case "year":
-    case "yearly":
-    case "annual":
-      return n / 12;
-    case "week":
-    case "weekly":
-      return n * 4.345;
-    default:
-      return n;
+// Phase 3B.9.1: the per-subscription cost line. Two genuinely distinct
+// "can't show a number" cases, given different messaging:
+//   - amount itself unknown -> "Amount unavailable · {interval}" (never $0)
+//   - amount known but billing interval unusable (null/unknown/one_time) ->
+//     show the known raw amount, but say plainly that the frequency isn't known
+// When both are known, the ≈ prefix marks whichever figure the cost engine
+// had to DERIVE by dividing (monthly, for any non-monthly billing interval)
+// — never the annual figure, and never for a literally-monthly subscription
+// (its monthlyCost is exact, not derived).
+function formatCostLine(sub: SubscriptionWithCost): string {
+  if (sub.monthlyCost !== null && sub.annualCost !== null) {
+    const interval = (sub.billingInterval || "").toLowerCase();
+    const monthly = `$${sub.monthlyCost.toFixed(2)}`;
+    const annual = `$${sub.annualCost.toFixed(2)}`;
+    if (interval === "monthly") {
+      return `${monthly}/month · ${annual}/year`;
+    }
+    return `${annual}/year · ≈${monthly}/month`;
   }
+  if (!sub.amount) {
+    return `Amount unavailable · ${formatInterval(sub.billingInterval)}`;
+  }
+  return `${formatMoney(sub.amount, sub.currency)} · Unknown billing frequency`;
 }
 
-function computeMonthlyRecurringCost(subs: ShadowSubscription[]): { amount: number; currency: string }[] {
-  const byCurrency = new Map<string, number>();
-  for (const s of subs) {
-    if (!s.amount || !s.currency) continue;
-    const current = byCurrency.get(s.currency) || 0;
-    byCurrency.set(s.currency, current + monthlyEquivalent(s.amount, s.billingInterval));
-  }
-  return Array.from(byCurrency.entries()).map(([currency, amount]) => ({ currency, amount }));
-}
-
-function SubscriptionRow({ sub }: { sub: ShadowSubscription }) {
+function SubscriptionRow({ sub }: { sub: SubscriptionWithCost }) {
   const initial = sub.canonicalMerchantName.charAt(0).toUpperCase();
-  const confidence = confidenceLabel(sub.merchantConfidence);
-  const amountLine = sub.amount
-    ? `${formatMoney(sub.amount, sub.currency)}/${(sub.billingInterval || "month").toLowerCase()}`
-    : "Unknown amount";
 
   return (
     <Card data-testid={`card-subscription-${sub.id}`}>
@@ -139,19 +145,37 @@ function SubscriptionRow({ sub }: { sub: ShadowSubscription }) {
               {statusLabel(sub.subscriptionStatus)}
             </span>
           </div>
-          <div className="text-sm text-muted-foreground">
-            {amountLine} · {statusLabel(sub.subscriptionStatus)}
+          <div className="text-sm text-muted-foreground" data-testid={`text-cost-${sub.id}`}>
+            {formatCostLine(sub)}
           </div>
           <div className="text-sm text-muted-foreground">
             Next renewal: {formatDate(sub.nextBillingDate)}
           </div>
           <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
             <Mail className="h-3 w-3" />
-            Detected from your email · {confidence.label} confidence
+            Detected from your email · {sub.costConfidence} confidence
           </div>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// Renders "$X.XX CURRENCY" as one line per currency — never a single number
+// that blends multiple currencies together. summary.monthlyRecurringCost/
+// annualRecurringCost are only non-null when exactly one currency is in
+// play; with 2+ currencies (or 0), byCurrency is the only source of truth.
+function CostSummaryLines({ byCurrency, field }: { byCurrency: CostSummary["byCurrency"]; field: "monthly" | "annual" }) {
+  const entries = Object.entries(byCurrency);
+  if (entries.length === 0) {
+    return <span>Unknown</span>;
+  }
+  return (
+    <>
+      {entries.map(([currency, v]) => (
+        <div key={currency}>${v[field].toFixed(2)} {currency}</div>
+      ))}
+    </>
   );
 }
 
@@ -165,7 +189,8 @@ export default function SubscriptionsPage() {
   });
 
   const subs = data?.subscriptions ?? [];
-  const monthlyCosts = computeMonthlyRecurringCost(subs);
+  const summary = data?.summary;
+  const incompleteTotal = (summary?.incompleteBillingCount ?? 0) + (summary?.unknownCostCount ?? 0);
 
   return (
     <div className="min-h-screen bg-background">
@@ -205,7 +230,7 @@ export default function SubscriptionsPage() {
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-24 w-full" />
           </div>
-        ) : subs.length === 0 ? (
+        ) : subs.length === 0 || !summary ? (
           <Card>
             <CardContent className="py-12 text-center text-muted-foreground" data-testid="text-empty-state">
               No subscriptions detected yet. Connect Gmail and we'll scan your inbox.
@@ -213,24 +238,30 @@ export default function SubscriptionsPage() {
           </Card>
         ) : (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2">
               <Card>
                 <CardContent className="py-4">
-                  <div className="text-2xl font-bold" data-testid="text-total-detected">{subs.length}</div>
-                  <div className="text-xs text-muted-foreground">Detected subscriptions</div>
+                  <div className="text-2xl font-bold" data-testid="text-total-detected">{summary.totalSubscriptions}</div>
+                  <div className="text-xs text-muted-foreground">Subscriptions</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="py-4">
-                  <div className="text-2xl font-bold" data-testid="text-monthly-cost">
-                    {monthlyCosts.length === 0
-                      ? "Unknown"
-                      : monthlyCosts.map((c) => `${c.amount.toFixed(2)} ${c.currency}`).join(", ")}
+                  <div className="text-lg font-bold" data-testid="text-monthly-cost">
+                    <CostSummaryLines byCurrency={summary.byCurrency} field="monthly" />
                   </div>
-                  <div className="text-xs text-muted-foreground">Est. monthly recurring cost</div>
+                  <div className="text-xs text-muted-foreground">Monthly recurring cost</div>
                 </CardContent>
               </Card>
-              <Card className="col-span-2 sm:col-span-1">
+              <Card>
+                <CardContent className="py-4">
+                  <div className="text-lg font-bold" data-testid="text-annual-cost">
+                    <CostSummaryLines byCurrency={summary.byCurrency} field="annual" />
+                  </div>
+                  <div className="text-xs text-muted-foreground">Annual recurring cost</div>
+                </CardContent>
+              </Card>
+              <Card>
                 <CardContent className="py-4">
                   <div className="text-2xl font-bold" data-testid="text-messages-scanned">
                     {data?.messagesScanned ?? "—"}
@@ -241,6 +272,12 @@ export default function SubscriptionsPage() {
                 </CardContent>
               </Card>
             </div>
+
+            {incompleteTotal > 0 && (
+              <p className="text-xs text-muted-foreground mb-4" data-testid="text-incomplete-billing">
+                {incompleteTotal} subscription{incompleteTotal === 1 ? "" : "s"} {incompleteTotal === 1 ? "has" : "have"} incomplete billing information.
+              </p>
+            )}
 
             <div className="space-y-3">
               {subs.map((sub) => (
