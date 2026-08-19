@@ -780,34 +780,102 @@ export function detectSubscriptionEvent(
   };
 }
 
-// ─── Gmail list with pagination ───────────────────────────────────────────────
+// ─── Gmail list with pagination (Phase 3B.7.2) ────────────────────────────────
+//
+// Phase 3B.7.1's audit found that the old maxTotal=500 was a silent global
+// cap: since it equaled Gmail's own per-page maximum, the do/while loop's
+// `all.length < maxTotal` condition went false the instant page 1 filled up,
+// so a second page was never actually fetched in any real scenario — any
+// account with >500 matching messages in a phase silently lost the rest.
+//
+// Fixed shape: DEFAULT_MAX_SCAN_MESSAGES (overridable via MAX_SCAN_MESSAGES)
+// is now an explicit, operator-visible safety limit, not an accidental page
+// cap — pagination genuinely continues across pages until either Gmail runs
+// out of results (pageToken exhausted) or the limit is hit. When the limit
+// IS hit, this never happens silently: the caller gets back an exact
+// totalAvailable (see below) and scanComplete=false to report on.
 
-async function listMessages(
+const DEFAULT_MAX_SCAN_MESSAGES = 5000;
+
+export function getMaxScanMessages(): number {
+  const raw = process.env.MAX_SCAN_MESSAGES;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_SCAN_MESSAGES;
+}
+
+export type ListMessagesResult = {
+  ids: Array<{ id: string; phase: "A" | "B" }>;
+  totalAvailable: number;
+  scanComplete: boolean;
+};
+
+export async function listMessages(
   gmail: ReturnType<typeof google.gmail>,
   query: string,
-  maxTotal: number,
+  maxScanMessages: number,
   phase: "A" | "B"
-): Promise<Array<{ id: string; phase: "A" | "B" }>> {
+): Promise<ListMessagesResult> {
   const all: Array<{ id: string; phase: "A" | "B" }> = [];
+  let totalAvailable = 0;
   let pageToken: string | undefined;
 
   do {
     const res = await gmail.users.messages.list({
       userId: "me",
       q: query,
-      maxResults: Math.min(500, maxTotal - all.length),
+      maxResults: 500, // Gmail API's own hard per-call maximum
       ...(pageToken ? { pageToken } : {}),
     });
-    for (const m of res.data.messages || []) {
-      if (m.id) all.push({ id: m.id, phase });
+    const pageIds = res.data.messages || [];
+    totalAvailable += pageIds.length;
+    for (const m of pageIds) {
+      if (m.id && all.length < maxScanMessages) all.push({ id: m.id, phase });
     }
     pageToken = res.data.nextPageToken || undefined;
-  } while (pageToken && all.length < maxTotal);
+    // Deliberately keep paginating past the cap: these list calls only
+    // return message IDs (cheap) rather than the per-message metadata.get()
+    // calls done later (expensive) — so continuing lets totalAvailable stay
+    // an EXACT count instead of an estimate. Phase 3B.7.1 found Gmail's own
+    // resultSizeEstimate field to be unreliable (it returned a smaller
+    // number than an exact 90-day count in the same account), so this
+    // scan deliberately does not rely on it anywhere.
+  } while (pageToken);
 
-  return all;
+  return { ids: all, totalAvailable, scanComplete: totalAvailable <= maxScanMessages };
+}
+
+// ─── Incremental scanning (Phase 3B.7.2) ──────────────────────────────────────
+//
+// users.lastEmailScanAt already existed and was already being written
+// (PHASE1_AUDIT.md §7 flagged it as unused for this exact purpose) — this is
+// the "read side" of that finding. Gmail's after:/before: search operators
+// are DATE-granular (YYYY/MM/DD), not timestamp-granular, so scoping exactly
+// to lastEmailScanAt's instant isn't possible; a 1-day overlap is subtracted
+// so no message is ever missed due to that coarseness. Re-fetching a message
+// already seen inside that overlap day is a guaranteed no-op, never a
+// duplicate — decideCanonicalization() (Phase 3B.5) already makes every
+// write in this pipeline idempotent regardless of how many times the same
+// message is re-scanned.
+export function buildScanTimeFilter(lastEmailScanAt: Date | null | undefined): string {
+  if (!lastEmailScanAt) return "newer_than:90d";
+  const overlapDate = new Date(lastEmailScanAt.getTime() - 24 * 60 * 60 * 1000);
+  const y = overlapDate.getUTCFullYear();
+  const m = String(overlapDate.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(overlapDate.getUTCDate()).padStart(2, "0");
+  return `after:${y}/${m}/${d}`;
 }
 
 // ─── Main scan function ───────────────────────────────────────────────────────
+
+export type ScanResult = {
+  suggestions: Array<Omit<SuggestedTrial, "id" | "userId" | "createdAt" | "status">>;
+  scanComplete: boolean;
+  messagesFound: number;
+  messagesProcessed: number;
+  messagesRemaining: number;
+  scanStartedAt: Date;
+  scanCompletedAt: Date;
+};
 
 export async function scanGmailForTrials(
   accessToken: string,
@@ -817,8 +885,13 @@ export async function scanGmailForTrials(
   // Existing return shape and existing trial-write behavior are unchanged;
   // this is purely additive so the two existing callers can pass user.id,
   // which they already have in scope.
-  userId?: string
-): Promise<Array<Omit<SuggestedTrial, "id" | "userId" | "createdAt" | "status">>> {
+  userId?: string,
+  // Phase 3B.7.2: null/undefined = first scan ever for this user (90-day
+  // window, as before). Non-null = an incremental scan scoped to new mail
+  // only via buildScanTimeFilter() above.
+  lastEmailScanAt?: Date | null
+): Promise<ScanResult> {
+  const scanStartedAt = new Date();
   const oauth2Client = getOAuthClient();
   oauth2Client.setCredentials({
     access_token: accessToken,
@@ -828,8 +901,10 @@ export async function scanGmailForTrials(
 
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
+  const timeFilter = buildScanTimeFilter(lastEmailScanAt);
+
   const phaseAQuery =
-    'newer_than:90d -category:promotions (' +
+    `${timeFilter} -category:promotions (` +
     '"free trial has started" OR "trial started" OR "trial ends" OR "trial expires" OR ' +
     '"trial ending" OR "subscription started" OR "subscription is now active" OR ' +
     '"renews on" OR "next billing date" OR "will be charged on" OR "auto-renewal" OR ' +
@@ -838,20 +913,38 @@ export async function scanGmailForTrials(
     ')';
 
   const phaseBQuery =
-    'newer_than:90d -category:social -category:promotions (' +
+    `${timeFilter} -category:social -category:promotions (` +
     'subject:(trial OR subscription OR renewal OR invoice OR receipt OR billing)' +
     ')';
 
-  const [phaseAMsgs, phaseBMsgs] = await Promise.all([
-    listMessages(gmail, phaseAQuery, 500, "A"),
-    listMessages(gmail, phaseBQuery, 500, "B"),
+  const maxScanMessages = getMaxScanMessages();
+  const [phaseAList, phaseBList] = await Promise.all([
+    listMessages(gmail, phaseAQuery, maxScanMessages, "A"),
+    listMessages(gmail, phaseBQuery, maxScanMessages, "B"),
   ]);
+  const phaseAMsgs = phaseAList.ids;
+  const phaseBMsgs = phaseBList.ids;
 
   // Combine + deduplicate by message_id (Phase A takes priority)
   const seenIds = new Map<string, "A" | "B">();
   for (const m of phaseAMsgs) seenIds.set(m.id, "A");
   for (const m of phaseBMsgs) { if (!seenIds.has(m.id)) seenIds.set(m.id, "B"); }
   const allMessages = Array.from(seenIds.entries()).map(([id, phase]) => ({ id, phase }));
+
+  // Scan-completeness bookkeeping (Phase 3B.7.2 Step 1B). messagesFound/
+  // messagesProcessed/messagesRemaining are all tracked PER PHASE against
+  // each phase's own exact Gmail-reported total (listMessages'
+  // totalAvailable) and summed — that's the only number that can
+  // distinguish "the cap was hit" from "there just weren't more matching
+  // messages," and keeps found - processed = remaining exact even though
+  // Phase A/B overlap (allMessages below is the deduplicated set that
+  // actually goes through the classify loop; messagesProcessed reports the
+  // raw per-phase fetch count that determines scan completeness, not the
+  // post-dedup work count).
+  const messagesFound = phaseAList.totalAvailable + phaseBList.totalAvailable;
+  const messagesFetched = phaseAMsgs.length + phaseBMsgs.length;
+  const messagesRemaining = messagesFound - messagesFetched;
+  const scanComplete = phaseAList.scanComplete && phaseBList.scanComplete;
 
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
@@ -1074,7 +1167,29 @@ export async function scanGmailForTrials(
     }
   }
 
-  return finalResults.map(({ _rootDomain, _priceKey, _dateKey, _isOngoing, _endDateSource, ...rest }) => rest);
+  const scanCompletedAt = new Date();
+
+  if (userId) {
+    console.log(
+      `[SubDetector] scan complete=${scanComplete} found=${messagesFound} processed=${messagesFetched} ` +
+      `remaining=${messagesRemaining} startedAt=${scanStartedAt.toISOString()} completedAt=${scanCompletedAt.toISOString()}`
+    );
+    if (!scanComplete) {
+      console.log(
+        `[SubDetector] scan partial: processed ${messagesFetched} of ${messagesFound} candidate messages`
+      );
+    }
+  }
+
+  return {
+    suggestions: finalResults.map(({ _rootDomain, _priceKey, _dateKey, _isOngoing, _endDateSource, ...rest }) => rest),
+    scanComplete,
+    messagesFound,
+    messagesProcessed: messagesFetched,
+    messagesRemaining,
+    scanStartedAt,
+    scanCompletedAt,
+  };
 }
 
 export function isGoogleConfigured(): boolean {

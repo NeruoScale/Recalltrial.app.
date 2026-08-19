@@ -33,6 +33,9 @@ import {
   scanGmailForTrials,
   isKnownNoiseDomain,
   isSubscriptionEvidence,
+  listMessages,
+  buildScanTimeFilter,
+  getMaxScanMessages,
 } from "./gmail";
 
 // Given email input -> detector -> expected structured output.
@@ -560,7 +563,7 @@ describe("Step 6: subscription-detector failure isolation", () => {
 
     (storage.createSubscriptionEvent as any).mockRejectedValue(new Error("simulated DB failure"));
 
-    const results = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+    const { suggestions: results } = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
 
     // The existing trial-suggestion pipeline must be completely unaffected
     // by the subscription detector's write throwing.
@@ -587,11 +590,11 @@ describe("Step 6: subscription-detector failure isolation", () => {
 
     mockGmailClient(message);
     (storage.createSubscriptionEvent as any).mockResolvedValue(true);
-    const withSuccess = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+    const { suggestions: withSuccess } = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
 
     mockGmailClient(message);
     (storage.createSubscriptionEvent as any).mockRejectedValue(new Error("simulated DB failure"));
-    const withFailure = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+    const { suggestions: withFailure } = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
 
     expect(withSuccess).toHaveLength(1);
     expect(withFailure).toHaveLength(1);
@@ -766,6 +769,224 @@ describe("Phase 3B.3.1: precision patch regression tests", () => {
       ] as const) {
         expect(isSubscriptionEvidence(t)).toBe(true);
       }
+    });
+  });
+});
+
+describe("Phase 3B.7.2: Gmail scan reliability (pagination, completeness, incremental)", () => {
+  function fakeGmailList(pages: Array<{ ids: string[]; nextPageToken?: string }>) {
+    const list = vi.fn();
+    for (const page of pages) {
+      list.mockResolvedValueOnce({
+        data: {
+          messages: page.ids.map((id) => ({ id })),
+          nextPageToken: page.nextPageToken,
+        },
+      });
+    }
+    return { users: { messages: { list } } } as any;
+  }
+
+  describe("1A. listMessages() pagination — no silent truncation", () => {
+    it("501 messages across 2 pages: pagination continues, nothing is truncated", async () => {
+      const page1Ids = Array.from({ length: 500 }, (_, i) => `msg-${i}`);
+      const page2Ids = ["msg-500"];
+      const gmail = fakeGmailList([
+        { ids: page1Ids, nextPageToken: "page-2" },
+        { ids: page2Ids, nextPageToken: undefined },
+      ]);
+
+      const result = await listMessages(gmail, "some query", 5000, "A");
+
+      expect(result.ids).toHaveLength(501);
+      expect(result.totalAvailable).toBe(501);
+      expect(result.scanComplete).toBe(true);
+      expect(gmail.users.messages.list).toHaveBeenCalledTimes(2);
+    });
+
+    it("multiple Gmail API pages (3 pages) are all fetched, not just the first", async () => {
+      const gmail = fakeGmailList([
+        { ids: Array.from({ length: 500 }, (_, i) => `a-${i}`), nextPageToken: "p2" },
+        { ids: Array.from({ length: 500 }, (_, i) => `b-${i}`), nextPageToken: "p3" },
+        { ids: Array.from({ length: 50 }, (_, i) => `c-${i}`), nextPageToken: undefined },
+      ]);
+
+      const result = await listMessages(gmail, "some query", 5000, "B");
+
+      expect(result.ids).toHaveLength(1050);
+      expect(result.totalAvailable).toBe(1050);
+      expect(result.scanComplete).toBe(true);
+      expect(gmail.users.messages.list).toHaveBeenCalledTimes(3);
+    });
+
+    it("hitting the safety limit stops collecting but still reports an EXACT total and scanComplete=false, never silently truncating", async () => {
+      const gmail = fakeGmailList([
+        { ids: Array.from({ length: 6 }, (_, i) => `x-${i}`), nextPageToken: "p2" },
+        { ids: Array.from({ length: 6 }, (_, i) => `y-${i}`), nextPageToken: undefined },
+      ]);
+
+      const result = await listMessages(gmail, "some query", 10, "A");
+
+      expect(result.ids).toHaveLength(10); // capped
+      expect(result.totalAvailable).toBe(12); // exact count, kept paginating past the cap to get it
+      expect(result.scanComplete).toBe(false);
+    });
+  });
+
+  describe("1B. getMaxScanMessages() — explicit, configurable safety limit", () => {
+    const originalEnv = process.env.MAX_SCAN_MESSAGES;
+    afterEach(() => {
+      if (originalEnv === undefined) delete process.env.MAX_SCAN_MESSAGES;
+      else process.env.MAX_SCAN_MESSAGES = originalEnv;
+    });
+
+    it("defaults to 5000 when MAX_SCAN_MESSAGES is unset", () => {
+      delete process.env.MAX_SCAN_MESSAGES;
+      expect(getMaxScanMessages()).toBe(5000);
+    });
+
+    it("respects an explicit MAX_SCAN_MESSAGES override", () => {
+      process.env.MAX_SCAN_MESSAGES = "1200";
+      expect(getMaxScanMessages()).toBe(1200);
+    });
+
+    it("falls back to the default on a garbage value", () => {
+      process.env.MAX_SCAN_MESSAGES = "not-a-number";
+      expect(getMaxScanMessages()).toBe(5000);
+    });
+  });
+
+  describe("1C. buildScanTimeFilter() — incremental query construction", () => {
+    it("first scan (lastEmailScanAt null) uses the existing 90-day window", () => {
+      expect(buildScanTimeFilter(null)).toBe("newer_than:90d");
+      expect(buildScanTimeFilter(undefined)).toBe("newer_than:90d");
+    });
+
+    it("subsequent scan uses after: with a 1-day overlap, not the raw scan date", () => {
+      // lastEmailScanAt = Aug 19 -> overlap day = Aug 18, so any message from
+      // the 18th gets safely re-fetched (idempotent) rather than risking a
+      // gap from Gmail's after: being date-, not timestamp-, granular.
+      expect(buildScanTimeFilter(new Date("2026-08-19T10:00:00Z"))).toBe("after:2026/08/18");
+    });
+
+    it("correctly rolls back across a year boundary", () => {
+      expect(buildScanTimeFilter(new Date("2026-01-01T00:00:00Z"))).toBe("after:2025/12/31");
+    });
+
+    it("messages exactly at the 90-day boundary: first-scan query string still includes the full window, unaltered", () => {
+      // The 90-day cutoff itself is Gmail's own server-side newer_than:90d
+      // evaluation, not something this codebase computes — what's testable
+      // here is that the first-scan query is passed through exactly, so nothing
+      // in the incremental-scan change narrows the window for a first-time scan.
+      expect(buildScanTimeFilter(null)).toContain("newer_than:90d");
+    });
+  });
+
+  describe("1B/1C. scanGmailForTrials() end-to-end: completeness + incremental scanning", () => {
+    function mockGmailClient(message: { from: string; subject: string; date: string; snippet: string }, listImpl?: any) {
+      const messagesGet = vi.fn().mockResolvedValue({
+        data: {
+          payload: {
+            headers: [
+              { name: "From", value: message.from },
+              { name: "Subject", value: message.subject },
+              { name: "Date", value: message.date },
+            ],
+          },
+          snippet: message.snippet,
+        },
+      });
+      const messagesList = listImpl || vi.fn().mockResolvedValue({
+        data: { messages: [{ id: "msg-1" }], nextPageToken: undefined },
+      });
+      (google.gmail as any).mockReturnValue({
+        users: { messages: { list: messagesList, get: messagesGet } },
+      });
+      return messagesList;
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      (storage.createSubscriptionEvent as any).mockResolvedValue(true);
+    });
+
+    it("a first-time scan (lastEmailScanAt=null) queries with newer_than:90d", async () => {
+      const messagesList = mockGmailClient({
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      });
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null);
+
+      const queriesUsed = messagesList.mock.calls.map((c: any[]) => c[0].q as string);
+      expect(queriesUsed.every((q: string) => q.startsWith("newer_than:90d"))).toBe(true);
+    });
+
+    it("a subsequent scan (lastEmailScanAt set) queries with after:, not newer_than:90d — and still picks up the new message", async () => {
+      const messagesList = mockGmailClient({
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      });
+
+      const lastScan = new Date("2026-08-15T00:00:00Z");
+      const result = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", lastScan);
+
+      const queriesUsed = messagesList.mock.calls.map((c: any[]) => c[0].q as string);
+      expect(queriesUsed.every((q: string) => q.startsWith("after:2026/08/14"))).toBe(true);
+      expect(queriesUsed.every((q: string) => !q.includes("newer_than:90d"))).toBe(true);
+
+      // The new message returned by the incremental-scoped query still flows
+      // all the way through the pipeline.
+      expect(result.suggestions).toHaveLength(1);
+      expect(result.suggestions[0].messageId).toBe("msg-1");
+    });
+
+    it("repeated hourly scan of the same message feeds IDENTICAL data into the write path both times (idempotency precondition)", async () => {
+      const message = {
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date("2026-08-01T12:00:00Z").toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      };
+
+      mockGmailClient(message);
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null);
+      const firstCallArgs = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+
+      vi.clearAllMocks();
+      (storage.createSubscriptionEvent as any).mockResolvedValue(true);
+      mockGmailClient(message);
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null);
+      const secondCallArgs = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+
+      // Same message, same classifier inputs -> the scan layer must hand the
+      // DB layer byte-identical data on every re-scan. decideCanonicalization()
+      // (Phase 3B.5) is what actually turns that into "no duplicate row" —
+      // this test locks in the scan layer's half of that guarantee.
+      expect(secondCallArgs).toEqual(firstCallArgs);
+    });
+
+    it("reports scan-completeness fields on the returned ScanResult", async () => {
+      mockGmailClient({
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      });
+
+      const result = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      expect(result.scanComplete).toBe(true);
+      expect(result.messagesRemaining).toBe(0);
+      expect(result.messagesFound).toBeGreaterThan(0);
+      expect(result.messagesProcessed).toBe(result.messagesFound);
+      expect(result.scanStartedAt).toBeInstanceOf(Date);
+      expect(result.scanCompletedAt).toBeInstanceOf(Date);
+      expect(result.scanCompletedAt.getTime()).toBeGreaterThanOrEqual(result.scanStartedAt.getTime());
     });
   });
 });

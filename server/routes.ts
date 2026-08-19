@@ -326,12 +326,14 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Gmail is not connected." });
       }
 
-      const suggestions = await scanGmailForTrials(
+      const scanResult = await scanGmailForTrials(
         user.gmailAccessToken,
         user.gmailRefreshToken,
         user.gmailTokenExpiry,
-        user.id
+        user.id,
+        user.lastEmailScanAt
       );
+      const { suggestions } = scanResult;
 
       let newCount = 0;
       for (const s of suggestions) {
@@ -342,7 +344,15 @@ export async function registerRoutes(
       await storage.updateLastEmailScan(user.id);
       storage.logEvent(user.id, "email_scan", { foundCount: suggestions.length });
 
-      return res.json({ success: true, found: suggestions.length, newSuggestions: newCount });
+      return res.json({
+        success: true,
+        found: suggestions.length,
+        newSuggestions: newCount,
+        scanComplete: scanResult.scanComplete,
+        messagesFound: scanResult.messagesFound,
+        messagesProcessed: scanResult.messagesProcessed,
+        messagesRemaining: scanResult.messagesRemaining,
+      });
     } catch (err: any) {
       const message = err?.message || String(err);
       const status = err?.response?.status || err?.status;
@@ -1025,22 +1035,38 @@ export async function registerRoutes(
     try {
       const proUsers = await storage.getProUsersWithScanningEnabled();
       const batch = proUsers.slice(0, 10);
-      const results: { userId: string; found: number; error?: string }[] = [];
+      const results: {
+        userId: string;
+        found: number;
+        error?: string;
+        scanComplete?: boolean;
+        messagesFound?: number;
+        messagesProcessed?: number;
+        messagesRemaining?: number;
+      }[] = [];
 
       for (const user of batch) {
         if (!user.gmailAccessToken) continue;
         try {
-          const suggestions = await scanGmailForTrials(
+          const scanResult = await scanGmailForTrials(
             user.gmailAccessToken,
             user.gmailRefreshToken,
             user.gmailTokenExpiry,
-            user.id
+            user.id,
+            user.lastEmailScanAt
           );
-          for (const s of suggestions) {
+          for (const s of scanResult.suggestions) {
             await storage.upsertSuggestedTrial({ ...s, userId: user.id });
           }
           await storage.updateLastEmailScan(user.id);
-          results.push({ userId: user.id, found: suggestions.length });
+          results.push({
+            userId: user.id,
+            found: scanResult.suggestions.length,
+            scanComplete: scanResult.scanComplete,
+            messagesFound: scanResult.messagesFound,
+            messagesProcessed: scanResult.messagesProcessed,
+            messagesRemaining: scanResult.messagesRemaining,
+          });
         } catch (err: any) {
           results.push({ userId: user.id, found: 0, error: err.message });
         }
