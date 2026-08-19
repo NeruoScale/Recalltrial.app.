@@ -49,6 +49,8 @@ export interface IStorage {
   upsertShadowSubscription(data: InsertShadowSubscription): Promise<ShadowSubscription>;
   // Phase 3B.6: admin shadow-subscription preview dashboard read path.
   getShadowSubscriptionsForDashboard(): Promise<(ShadowSubscription & { userEmail: string })[]>;
+  // Phase 3B.7.3: end-user "detected subscriptions" dashboard read path.
+  getShadowSubscriptionsForUser(userId: string): Promise<ShadowSubscription[]>;
   getShadowSubscriptionMetrics(): Promise<{
     canonicalEvents: number;
     supersededClassifications: number;
@@ -96,7 +98,7 @@ export interface IStorage {
   updateUserGmailTokens(userId: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<void>;
   clearUserGmailTokens(userId: string): Promise<void>;
   toggleEmailScanning(userId: string, enabled: boolean): Promise<User>;
-  updateLastEmailScan(userId: string): Promise<void>;
+  updateLastEmailScan(userId: string, messagesProcessed?: number): Promise<void>;
   getProUsersWithScanningEnabled(): Promise<User[]>;
 
   getSuggestedTrials(userId: string): Promise<SuggestedTrial[]>;
@@ -378,8 +380,13 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async updateLastEmailScan(userId: string): Promise<void> {
-    await db.update(users).set({ lastEmailScanAt: new Date() }).where(eq(users.id, userId));
+  async updateLastEmailScan(userId: string, messagesProcessed?: number): Promise<void> {
+    await db.update(users)
+      .set({
+        lastEmailScanAt: new Date(),
+        ...(messagesProcessed !== undefined ? { lastScanMessagesProcessed: messagesProcessed } : {}),
+      })
+      .where(eq(users.id, userId));
   }
 
   async getProUsersWithScanningEnabled(): Promise<User[]> {
@@ -628,6 +635,25 @@ export class DatabaseStorage implements IStorage {
       .where(eq(subscriptions.isShadow, true))
       .orderBy(users.email, subscriptions.canonicalMerchantName);
     return rows.map((r) => ({ ...r.subscription, userEmail: r.userEmail }));
+  }
+
+  // Phase 3B.7.3: scoped to one user (tenant-isolated, session-authenticated
+  // caller only — see requireAuth in routes.ts) AND resolutionStatus=
+  // "resolved" only. Ambiguous/unresolved/conflict rows never reach this far
+  // in practice (only "resolved" groups ever become a `subscriptions` row at
+  // all, per entityResolver.ts's isEligibleForShadowSubscription()), but the
+  // resolutionStatus filter is kept explicit here anyway so this query stays
+  // correct on its own even if that upstream invariant ever changes.
+  async getShadowSubscriptionsForUser(userId: string): Promise<ShadowSubscription[]> {
+    return db
+      .select()
+      .from(subscriptions)
+      .where(and(
+        eq(subscriptions.userId, userId),
+        eq(subscriptions.isShadow, true),
+        eq(subscriptions.resolutionStatus, "resolved")
+      ))
+      .orderBy(subscriptions.canonicalMerchantName);
   }
 
   async getShadowSubscriptionMetrics(): Promise<{

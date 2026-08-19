@@ -25,6 +25,12 @@ export const users = pgTable("users", {
   gmailRefreshToken: text("gmail_refresh_token"),
   gmailTokenExpiry: timestamp("gmail_token_expiry"),
   lastEmailScanAt: timestamp("last_email_scan_at"),
+  // Phase 3B.7.2: messagesProcessed from the most recent scan's ScanResult
+  // (see server/gmail.ts) — persisted so the Phase 3B.7.3 dashboard can show
+  // "Detected from X emails scanned" without re-deriving it from
+  // subscription_events (which would only count messages that produced a
+  // candidate, undercounting true scan volume).
+  lastScanMessagesProcessed: integer("last_scan_messages_processed"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

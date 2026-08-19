@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { TrialCard } from "@/components/trial-card";
-import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, ArrowRight, Sparkles, CheckCircle, X, Mail } from "lucide-react";
+import { Bell, Plus, LogOut, Settings, AlertTriangle, Clock, Archive, ArrowRight, Sparkles, CheckCircle, X, Mail, Layers } from "lucide-react";
 import type { Trial, SuggestedTrial } from "@shared/schema";
 import { differenceInDays, parseISO } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -152,6 +152,15 @@ export default function Dashboard() {
             <span className="font-bold" data-testid="text-brand">RecallTrial</span>
           </div>
           <div className="flex items-center gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => setLocation("/subscriptions")}
+              data-testid="button-subscriptions"
+              title="Detected subscriptions"
+            >
+              <Layers className="h-4 w-4" />
+            </Button>
             <Button
               size="icon"
               variant="ghost"

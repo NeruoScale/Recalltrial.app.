@@ -18,6 +18,7 @@ import SettingsPage from "@/pages/settings";
 import ReviewsPage from "@/pages/reviews";
 import AdminReviewsPage from "@/pages/admin-reviews";
 import AdminSubscriptionsPage from "@/pages/admin-subscriptions";
+import SubscriptionsPage from "@/pages/subscriptions";
 import ReviewNewPage from "@/pages/review-new";
 import PricingPage from "@/pages/pricing";
 import BillingSuccess from "@/pages/billing-success";
@@ -38,6 +39,7 @@ function Router() {
       <Route path="/auth/forgot-password" component={AuthForgotPassword} />
       <Route path="/auth/reset-password" component={AuthResetPassword} />
       <Route path="/dashboard" component={Dashboard} />
+      <Route path="/subscriptions" component={SubscriptionsPage} />
       <Route path="/trials/new" component={TrialNew} />
       <Route path="/trials/:id" component={TrialDetail} />
       <Route path="/settings" component={SettingsPage} />

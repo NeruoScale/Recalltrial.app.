@@ -341,7 +341,7 @@ export async function registerRoutes(
         newCount++;
       }
 
-      await storage.updateLastEmailScan(user.id);
+      await storage.updateLastEmailScan(user.id, scanResult.messagesProcessed);
       storage.logEvent(user.id, "email_scan", { foundCount: suggestions.length });
 
       return res.json({
@@ -362,6 +362,28 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Gmail token expired. Please disconnect and reconnect Gmail." });
       }
       return res.status(500).json({ message: "Internal error during scan.", detail: message });
+    }
+  });
+
+  // Phase 3B.7.3: end-user "detected subscriptions" dashboard. Reads only
+  // from `subscriptions` (isShadow=true, resolutionStatus="resolved") — see
+  // storage.getShadowSubscriptionsForUser(). This is a read-only view: it
+  // never creates/updates trials or reminders, never flips isShadow, never
+  // sends email. Tenant-scoped via req.session.userId, same as every other
+  // /api/trials-style route.
+  app.get("/api/subscriptions", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const [subs, user] = await Promise.all([
+        storage.getShadowSubscriptionsForUser(req.session.userId!),
+        storage.getUserById(req.session.userId!),
+      ]);
+      return res.json({
+        subscriptions: subs,
+        messagesScanned: user?.lastScanMessagesProcessed ?? null,
+      });
+    } catch (err) {
+      console.error("Get subscriptions error:", err);
+      return res.status(500).json({ message: "Internal error" });
     }
   });
 
@@ -1058,7 +1080,7 @@ export async function registerRoutes(
           for (const s of scanResult.suggestions) {
             await storage.upsertSuggestedTrial({ ...s, userId: user.id });
           }
-          await storage.updateLastEmailScan(user.id);
+          await storage.updateLastEmailScan(user.id, scanResult.messagesProcessed);
           results.push({
             userId: user.id,
             found: scanResult.suggestions.length,

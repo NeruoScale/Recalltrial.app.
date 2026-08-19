@@ -342,5 +342,15 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] canonicalization backfill:", err.message);
   }
 
+  // ── Phase 3B.7.2: persisted "last scan's message count" for the 3B.7.3 dashboard ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS last_scan_messages_processed integer;
+    `);
+    console.log("[migrate] users.last_scan_messages_processed OK");
+  } catch (err: any) {
+    console.error("[migrate] last_scan_messages_processed:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
