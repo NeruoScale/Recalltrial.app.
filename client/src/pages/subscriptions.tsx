@@ -122,6 +122,24 @@ type SubscriptionHistoryEntry = {
   sourceMessageId: string;
 };
 
+// Phase 3B.9.6B: mirrors server/priceHistory.ts's PriceHistoryResult exactly.
+type PriceObservation = {
+  observedAt: string;
+  amount: string;
+  currency: string;
+  billingInterval: string | null;
+  isFirstKnownPrice: boolean;
+  isCurrencyChange: boolean;
+  isIntervalChange: boolean;
+};
+
+type PriceHistoryResult = {
+  observations: PriceObservation[];
+  currentPrice: { amount: string; currency: string; billingInterval: string | null } | null;
+  hasMultiplePrices: boolean;
+  observationCount: number;
+};
+
 type SubscriptionVaultResponse = {
   subscription: {
     id: string;
@@ -163,7 +181,12 @@ type SubscriptionVaultResponse = {
     confidence: number;
     resolutionMethod: string;
   };
+  priceHistory: PriceHistoryResult;
 };
+
+function formatMonthYear(date: string): string {
+  return new Date(date).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+}
 
 function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: string | null; onClose: () => void }) {
   const { data, isLoading } = useQuery<SubscriptionVaultResponse>({
@@ -283,6 +306,44 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                         <span className="flex-1 min-w-0 truncate text-right text-muted-foreground" data-testid={`text-history-label-${entry.id}`}>
                           {entry.eventTypeLabel}
                         </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Price history</h3>
+                {data.priceHistory.observationCount === 0 ? (
+                  <p className="text-sm text-muted-foreground" data-testid="text-price-history-empty">
+                    No pricing information available
+                  </p>
+                ) : data.priceHistory.observationCount === 1 ? (
+                  <div data-testid="text-price-history-single">
+                    <div className="text-sm font-medium">
+                      {formatMoney(data.priceHistory.observations[0].amount, data.priceHistory.observations[0].currency)}
+                      {data.priceHistory.observations[0].billingInterval
+                        ? `/${formatInterval(data.priceHistory.observations[0].billingInterval).toLowerCase()}`
+                        : ""}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      First known price: {formatMonthYear(data.priceHistory.observations[0].observedAt)}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5" data-testid="text-price-history-list">
+                    {[...data.priceHistory.observations].reverse().map((obs, idx) => (
+                      <div
+                        key={`${obs.observedAt}-${obs.amount}-${obs.currency}`}
+                        className="flex items-center justify-between gap-3 text-sm"
+                        data-testid={`row-price-history-${idx}`}
+                      >
+                        <span className="text-muted-foreground w-20 shrink-0">{formatMonthYear(obs.observedAt)}</span>
+                        <span className="flex-1 min-w-0 font-medium">
+                          {formatMoney(obs.amount, obs.currency)}
+                          {obs.billingInterval ? `/${formatInterval(obs.billingInterval).toLowerCase()}` : ""}
+                        </span>
+                        {idx === 0 && <span className="text-xs text-muted-foreground shrink-0">(current)</span>}
                       </div>
                     ))}
                   </div>

@@ -6,6 +6,7 @@ import {
   buildSubscriptionVaultResponse,
   determineSubscriptionAccessResult,
 } from "./subscriptionVault";
+import { buildPriceHistory } from "./priceHistory";
 import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
 
 // Fixture conventions mirror subscriptionCostEngine.test.ts's makeSub() —
@@ -241,6 +242,64 @@ describe("Phase 3B.9.5: buildSubscriptionVaultResponse", () => {
     expect(response.subscription.subscriptionStatus).toBe("active");
     expect(response.subscription.amount).toBe("20.00");
     expect(response.renewal.nextBillingDate).toBe("2027-08-01");
+  });
+});
+
+describe("Phase 3B.9.6B: buildSubscriptionVaultResponse includes priceHistory", () => {
+  it("GET /api/subscriptions/:id response includes a priceHistory field matching buildPriceHistory(events) exactly", () => {
+    const sub = makeSub();
+    const events = [
+      makeEvent({ extractedPrice: "20.00", extractedCurrency: "USD", extractedDate: "2026-01-01" }),
+      makeEvent({ extractedPrice: "22.00", extractedCurrency: "USD", extractedDate: "2026-06-01" }),
+    ];
+    const response = buildSubscriptionVaultResponse(sub, events, null);
+    expect(response.priceHistory).toEqual(buildPriceHistory(events));
+    expect(response.priceHistory.observationCount).toBe(2);
+    expect(response.priceHistory.currentPrice).toEqual({ amount: "22.00", currency: "USD", billingInterval: "monthly" });
+  });
+
+  it("no priced events -> priceHistory is empty, not omitted", () => {
+    const sub = makeSub();
+    const response = buildSubscriptionVaultResponse(sub, [], null);
+    expect(response.priceHistory.observations).toEqual([]);
+    expect(response.priceHistory.observationCount).toBe(0);
+    expect(response.priceHistory.currentPrice).toBeNull();
+  });
+});
+
+// Phase 3B.9.6A Step 4's "primary subscriptionId FK, fallback to merchant
+// match" branching lives in server/storage.ts's getCanonicalEventsForSubscription()
+// — a live DB query (SELECT ... WHERE subscription_id = $1, falling back to
+// a second SELECT), which this codebase has no mocking infrastructure for
+// (every existing *.test.ts file tests a pure function only; storage.ts
+// itself has zero unit tests anywhere in this repo). That specific
+// branching is verified against real production data instead, the same way
+// every other storage.ts DB-query behavior in this codebase has been
+// verified throughout this project — not skipped, just verified at a
+// different layer than unit tests. What IS unit-tested here is the pure
+// half of the same guarantee: buildSubscriptionVaultResponse() and
+// buildPriceHistory() only ever reflect the events actually passed in,
+// never anything else, which is what makes the DB layer's scoping
+// meaningful in the first place.
+describe("Phase 3B.9.6B: cross-user isolation (pure-function level)", () => {
+  it("two independent calls for two different users' subscriptions never leak into each other's response", () => {
+    const subA = makeSub({ id: "sub-A", userId: "user-A", canonicalMerchantName: "A-Service" });
+    const eventsA = [makeEvent({ userId: "user-A", canonicalMerchantName: "A-Service", extractedPrice: "10.00", extractedCurrency: "USD", extractedDate: "2026-01-01" })];
+
+    const subB = makeSub({ id: "sub-B", userId: "user-B", canonicalMerchantName: "B-Service" });
+    const eventsB = [makeEvent({ userId: "user-B", canonicalMerchantName: "B-Service", extractedPrice: "99.00", extractedCurrency: "EUR", extractedDate: "2026-02-01" })];
+
+    const responseA = buildSubscriptionVaultResponse(subA, eventsA, null);
+    const responseB = buildSubscriptionVaultResponse(subB, eventsB, null);
+
+    expect(responseA.subscription.canonicalMerchantName).toBe("A-Service");
+    expect(responseA.priceHistory.currentPrice?.amount).toBe("10.00");
+    expect(responseB.subscription.canonicalMerchantName).toBe("B-Service");
+    expect(responseB.priceHistory.currentPrice?.amount).toBe("99.00");
+
+    // Neither response contains any trace of the other user's data.
+    expect(JSON.stringify(responseA)).not.toContain("B-Service");
+    expect(JSON.stringify(responseB)).not.toContain("A-Service");
   });
 });
 
