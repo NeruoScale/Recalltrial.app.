@@ -7,7 +7,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bell, LogOut, Settings, Layers, Mail, Sparkles } from "lucide-react";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Bell, LogOut, Settings, Layers, Mail, Sparkles, ChevronRight } from "lucide-react";
 import type { ShadowSubscription } from "@shared/schema";
 
 // Phase 3B.7.3 / 3B.8 Step 4 / 3B.9.1: reads exclusively from
@@ -105,6 +106,196 @@ type SubscriptionsResponse = {
   messagesScanned: number | null;
 };
 
+// ─── Phase 3B.9.5: Subscription Vault detail view ───────────────────────────
+// Mirrors GET /api/subscriptions/:id's real response shape exactly
+// (server/subscriptionVault.ts's SubscriptionVaultResponse) — never a
+// guessed shape.
+
+type SubscriptionHistoryEntry = {
+  id: string;
+  date: string;
+  eventType: string;
+  eventTypeLabel: string;
+  amount: string | null;
+  currency: string | null;
+  confidence: number;
+  sourceMessageId: string;
+};
+
+type SubscriptionVaultResponse = {
+  subscription: {
+    id: string;
+    canonicalMerchantName: string;
+    canonicalMerchantDomain: string | null;
+    paymentProcessor: string | null;
+    subscriptionStatus: ShadowSubscription["subscriptionStatus"];
+    amount: string | null;
+    currency: string | null;
+    billingInterval: string | null;
+    billingIntervalSource: string | null;
+    billingIntervalConfidence: string | null;
+    nextBillingDate: string | null;
+    lastBillingDate: string | null;
+    promotedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  cost: {
+    monthlyCost: number | null;
+    annualCost: number | null;
+    monthlyEquivalent: number | null;
+    annualEquivalent: number | null;
+    currency: string | null;
+  };
+  billing: {
+    interval: string | null;
+    source: string | null;
+    confidence: string | null;
+    displayLabel: string;
+  };
+  renewal: {
+    nextBillingDate: string | null;
+    status: string;
+  };
+  history: SubscriptionHistoryEntry[];
+  detection: {
+    eventCount: number;
+    confidence: number;
+    resolutionMethod: string;
+  };
+};
+
+function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: string | null; onClose: () => void }) {
+  const { data, isLoading } = useQuery<SubscriptionVaultResponse>({
+    queryKey: ["/api/subscriptions", subscriptionId],
+    queryFn: getQueryFn({ on401: "throw" }),
+    enabled: !!subscriptionId,
+  });
+
+  return (
+    <Sheet open={!!subscriptionId} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-md overflow-y-auto" data-testid="sheet-subscription-detail">
+        {isLoading || !data ? (
+          <div className="space-y-3 mt-6">
+            <Skeleton className="h-8 w-2/3" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-40 w-full" />
+          </div>
+        ) : (
+          <>
+            <SheetHeader className="text-left">
+              <SheetTitle className="flex items-center gap-2 flex-wrap" data-testid="text-detail-merchant">
+                {data.subscription.canonicalMerchantName}
+                <span
+                  className={`inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${statusBadgeClasses(data.subscription.subscriptionStatus)}`}
+                  data-testid="text-detail-status"
+                >
+                  {statusLabel(data.subscription.subscriptionStatus)}
+                </span>
+              </SheetTitle>
+            </SheetHeader>
+
+            <div className="mt-4 space-y-6">
+              <div>
+                <div className="text-2xl font-bold" data-testid="text-detail-amount">
+                  {formatMoney(data.subscription.amount, data.subscription.currency)}
+                  {data.subscription.billingInterval ? ` / ${formatInterval(data.subscription.billingInterval).toLowerCase()}` : ""}
+                </div>
+                {data.cost.annualEquivalent !== null && (
+                  <div className="text-sm text-muted-foreground" data-testid="text-detail-annual-equivalent">
+                    ${data.cost.annualEquivalent.toFixed(2)} {data.cost.currency}/year
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold mb-2">Billing</h3>
+                <dl className="text-sm space-y-1.5">
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Amount</dt>
+                    <dd data-testid="text-detail-billing-amount">{formatMoney(data.subscription.amount, data.subscription.currency)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Frequency</dt>
+                    <dd data-testid="text-detail-billing-frequency">
+                      {formatInterval(data.billing.interval)} · {data.billing.displayLabel}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Monthly equivalent</dt>
+                    <dd data-testid="text-detail-monthly-equivalent">
+                      {data.cost.monthlyEquivalent !== null ? `$${data.cost.monthlyEquivalent.toFixed(2)}` : "Unknown"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Annual equivalent</dt>
+                    <dd data-testid="text-detail-annual-equivalent-row">
+                      {data.cost.annualEquivalent !== null ? `$${data.cost.annualEquivalent.toFixed(2)}` : "Unknown"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Next renewal</dt>
+                    <dd data-testid="text-detail-next-renewal">
+                      {data.renewal.nextBillingDate ? formatDate(data.renewal.nextBillingDate) : "Not available"}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold mb-2 flex items-center gap-1.5">
+                  <Mail className="h-3.5 w-3.5" /> Detection
+                </h3>
+                <dl className="text-sm space-y-1.5">
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Source</dt>
+                    <dd>Detected from your email</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Confidence</dt>
+                    <dd data-testid="text-detail-confidence">
+                      {data.detection.confidence >= 70 ? "High" : data.detection.confidence >= 40 ? "Medium" : "Low"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-muted-foreground">Emails detected</dt>
+                    <dd data-testid="text-detail-event-count">{data.detection.eventCount}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold mb-2">History</h3>
+                {data.history.length === 0 ? (
+                  <p className="text-sm text-muted-foreground" data-testid="text-detail-history-empty">No billing history detected yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {data.history.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex items-center justify-between gap-3 text-sm"
+                        data-testid={`row-history-${entry.id}`}
+                      >
+                        <span className="text-muted-foreground w-20 shrink-0">{formatShortDate(entry.date)}</span>
+                        <span className="shrink-0 font-medium">
+                          {entry.amount ? formatMoney(entry.amount, entry.currency) : "—"}
+                        </span>
+                        <span className="flex-1 min-w-0 truncate text-right text-muted-foreground" data-testid={`text-history-label-${entry.id}`}>
+                          {entry.eventTypeLabel}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 function formatMoney(amount: string | null, currency: string | null): string {
   if (!amount) return "Unknown";
   const n = Number(amount);
@@ -201,11 +392,15 @@ function formatBillingProvenance(sub: SubscriptionWithCost): string {
   }
 }
 
-function SubscriptionRow({ sub }: { sub: SubscriptionWithCost }) {
+function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onOpenDetail: (id: string) => void }) {
   const initial = sub.canonicalMerchantName.charAt(0).toUpperCase();
 
   return (
-    <Card data-testid={`card-subscription-${sub.id}`}>
+    <Card
+      data-testid={`card-subscription-${sub.id}`}
+      className="cursor-pointer hover-elevate"
+      onClick={() => onOpenDetail(sub.id)}
+    >
       <CardContent className="flex items-center gap-4 py-4">
         <Avatar className="h-10 w-10 shrink-0">
           <AvatarFallback className="bg-primary/10 text-primary text-sm font-bold">
@@ -239,6 +434,15 @@ function SubscriptionRow({ sub }: { sub: SubscriptionWithCost }) {
             Detected from your email · {sub.costConfidence} confidence
           </div>
         </div>
+
+        <button
+          type="button"
+          className="shrink-0 text-xs text-primary font-medium flex items-center gap-0.5 self-start"
+          data-testid={`button-view-details-${sub.id}`}
+          onClick={(e) => { e.stopPropagation(); onOpenDetail(sub.id); }}
+        >
+          View details <ChevronRight className="h-3.5 w-3.5" />
+        </button>
       </CardContent>
     </Card>
   );
@@ -422,6 +626,7 @@ function UpcomingChargesSection({ charges, summary }: { charges: UpcomingCharge[
 export default function SubscriptionsPage() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
+  const [selectedSubId, setSelectedSubId] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery<SubscriptionsResponse>({
     queryKey: ["/api/subscriptions"],
@@ -529,12 +734,14 @@ export default function SubscriptionsPage() {
 
             <div className="space-y-3">
               {subs.map((sub) => (
-                <SubscriptionRow key={sub.id} sub={sub} />
+                <SubscriptionRow key={sub.id} sub={sub} onOpenDetail={setSelectedSubId} />
               ))}
             </div>
           </>
         )}
       </main>
+
+      <SubscriptionDetailSheet subscriptionId={selectedSubId} onClose={() => setSelectedSubId(null)} />
     </div>
   );
 }

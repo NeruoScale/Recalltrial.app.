@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, lte, sql, count, desc, inArray } from "drizzle-orm";
+import { eq, and, isNull, lte, sql, count, desc, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
@@ -54,6 +54,9 @@ export interface IStorage {
   getShadowSubscriptionsForDashboard(): Promise<(ShadowSubscription & { userEmail: string })[]>;
   // Phase 3B.7.3: end-user "detected subscriptions" dashboard read path.
   getShadowSubscriptionsForUser(userId: string): Promise<ShadowSubscription[]>;
+  // Phase 3B.9.5: subscription vault detail view.
+  getShadowSubscriptionById(id: string, userId: string): Promise<ShadowSubscription | undefined>;
+  getCanonicalEventsForSubscription(subscription: ShadowSubscription): Promise<SubscriptionEvent[]>;
   getShadowSubscriptionMetrics(): Promise<{
     canonicalEvents: number;
     supersededClassifications: number;
@@ -708,6 +711,49 @@ export class DatabaseStorage implements IStorage {
         eq(subscriptions.resolutionStatus, "resolved")
       ))
       .orderBy(subscriptions.canonicalMerchantName);
+  }
+
+  // Phase 3B.9.5: subscription vault detail view. Scoped by id AND userId in
+  // the same WHERE clause (matches getTrialById's exact pattern) — a
+  // cross-user id comes back as undefined here, which is what lets the route
+  // return 404 (never 403) without an extra ownership check leaking anything.
+  async getShadowSubscriptionById(id: string, userId: string): Promise<ShadowSubscription | undefined> {
+    const [sub] = await db
+      .select()
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, id), eq(subscriptions.userId, userId)))
+      .limit(1);
+    return sub;
+  }
+
+  // Events are associated with a subscription by (userId, canonicalMerchantDomain)
+  // match — there is no populated subscriptionId FK column on
+  // subscription_events; see runBillingIntelligence() above for the existing
+  // precedent of this exact resolution, which this mirrors. That precedent's
+  // `eq(canonicalMerchantDomain, subscription.canonicalMerchantDomain ?? "")`
+  // has a latent gap for subscriptions with a genuinely NULL domain
+  // (processor-only/name-only resolution — a real, reachable case per
+  // merchantResolver.ts) since `col = ''` never matches a NULL row in
+  // Postgres; this version closes that gap by falling back to a
+  // canonicalMerchantName match (also matching NULL-domain events) whenever
+  // the subscription's own domain is null, rather than reproducing the gap.
+  async getCanonicalEventsForSubscription(subscription: ShadowSubscription): Promise<SubscriptionEvent[]> {
+    const merchantMatch = subscription.canonicalMerchantDomain
+      ? eq(subscriptionEvents.canonicalMerchantDomain, subscription.canonicalMerchantDomain)
+      : and(
+          isNull(subscriptionEvents.canonicalMerchantDomain),
+          eq(subscriptionEvents.canonicalMerchantName, subscription.canonicalMerchantName)
+        );
+
+    return db
+      .select()
+      .from(subscriptionEvents)
+      .where(and(
+        eq(subscriptionEvents.userId, subscription.userId),
+        eq(subscriptionEvents.isCanonical, true),
+        merchantMatch
+      ))
+      .orderBy(desc(subscriptionEvents.createdAt));
   }
 
   async getShadowSubscriptionMetrics(): Promise<{

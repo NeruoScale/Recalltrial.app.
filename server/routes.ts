@@ -14,6 +14,7 @@ import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials
 import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
 import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
 import { calculateRenewalCalendar } from "./renewalCalendar";
+import { buildSubscriptionVaultResponse, determineSubscriptionAccessResult } from "./subscriptionVault";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -360,6 +361,31 @@ export async function registerRoutes(
       });
     } catch (err) {
       console.error("Get subscriptions error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3B.9.5: Subscription Vault detail view. STRICT SECURITY: the
+  // storage lookup is scoped by (id AND userId) together, so a subscription
+  // belonging to a different user comes back as undefined — indistinguishable
+  // from a non-existent id, which is exactly why this always returns 404
+  // (never 403) on any access failure. requireAuth above already returns 401
+  // for a missing session before this handler ever runs.
+  app.get("/api/subscriptions/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const subscription = await storage.getShadowSubscriptionById(id, req.session.userId!);
+      const access = determineSubscriptionAccessResult(req.session.userId, subscription);
+
+      if (access.status === 401) return res.status(401).json({ message: "Not authenticated" });
+      if (access.status === 404) return res.status(404).json({ message: "Subscription not found" });
+
+      const events = await storage.getCanonicalEventsForSubscription(access.subscription);
+      const paymentProcessor = events.find((e) => e.paymentProcessor)?.paymentProcessor ?? null;
+
+      return res.json(buildSubscriptionVaultResponse(access.subscription, events, paymentProcessor));
+    } catch (err) {
+      console.error("Get subscription detail error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });
