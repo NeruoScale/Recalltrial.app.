@@ -47,6 +47,8 @@ export interface IStorage {
   // Phase 3B.5: shadow subscriptions — see the implementation for the "why"
   // on each. isShadow is always true; nothing here is read by production UX.
   upsertShadowSubscription(data: InsertShadowSubscription): Promise<ShadowSubscription>;
+  // Phase 3B.6: admin shadow-subscription preview dashboard read path.
+  getShadowSubscriptionsForDashboard(): Promise<(ShadowSubscription & { userEmail: string })[]>;
   getShadowSubscriptionMetrics(): Promise<{
     canonicalEvents: number;
     supersededClassifications: number;
@@ -608,6 +610,24 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return row;
+  }
+
+  // Phase 3B.6: admin-only preview dashboard. Reads exclusively from
+  // `subscriptions` — never from subscription_events/entity_resolution_
+  // candidates directly — so the dashboard can only ever show what already
+  // passed the full Gmail -> classification -> canonical event -> entity
+  // resolution -> shadow subscription pipeline (including the HARD SAFETY
+  // RULE in entityResolver.ts's isEligibleForShadowSubscription()). There is
+  // no unresolved/ambiguous row to filter out here because those never make
+  // it into this table in the first place.
+  async getShadowSubscriptionsForDashboard(): Promise<(ShadowSubscription & { userEmail: string })[]> {
+    const rows = await db
+      .select({ subscription: subscriptions, userEmail: users.email })
+      .from(subscriptions)
+      .innerJoin(users, eq(users.id, subscriptions.userId))
+      .where(eq(subscriptions.isShadow, true))
+      .orderBy(users.email, subscriptions.canonicalMerchantName);
+    return rows.map((r) => ({ ...r.subscription, userEmail: r.userEmail }));
   }
 
   async getShadowSubscriptionMetrics(): Promise<{

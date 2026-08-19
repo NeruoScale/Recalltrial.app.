@@ -761,6 +761,23 @@ export async function registerRoutes(
     }
   });
 
+  // Phase 3B.6: admin-only shadow-subscription preview dashboard. Read-only,
+  // same X-ADMIN-KEY gate as every other /api/admin/* route. isShadow is
+  // always true today — this never drives reminders or any user-facing UX.
+  app.get("/api/admin/subscriptions", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const rows = await storage.getShadowSubscriptionsForDashboard();
+      return res.json(rows);
+    } catch (err) {
+      console.error("Admin shadow-subscriptions error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
   app.get("/api/services/search", (req: Request, res: Response) => {
     const q = (req.query.q as string || "").trim();
     if (!q || q.length < 2) {

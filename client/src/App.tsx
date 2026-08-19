@@ -17,6 +17,7 @@ import TrialDetail from "@/pages/trial-detail";
 import SettingsPage from "@/pages/settings";
 import ReviewsPage from "@/pages/reviews";
 import AdminReviewsPage from "@/pages/admin-reviews";
+import AdminSubscriptionsPage from "@/pages/admin-subscriptions";
 import ReviewNewPage from "@/pages/review-new";
 import PricingPage from "@/pages/pricing";
 import BillingSuccess from "@/pages/billing-success";
@@ -44,6 +45,7 @@ function Router() {
       <Route path="/billing/success" component={BillingSuccess} />
       <Route path="/reviews" component={ReviewsPage} />
       <Route path="/admin/reviews" component={AdminReviewsPage} />
+      <Route path="/admin/subscriptions" component={AdminSubscriptionsPage} />
       <Route path="/review/new" component={ReviewNewPage} />
       <Route component={NotFound} />
     </Switch>
