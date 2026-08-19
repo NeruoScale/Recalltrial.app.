@@ -42,9 +42,25 @@ type CostSummary = {
   unknownCostCount: number;
 };
 
+type UpcomingCharge = {
+  subscriptionId: string;
+  merchant: string;
+  amount: string | null;
+  currency: string | null;
+  dueDate: string;
+  status: ShadowSubscription["subscriptionStatus"];
+};
+
+type UpcomingSummary = {
+  days: number;
+  byCurrency: Record<string, number>;
+};
+
 type SubscriptionsResponse = {
   subscriptions: SubscriptionWithCost[];
   summary: CostSummary;
+  upcomingCharges: UpcomingCharge[];
+  upcomingSummary: UpcomingSummary;
   messagesScanned: number | null;
 };
 
@@ -63,6 +79,10 @@ function formatInterval(interval: string | null): string {
 function formatDate(date: string | null): string {
   if (!date) return "Unknown";
   return new Date(date).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function formatShortDate(date: string): string {
+  return new Date(date).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function statusLabel(status: ShadowSubscription["subscriptionStatus"]): string {
@@ -179,6 +199,50 @@ function CostSummaryLines({ byCurrency, field }: { byCurrency: CostSummary["byCu
   );
 }
 
+// Phase 3B.9.2B Step 7: one row per upcoming charge, sorted by date
+// (server already sorts them), a divider, then a per-currency total line —
+// never a single blended number when multiple currencies are present.
+function UpcomingChargesSection({ charges, summary }: { charges: UpcomingCharge[]; summary: UpcomingSummary }) {
+  const currencyTotals = Object.entries(summary.byCurrency);
+
+  return (
+    <Card className="mb-6">
+      <CardContent className="py-4">
+        <h2 className="font-semibold mb-3" data-testid="text-upcoming-heading">
+          Upcoming charges (next {summary.days} days)
+        </h2>
+        {charges.length === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="text-upcoming-empty">
+            No upcoming charges in the next {summary.days} days.
+          </p>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {charges.map((charge) => (
+                <div key={charge.subscriptionId} className="flex items-center justify-between gap-3 text-sm" data-testid={`row-upcoming-${charge.subscriptionId}`}>
+                  <span className="text-muted-foreground w-14 shrink-0">{formatShortDate(charge.dueDate)}</span>
+                  <span className="flex-1 min-w-0 truncate">{charge.merchant}</span>
+                  <span className="font-medium shrink-0">
+                    {charge.amount ? `${formatMoney(charge.amount, charge.currency)}` : "Amount unavailable"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="border-t mt-3 pt-3 flex items-center justify-between text-sm font-semibold">
+              <span>Total</span>
+              <span data-testid="text-upcoming-total">
+                {currencyTotals.length === 0
+                  ? "Unknown"
+                  : currencyTotals.map(([currency, total]) => `$${total.toFixed(2)} ${currency}`).join(", ")}
+              </span>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SubscriptionsPage() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
@@ -277,6 +341,10 @@ export default function SubscriptionsPage() {
               <p className="text-xs text-muted-foreground mb-4" data-testid="text-incomplete-billing">
                 {incompleteTotal} subscription{incompleteTotal === 1 ? "" : "s"} {incompleteTotal === 1 ? "has" : "have"} incomplete billing information.
               </p>
+            )}
+
+            {data?.upcomingSummary && (
+              <UpcomingChargesSection charges={data.upcomingCharges ?? []} summary={data.upcomingSummary} />
             )}
 
             <div className="space-y-3">

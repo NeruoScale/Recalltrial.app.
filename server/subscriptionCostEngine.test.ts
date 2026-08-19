@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { calculateSubscriptionCosts } from "./subscriptionCostEngine";
+import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
 import type { ShadowSubscription } from "@shared/schema";
 
 let idCounter = 0;
@@ -273,5 +273,107 @@ describe("Phase 3B.9.1: strict boundaries — nothing beyond cost normalization"
     expect(result.id).toBe(sub.id);
     expect(result.canonicalMerchantDomain).toBe("anthropic.com");
     expect(result.resolutionStatus).toBe(sub.resolutionStatus);
+  });
+});
+
+describe("Phase 3B.9.2B: calculateUpcomingCharges()", () => {
+  const NOW = new Date("2026-08-19T00:00:00.000Z");
+
+  it("includes a charge within the 7-day window", () => {
+    const sub = makeSub({ nextBillingDate: "2026-08-24", subscriptionStatus: "active" }); // 5 days out
+    const result = calculateUpcomingCharges([sub], 7, NOW);
+    expect(result.charges).toHaveLength(1);
+    expect(result.charges[0].dueDate).toBe("2026-08-24");
+    expect(result.summary.days).toBe(7);
+  });
+
+  it("excludes a charge outside the 7-day window but includes it within 30", () => {
+    const sub = makeSub({ nextBillingDate: "2026-09-05", subscriptionStatus: "active" }); // 17 days out
+    expect(calculateUpcomingCharges([sub], 7, NOW).charges).toHaveLength(0);
+    expect(calculateUpcomingCharges([sub], 30, NOW).charges).toHaveLength(1);
+  });
+
+  it("includes a charge within the 90-day window that's outside 30", () => {
+    const sub = makeSub({ nextBillingDate: "2026-11-01", subscriptionStatus: "active" }); // ~74 days out
+    expect(calculateUpcomingCharges([sub], 30, NOW).charges).toHaveLength(0);
+    expect(calculateUpcomingCharges([sub], 90, NOW).charges).toHaveLength(1);
+  });
+
+  it("cancelled and expired subscriptions are excluded even with a near-term nextBillingDate", () => {
+    const subs = [
+      makeSub({ nextBillingDate: "2026-08-25", subscriptionStatus: "canceled" }),
+      makeSub({ nextBillingDate: "2026-08-25", subscriptionStatus: "expired" }),
+    ];
+    const result = calculateUpcomingCharges(subs, 30, NOW);
+    expect(result.charges).toHaveLength(0);
+  });
+
+  it("null amount is shown honestly (date + merchant, amount null) — never invented", () => {
+    const sub = makeSub({ nextBillingDate: "2026-08-25", amount: null, subscriptionStatus: "active" });
+    const result = calculateUpcomingCharges([sub], 30, NOW);
+    expect(result.charges).toHaveLength(1);
+    expect(result.charges[0].amount).toBeNull();
+    expect(result.charges[0].merchant).toBe(sub.canonicalMerchantName);
+    expect(result.charges[0].dueDate).toBe("2026-08-25");
+    // Doesn't contribute to any currency total since there's nothing to sum
+    expect(result.summary.byCurrency).toEqual({});
+  });
+
+  it("multiple currencies are never combined in the summary total", () => {
+    const subs = [
+      makeSub({ nextBillingDate: "2026-08-25", amount: "10.00", currency: "USD", subscriptionStatus: "active" }),
+      makeSub({ nextBillingDate: "2026-08-26", amount: "8.00", currency: "EUR", subscriptionStatus: "active" }),
+    ];
+    const result = calculateUpcomingCharges(subs, 30, NOW);
+    expect(result.summary.byCurrency).toEqual({ USD: 10, EUR: 8 });
+  });
+
+  it("user isolation: only subscriptions actually passed in ever appear — caller is responsible for scoping", () => {
+    const userASubs = [makeSub({ userId: "user-A", canonicalMerchantName: "A-Service", nextBillingDate: "2026-08-25", subscriptionStatus: "active" })];
+    const result = calculateUpcomingCharges(userASubs, 30, NOW);
+    expect(result.charges).toHaveLength(1);
+    expect(result.charges.every((c) => c.merchant === "A-Service")).toBe(true);
+  });
+
+  it("idempotent: calling twice with the same input returns the same result", () => {
+    const subs = [makeSub({ nextBillingDate: "2026-08-25", amount: "10.00", currency: "USD", subscriptionStatus: "active" })];
+    const a = calculateUpcomingCharges(subs, 30, NOW);
+    const b = calculateUpcomingCharges(subs, 30, NOW);
+    expect(a).toEqual(b);
+  });
+
+  it("no upcoming charges when nextBillingDate is null", () => {
+    const sub = makeSub({ nextBillingDate: null, subscriptionStatus: "active" });
+    const result = calculateUpcomingCharges([sub], 30, NOW);
+    expect(result.charges).toHaveLength(0);
+  });
+
+  it("past_due is included only when its date is still genuinely in the future (not an already-missed date)", () => {
+    const futureDated = makeSub({ nextBillingDate: "2026-08-25", subscriptionStatus: "past_due" });
+    const overdue = makeSub({ nextBillingDate: "2026-08-01", subscriptionStatus: "past_due" }); // before NOW
+    const result = calculateUpcomingCharges([futureDated, overdue], 30, NOW);
+    expect(result.charges).toHaveLength(1);
+    expect(result.charges[0].dueDate).toBe("2026-08-25");
+  });
+
+  it("trial status is included", () => {
+    const sub = makeSub({ nextBillingDate: "2026-08-25", subscriptionStatus: "trial" });
+    const result = calculateUpcomingCharges([sub], 30, NOW);
+    expect(result.charges).toHaveLength(1);
+  });
+
+  it("charges are sorted by dueDate ascending", () => {
+    const subs = [
+      makeSub({ nextBillingDate: "2026-09-01", canonicalMerchantName: "Later", subscriptionStatus: "active" }),
+      makeSub({ nextBillingDate: "2026-08-20", canonicalMerchantName: "Sooner", subscriptionStatus: "active" }),
+    ];
+    const result = calculateUpcomingCharges(subs, 30, NOW);
+    expect(result.charges.map((c) => c.merchant)).toEqual(["Sooner", "Later"]);
+  });
+
+  it("a due date exactly today is included (0 days out)", () => {
+    const sub = makeSub({ nextBillingDate: "2026-08-19", subscriptionStatus: "active" });
+    const result = calculateUpcomingCharges([sub], 7, NOW);
+    expect(result.charges).toHaveLength(1);
   });
 });

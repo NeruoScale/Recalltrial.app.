@@ -195,3 +195,93 @@ export function calculateSubscriptionCosts(userId: string, subscriptions: Shadow
     },
   };
 }
+
+// ─── Upcoming charges (Phase 3B.9.2B Step 5) ────────────────────────────────
+//
+// Deliberately separate from calculateSubscriptionCosts() above — this
+// answers "what's due soon," not "what does this cost normalized to a
+// month/year." Still the same discipline: no DB calls, decimal-safe (reuses
+// the same parseAmountToCents/centsToDollars this file already has), never
+// combines currencies, never invents an amount.
+
+export type UpcomingCharge = {
+  subscriptionId: string;
+  merchant: string;
+  amount: string | null;
+  currency: string | null;
+  dueDate: string;
+  status: ShadowSubscription["subscriptionStatus"];
+};
+
+export type UpcomingChargesResult = {
+  charges: UpcomingCharge[];
+  summary: {
+    days: number;
+    byCurrency: Record<string, number>;
+  };
+};
+
+// active/trial: any future nextBillingDate counts, by definition of the
+// status. past_due: only "if nextBillingDate is known and trustworthy" —
+// implemented as the SAME universal "must actually be in the future" check
+// applied to every status below, rather than a past_due-specific branch: a
+// past_due row's stored date is often the date IT FAILED (now in the past),
+// which is exactly what "trustworthy" is warning against showing as
+// upcoming — a plain future-date check naturally excludes that case without
+// needing separate logic per status.
+const UPCOMING_ELIGIBLE_STATUSES = new Set(["active", "trial", "past_due"]);
+
+/**
+ * calculateUpcomingCharges(): subscriptions[] must already be scoped to one
+ * user by the caller (this function has no userId parameter — see
+ * server/routes.ts's GET /api/subscriptions, which passes only that user's
+ * rows). `now` defaults to the real current time; exposed as an optional
+ * param purely so tests can pin it, matching the same pattern already used
+ * by computeSubscriptionReminderPlan() in subscriptionLifecycle.ts.
+ */
+export function calculateUpcomingCharges(
+  subscriptions: ShadowSubscription[],
+  windowDays: 7 | 30 | 90,
+  now: Date = new Date()
+): UpcomingChargesResult {
+  const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const windowEndMs = todayMs + windowDays * 24 * 60 * 60 * 1000;
+
+  const charges: UpcomingCharge[] = [];
+  const byCurrencyCents: Record<string, number> = {};
+
+  for (const sub of subscriptions) {
+    if (!UPCOMING_ELIGIBLE_STATUSES.has(sub.subscriptionStatus)) continue;
+    if (!sub.nextBillingDate) continue;
+
+    const dueMs = Date.parse(sub.nextBillingDate + "T00:00:00.000Z");
+    if (Number.isNaN(dueMs)) continue;
+    if (dueMs < todayMs || dueMs > windowEndMs) continue;
+
+    charges.push({
+      subscriptionId: sub.id,
+      merchant: sub.canonicalMerchantName,
+      amount: sub.amount,
+      currency: sub.currency,
+      dueDate: sub.nextBillingDate,
+      status: sub.subscriptionStatus,
+    });
+
+    const amountCents = parseAmountToCents(sub.amount);
+    if (amountCents !== null && sub.currency) {
+      byCurrencyCents[sub.currency] = (byCurrencyCents[sub.currency] || 0) + amountCents;
+    }
+  }
+
+  charges.sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+
+  const byCurrency: Record<string, number> = {};
+  for (const [currency, cents] of Object.entries(byCurrencyCents)) {
+    byCurrency[currency] = centsToDollars(cents);
+  }
+
+  return {
+    charges,
+    summary: { days: windowDays, byCurrency },
+  };
+}

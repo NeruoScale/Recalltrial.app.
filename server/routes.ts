@@ -12,7 +12,7 @@ import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
 import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
 import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
-import { calculateSubscriptionCosts } from "./subscriptionCostEngine";
+import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -329,6 +329,8 @@ export async function registerRoutes(
   // pure, deterministic, no DB calls of its own — which adds
   // monthlyCost/annualCost/costConfidence per subscription and a cost
   // summary. userId scoping is unchanged (still req.session.userId).
+  // Phase 3B.9.2B: also runs through calculateUpcomingCharges() (default
+  // 30-day window) — same `subs` array, no extra DB query needed.
   app.get("/api/subscriptions", requireAuth, async (req: Request, res: Response) => {
     try {
       const [subs, user] = await Promise.all([
@@ -336,9 +338,12 @@ export async function registerRoutes(
         storage.getUserById(req.session.userId!),
       ]);
       const { subscriptions: subscriptionsWithCosts, summary } = calculateSubscriptionCosts(req.session.userId!, subs);
+      const { charges: upcomingCharges, summary: upcomingSummary } = calculateUpcomingCharges(subs, 30);
       return res.json({
         subscriptions: subscriptionsWithCosts,
         summary,
+        upcomingCharges,
+        upcomingSummary,
         messagesScanned: user?.lastScanMessagesProcessed ?? null,
       });
     } catch (err) {
