@@ -124,7 +124,7 @@ export function computeLifecycleTransition(
 
 export type LifecycleRelevantEvent = Pick<
   SubscriptionEvent,
-  "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval"
+  "id" | "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval"
 >;
 
 export type SubscriptionLifecycleUpdate = {

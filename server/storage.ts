@@ -450,7 +450,7 @@ export class DatabaseStorage implements IStorage {
     // independent event — see server/canonicalEvents.ts for the decision
     // logic. This whole method runs in a transaction so the "old row
     // superseded + new row canonical" state change is atomic.
-    const written = await db.transaction(async (tx) => {
+    const writtenId: string | null = await db.transaction(async (tx): Promise<string | null> => {
       const existingRows = await tx
         .select()
         .from(subscriptionEvents)
@@ -471,7 +471,7 @@ export class DatabaseStorage implements IStorage {
             },
           })
           .returning({ id: subscriptionEvents.id });
-        return result.length > 0;
+        return result.length > 0 ? result[0].id : null;
       }
 
       // first_generation or reclassification: this scan produces a new
@@ -510,7 +510,7 @@ export class DatabaseStorage implements IStorage {
         })
         .returning({ id: subscriptionEvents.id });
 
-      if (!canonicalRow) return false;
+      if (!canonicalRow) return null;
 
       if (decision.kind === "reclassification") {
         await tx.update(subscriptionEvents)
@@ -524,7 +524,7 @@ export class DatabaseStorage implements IStorage {
         }
       }
 
-      return true;
+      return canonicalRow.id;
     });
 
     // Phase 3B.8: the lifecycle engine runs AFTER the event write commits,
@@ -532,9 +532,10 @@ export class DatabaseStorage implements IStorage {
     // the underlying subscription_event write succeeded or roll it back.
     // Same isolation pattern as gmail.ts's sub-detector write relative to
     // the trial-suggestion pipeline.
-    if (written) {
+    if (writtenId) {
       try {
         await this.applyLifecycleEventToSubscription({
+          id: writtenId,
           eventType: data.eventType,
           extractedPrice: data.extractedPrice ?? null,
           extractedCurrency: data.extractedCurrency ?? null,
@@ -548,7 +549,7 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
-    return written;
+    return writtenId !== null;
   }
 
   async getSubscriptionEventMetrics(): Promise<{
@@ -726,18 +727,29 @@ export class DatabaseStorage implements IStorage {
     return sub;
   }
 
-  // Events are associated with a subscription by (userId, canonicalMerchantDomain)
-  // match — there is no populated subscriptionId FK column on
-  // subscription_events; see runBillingIntelligence() above for the existing
-  // precedent of this exact resolution, which this mirrors. That precedent's
-  // `eq(canonicalMerchantDomain, subscription.canonicalMerchantDomain ?? "")`
-  // has a latent gap for subscriptions with a genuinely NULL domain
-  // (processor-only/name-only resolution — a real, reachable case per
-  // merchantResolver.ts) since `col = ''` never matches a NULL row in
-  // Postgres; this version closes that gap by falling back to a
-  // canonicalMerchantName match (also matching NULL-domain events) whenever
-  // the subscription's own domain is null, rather than reproducing the gap.
+  // Phase 3B.9.6A Step 4: PRIMARY lookup is now the real subscriptionId FK
+  // (populated going forward by applyLifecycleEventToSubscription() above,
+  // and backfilled for the historical backlog by server/migrate.ts's
+  // one-time backfill). The userId+domain/name heuristic below is now only
+  // a FALLBACK for whatever the backfill couldn't uniquely resolve
+  // (ambiguous or unmatched rows) — logged explicitly whenever it fires so
+  // that usage is visible/auditable, not silent.
   async getCanonicalEventsForSubscription(subscription: ShadowSubscription): Promise<SubscriptionEvent[]> {
+    const byForeignKey = await db
+      .select()
+      .from(subscriptionEvents)
+      .where(and(
+        eq(subscriptionEvents.subscriptionId, subscription.id),
+        eq(subscriptionEvents.isCanonical, true)
+      ))
+      .orderBy(desc(subscriptionEvents.createdAt));
+
+    if (byForeignKey.length > 0) {
+      return byForeignKey;
+    }
+
+    console.log(`[Vault] using merchant-match fallback for event (subscriptionId not populated): ${subscription.canonicalMerchantName}`);
+
     const merchantMatch = subscription.canonicalMerchantDomain
       ? eq(subscriptionEvents.canonicalMerchantDomain, subscription.canonicalMerchantDomain)
       : and(
@@ -1037,6 +1049,19 @@ export class DatabaseStorage implements IStorage {
     if (!existing) {
       return { applied: false };
     }
+
+    // Phase 3B.9.6A Step 3: immediately stamp this canonical event with the
+    // subscription it resolved to — every future event now gets an
+    // authoritative FK at write time, rather than relying on the
+    // userId+domain/name heuristic that getCanonicalEventsForSubscription()
+    // still needs as a fallback for the historical backlog (see
+    // server/migrate.ts's one-time backfill for those). Safe to run
+    // unconditionally on every call (not just when something else changes):
+    // the value is stable once set, so re-setting it to the same id is a
+    // harmless no-op write.
+    await db.update(subscriptionEvents)
+      .set({ subscriptionId: existing.id })
+      .where(eq(subscriptionEvents.id, event.id));
 
     const { transition, fields, billingIntervalChange } = applyEventToSubscription(event, existing);
 

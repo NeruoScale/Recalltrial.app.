@@ -433,5 +433,47 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscriptions billing intelligence columns:", err.message);
   }
 
+  // ── Phase 3B.9.6A: subscriptionId FK backfill ──
+  // Idempotent by construction: scoped to WHERE is_canonical = true AND
+  // subscription_id IS NULL, so already-backfilled rows (from a previous
+  // run of this same migration, or from Step 3's live wiring populating it
+  // going forward) are excluded on every subsequent run — nothing left to
+  // update once the eligible backlog is cleared. Only links a row when
+  // EXACTLY ONE subscription matches (HAVING COUNT(*) = 1) — ambiguous
+  // (2+) and unmatched (0) rows are silently left alone, never guessed.
+  try {
+    const result = await db.execute(sql`
+      WITH eligible AS (
+        SELECT id, user_id, canonical_merchant_domain, canonical_merchant_name
+        FROM subscription_events
+        WHERE is_canonical = true AND subscription_id IS NULL
+      ),
+      matches AS (
+        SELECT e.id AS event_id, s.id AS subscription_id
+        FROM eligible e
+        JOIN subscriptions s
+          ON s.user_id = e.user_id
+          AND (
+            (e.canonical_merchant_domain IS NOT NULL AND s.canonical_merchant_domain = e.canonical_merchant_domain)
+            OR
+            (e.canonical_merchant_domain IS NULL AND s.canonical_merchant_name = e.canonical_merchant_name)
+          )
+      ),
+      unique_matches AS (
+        SELECT event_id, MIN(subscription_id) AS subscription_id
+        FROM matches
+        GROUP BY event_id
+        HAVING COUNT(*) = 1
+      )
+      UPDATE subscription_events se
+      SET subscription_id = um.subscription_id
+      FROM unique_matches um
+      WHERE se.id = um.event_id;
+    `);
+    console.log(`[migrate] subscriptionId FK backfill: ${result.rowCount ?? 0} rows linked`);
+  } catch (err: any) {
+    console.error("[migrate] subscriptionId FK backfill:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
