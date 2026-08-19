@@ -13,6 +13,7 @@ import { searchServices } from "./serviceSearch";
 import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
 import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
 import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
+import { calculateRenewalCalendar } from "./renewalCalendar";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -335,6 +336,9 @@ export async function registerRoutes(
   // billingIntervalConfidence are already present on `subs` (read straight
   // from the DB row) and pass through calculateSubscriptionCosts() via its
   // ShadowSubscription spread — no separate wiring needed here.
+  // Phase 3B.9.4: renewalCalendar runs calculateRenewalCalendar() twice
+  // (30/90-day windows), using the user's own configured timezone — same
+  // `subs` array, still no extra DB query.
   app.get("/api/subscriptions", requireAuth, async (req: Request, res: Response) => {
     try {
       const [subs, user] = await Promise.all([
@@ -343,11 +347,15 @@ export async function registerRoutes(
       ]);
       const { subscriptions: subscriptionsWithCosts, summary } = calculateSubscriptionCosts(req.session.userId!, subs);
       const { charges: upcomingCharges, summary: upcomingSummary } = calculateUpcomingCharges(subs, 30);
+      const timezone = user?.timezone || "UTC";
+      const next30days = calculateRenewalCalendar(subs, 30, timezone);
+      const next90days = calculateRenewalCalendar(subs, 90, timezone);
       return res.json({
         subscriptions: subscriptionsWithCosts,
         summary,
         upcomingCharges,
         upcomingSummary,
+        renewalCalendar: { next30days, next90days },
         messagesScanned: user?.lastScanMessagesProcessed ?? null,
       });
     } catch (err) {

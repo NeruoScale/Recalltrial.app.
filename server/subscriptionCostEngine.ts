@@ -52,6 +52,10 @@ export type SubscriptionCostResult = {
 };
 
 // ─── Decimal-safe cents arithmetic ──────────────────────────────────────────
+//
+// Exported (Phase 3B.9.4) so server/renewalCalendar.ts can reuse the exact
+// same parsing/rounding discipline for its own currency totals instead of
+// re-deriving a second, potentially-diverging implementation.
 
 /**
  * Parses a Postgres decimal(10,2) string into integer cents. Returns null
@@ -60,7 +64,7 @@ export type SubscriptionCostResult = {
  * a real recurring charge; treated identically to missing data downstream,
  * never as $0 and never as a negative total).
  */
-function parseAmountToCents(amount: string | null): number | null {
+export function parseAmountToCents(amount: string | null): number | null {
   if (amount === null) return null;
   const trimmed = amount.trim();
   if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null; // no leading '-' allowed -> rejects negatives too
@@ -75,7 +79,7 @@ function divRoundHalfUp(numerator: number, denominator: number): number {
   return Math.floor((numerator * 2 + denominator) / (denominator * 2));
 }
 
-function centsToDollars(cents: number): number {
+export function centsToDollars(cents: number): number {
   return cents / 100;
 }
 

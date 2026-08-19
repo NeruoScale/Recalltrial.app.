@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
@@ -56,11 +57,51 @@ type UpcomingSummary = {
   byCurrency: Record<string, number>;
 };
 
+type RenewalCalendarEntry = {
+  subscriptionId: string;
+  merchant: string;
+  dueDate: string;
+  amount: string | null;
+  currency: string | null;
+  status: ShadowSubscription["subscriptionStatus"];
+  billingInterval: string | null;
+  billingIntervalSource: string | null;
+  amountKnown: boolean;
+  intervalKnown: boolean;
+  isPastDue: boolean;
+};
+
+type UnknownDateSubscription = {
+  subscriptionId: string;
+  merchant: string;
+  amount: string | null;
+  currency: string | null;
+  status: ShadowSubscription["subscriptionStatus"];
+  billingInterval: string | null;
+};
+
+type RenewalCalendarWindow = {
+  upcomingRenewals: RenewalCalendarEntry[];
+  unknownDateSubscriptions: UnknownDateSubscription[];
+  upcomingSummary: {
+    windowDays: number;
+    byCurrency: Record<string, number>;
+    knownChargeCount: number;
+    unknownAmountCount: number;
+  };
+};
+
+type RenewalCalendar = {
+  next30days: RenewalCalendarWindow;
+  next90days: RenewalCalendarWindow;
+};
+
 type SubscriptionsResponse = {
   subscriptions: SubscriptionWithCost[];
   summary: CostSummary;
   upcomingCharges: UpcomingCharge[];
   upcomingSummary: UpcomingSummary;
+  renewalCalendar: RenewalCalendar;
   messagesScanned: number | null;
 };
 
@@ -221,6 +262,119 @@ function CostSummaryLines({ byCurrency, field }: { byCurrency: CostSummary["byCu
   );
 }
 
+// Phase 3B.9.4 Step 3: driven entirely by nextBillingDate, never projected
+// from billingInterval — one row per subscription that actually has a known
+// due date within the selected window. isPastDue (a lifecycle-status
+// signal, not a date one — see server/renewalCalendar.ts) overrides the
+// normal status badge with a plain "Past due" label, matching the real
+// shape seen in production: a past_due subscription's nextBillingDate is
+// often still in the future (the next retry date), so date and status can
+// legitimately disagree. Subscriptions with NO known date get their own
+// collapsed section instead of being silently omitted.
+function RenewalCalendarSection({ calendar }: { calendar: RenewalCalendar }) {
+  const [windowDays, setWindowDays] = useState<30 | 90>(30);
+  const [showUnknownDates, setShowUnknownDates] = useState(false);
+
+  const view = windowDays === 30 ? calendar.next30days : calendar.next90days;
+  const { upcomingRenewals, unknownDateSubscriptions, upcomingSummary } = view;
+  const knownTotalLine = Object.entries(upcomingSummary.byCurrency)
+    .map(([currency, total]) => `$${total.toFixed(2)} ${currency}`)
+    .join(", ");
+
+  return (
+    <Card className="mb-6">
+      <CardContent className="py-4">
+        <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+          <h2 className="font-semibold" data-testid="text-renewal-calendar-heading">Renewal calendar</h2>
+          <div className="flex gap-1">
+            <Button
+              size="sm"
+              variant={windowDays === 30 ? "default" : "outline"}
+              onClick={() => setWindowDays(30)}
+              data-testid="button-window-30"
+            >
+              Next 30 days
+            </Button>
+            <Button
+              size="sm"
+              variant={windowDays === 90 ? "default" : "outline"}
+              onClick={() => setWindowDays(90)}
+              data-testid="button-window-90"
+            >
+              Next 90 days
+            </Button>
+          </div>
+        </div>
+
+        {upcomingRenewals.length === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="text-renewal-calendar-empty">
+            No upcoming renewals in the next {windowDays} days.
+          </p>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {upcomingRenewals.map((entry) => (
+                <div
+                  key={entry.subscriptionId}
+                  className="flex items-center justify-between gap-3 text-sm"
+                  data-testid={`row-renewal-${entry.subscriptionId}`}
+                >
+                  <span className="text-muted-foreground w-14 shrink-0">{formatShortDate(entry.dueDate)}</span>
+                  <span className="flex-1 min-w-0 truncate">{entry.merchant}</span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {entry.amountKnown ? formatMoney(entry.amount, entry.currency) : "Amount unavailable"}
+                  </span>
+                  <span
+                    className={`shrink-0 inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${statusBadgeClasses(entry.isPastDue ? "past_due" : entry.status)}`}
+                  >
+                    {entry.isPastDue ? "Past due" : statusLabel(entry.status)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground mt-3" data-testid="text-renewal-calendar-summary">
+              {upcomingRenewals.length} upcoming renewal{upcomingRenewals.length === 1 ? "" : "s"}
+              {knownTotalLine ? ` · ${knownTotalLine} known` : ""}
+            </p>
+            {upcomingSummary.unknownAmountCount > 0 && (
+              <p className="text-xs text-muted-foreground" data-testid="text-renewal-calendar-unknown-amount">
+                + {upcomingSummary.unknownAmountCount} charge{upcomingSummary.unknownAmountCount === 1 ? "" : "s"} with unknown amount
+              </p>
+            )}
+          </>
+        )}
+
+        {unknownDateSubscriptions.length > 0 && (
+          <div className="mt-4 pt-3 border-t">
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline"
+              onClick={() => setShowUnknownDates((v) => !v)}
+              data-testid="button-toggle-unknown-dates"
+            >
+              {unknownDateSubscriptions.length} subscription{unknownDateSubscriptions.length === 1 ? "" : "s"} without a known renewal date
+            </button>
+            {showUnknownDates && (
+              <div className="mt-2 space-y-1">
+                {unknownDateSubscriptions.map((sub) => (
+                  <div
+                    key={sub.subscriptionId}
+                    className="text-xs text-muted-foreground flex items-center justify-between gap-3"
+                    data-testid={`row-unknown-date-${sub.subscriptionId}`}
+                  >
+                    <span className="truncate">{sub.merchant}</span>
+                    <span className="shrink-0">{sub.amount ? formatMoney(sub.amount, sub.currency) : "Amount unavailable"}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // Phase 3B.9.2B Step 7: one row per upcoming charge, sorted by date
 // (server already sorts them), a divider, then a per-currency total line —
 // never a single blended number when multiple currencies are present.
@@ -363,6 +517,10 @@ export default function SubscriptionsPage() {
               <p className="text-xs text-muted-foreground mb-4" data-testid="text-incomplete-billing">
                 {incompleteTotal} subscription{incompleteTotal === 1 ? "" : "s"} {incompleteTotal === 1 ? "has" : "have"} incomplete billing information.
               </p>
+            )}
+
+            {data?.renewalCalendar && (
+              <RenewalCalendarSection calendar={data.renewalCalendar} />
             )}
 
             {data?.upcomingSummary && (
