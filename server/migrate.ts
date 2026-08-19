@@ -365,5 +365,40 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] promotion columns:", err.message);
   }
 
+  // ── Phase 3B.8: lifecycle "expired" state + subscription-native reminders ──
+  try {
+    // ALTER TYPE ... ADD VALUE cannot run inside a DO $$ ... $$ block in
+    // Postgres (unlike CREATE TYPE above) — IF NOT EXISTS as a plain
+    // top-level statement is the correct idempotent form here.
+    await db.execute(sql`
+      ALTER TYPE shadow_subscription_status ADD VALUE IF NOT EXISTS 'expired';
+    `);
+    console.log("[migrate] shadow_subscription_status.expired OK");
+  } catch (err: any) {
+    console.error("[migrate] shadow_subscription_status.expired:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS subscription_reminders (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        subscription_id varchar NOT NULL REFERENCES subscriptions(id),
+        user_id varchar NOT NULL REFERENCES users(id),
+        remind_at timestamp NOT NULL,
+        type reminder_type NOT NULL,
+        status reminder_status NOT NULL DEFAULT 'PENDING',
+        sent_at timestamp,
+        provider text DEFAULT 'resend',
+        provider_message_id text,
+        last_error text,
+        created_at timestamp DEFAULT now() NOT NULL,
+        CONSTRAINT subscription_reminders_sub_type_unique UNIQUE (subscription_id, type)
+      );
+    `);
+    console.log("[migrate] subscription_reminders table OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_reminders table:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

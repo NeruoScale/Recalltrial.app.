@@ -857,6 +857,29 @@ export async function registerRoutes(
     }
   });
 
+  // Phase 3B.8 Step 5: controlled trigger for subscription-native reminder
+  // generation. Same X-ADMIN-KEY gate. Deliberately NOT wired into the
+  // hourly cron yet — Step 5 is the last, most cautious step of this phase,
+  // and creating reminder rows (never sends them — that's a separate,
+  // future pipeline) stays admin-triggered until this has been observed
+  // against real production data, consistent with how every other write
+  // path in this feature line (entity resolution, promotion) was rolled
+  // out.
+  app.post("/api/admin/subscriptions/generate-reminders", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const subscriptionId: string | undefined = req.body?.subscriptionId || undefined;
+      const result = await storage.generateRemindersForEligibleSubscriptions(subscriptionId);
+      return res.json(result);
+    } catch (err) {
+      console.error("Admin reminder-generation error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
   app.get("/api/services/search", (req: Request, res: Response) => {
     const q = (req.query.q as string || "").trim();
     if (!q || q.length < 2) {

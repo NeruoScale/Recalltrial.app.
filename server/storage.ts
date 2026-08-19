@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, lte, sql, count, desc, inArray } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
+import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -76,6 +77,15 @@ export interface IStorage {
     ineligible: Array<{ subscription: ShadowSubscription; reason: string }>;
     alreadyActive: ShadowSubscription[];
   }>;
+
+  // Phase 3B.8: subscription lifecycle engine — see server/subscriptionLifecycle.ts
+  // for the pure decision logic this orchestrates against the DB.
+  applyLifecycleEventToSubscription(event: LifecycleRelevantEvent): Promise<{
+    applied: boolean;
+    transition?: LifecycleTransitionResult;
+    subscription?: ShadowSubscription;
+  }>;
+  generateRemindersForEligibleSubscriptions(subscriptionId?: string): Promise<{ created: number; skipped: number }>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -435,7 +445,7 @@ export class DatabaseStorage implements IStorage {
     // independent event — see server/canonicalEvents.ts for the decision
     // logic. This whole method runs in a transaction so the "old row
     // superseded + new row canonical" state change is atomic.
-    return db.transaction(async (tx) => {
+    const written = await db.transaction(async (tx) => {
       const existingRows = await tx
         .select()
         .from(subscriptionEvents)
@@ -511,6 +521,28 @@ export class DatabaseStorage implements IStorage {
 
       return true;
     });
+
+    // Phase 3B.8: the lifecycle engine runs AFTER the event write commits,
+    // in its own try/catch — a lifecycle failure must never affect whether
+    // the underlying subscription_event write succeeded or roll it back.
+    // Same isolation pattern as gmail.ts's sub-detector write relative to
+    // the trial-suggestion pipeline.
+    if (written) {
+      try {
+        await this.applyLifecycleEventToSubscription({
+          eventType: data.eventType,
+          extractedPrice: data.extractedPrice ?? null,
+          extractedCurrency: data.extractedCurrency ?? null,
+          extractedDate: data.extractedDate ?? null,
+          userId: data.userId,
+          canonicalMerchantDomain: data.canonicalMerchantDomain ?? null,
+        });
+      } catch (err) {
+        console.error("[Lifecycle] failed to apply event to subscription:", err);
+      }
+    }
+
+    return written;
   }
 
   async getSubscriptionEventMetrics(): Promise<{
@@ -924,6 +956,102 @@ export class DatabaseStorage implements IStorage {
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
+  }
+
+  // ── Phase 3B.8: subscription lifecycle engine ────────────────────────────────
+  //
+  // "resolve existing subscription (by userId + canonicalMerchantDomain)" —
+  // if canonicalMerchantDomain is null (processor-only/no-domain events) or
+  // no matching subscriptions row exists, this is a deliberate no-op: entity
+  // resolution owns creation, this engine only ever updates something that
+  // already exists (STEP 2's explicit rule).
+  async applyLifecycleEventToSubscription(event: LifecycleRelevantEvent): Promise<{
+    applied: boolean;
+    transition?: LifecycleTransitionResult;
+    subscription?: ShadowSubscription;
+  }> {
+    if (!event.canonicalMerchantDomain) {
+      return { applied: false };
+    }
+
+    const [existing] = await db
+      .select()
+      .from(subscriptions)
+      .where(and(
+        eq(subscriptions.userId, event.userId),
+        eq(subscriptions.canonicalMerchantDomain, event.canonicalMerchantDomain)
+      ))
+      .limit(1);
+
+    if (!existing) {
+      return { applied: false };
+    }
+
+    const { transition, fields } = applyEventToSubscription(event, existing);
+
+    if (Object.keys(fields).length === 0) {
+      // no_op, or a data_update whose event carried no actual new data —
+      // nothing to write, but still report the transition for logging.
+      if (transition.kind === "state_change") {
+        console.log(`[Lifecycle] ${existing.canonicalMerchantName}: ${transition.from} -> ${transition.to} (${transition.reason})`);
+      }
+      return { applied: transition.kind !== "no_op", transition, subscription: existing };
+    }
+
+    const [updated] = await db
+      .update(subscriptions)
+      .set({ ...fields, updatedAt: new Date() })
+      .where(eq(subscriptions.id, existing.id))
+      .returning();
+
+    if (transition.kind === "state_change") {
+      console.log(`[Lifecycle] ${existing.canonicalMerchantName}: ${transition.from} -> ${transition.to} (${transition.reason})`);
+    } else {
+      console.log(`[Lifecycle] ${existing.canonicalMerchantName}: ${transition.kind} (${transition.reason})`);
+    }
+
+    return { applied: true, transition, subscription: updated };
+  }
+
+  // "Check for existing reminders before creating (no duplicates)" is
+  // enforced by the (subscription_id, type) unique constraint +
+  // onConflictDoNothing — idempotent under concurrent/repeated calls, not
+  // just sequential ones. Scoped to one subscription when subscriptionId is
+  // given, otherwise runs across every eligible subscription.
+  async generateRemindersForEligibleSubscriptions(subscriptionId?: string): Promise<{ created: number; skipped: number }> {
+    const candidates = subscriptionId
+      ? await db.select().from(subscriptions).where(eq(subscriptions.id, subscriptionId))
+      : await db.select().from(subscriptions);
+
+    let created = 0;
+    let skipped = 0;
+
+    for (const sub of candidates) {
+      if (!isEligibleForReminder(sub)) {
+        skipped++;
+        continue;
+      }
+
+      const user = await db.select().from(users).where(eq(users.id, sub.userId)).limit(1);
+      const timezone = user[0]?.timezone || "UTC";
+      const plans = computeSubscriptionReminderPlan(sub.nextBillingDate!, new Date(), timezone);
+
+      for (const plan of plans) {
+        const inserted = await db.insert(subscriptionReminders).values({
+          subscriptionId: sub.id,
+          userId: sub.userId,
+          remindAt: plan.remindAt,
+          type: plan.type,
+        })
+          .onConflictDoNothing({ target: [subscriptionReminders.subscriptionId, subscriptionReminders.type] })
+          .returning({ id: subscriptionReminders.id });
+
+        if (inserted.length > 0) created++;
+        else skipped++;
+      }
+    }
+
+    return { created, skipped };
   }
 
   async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {

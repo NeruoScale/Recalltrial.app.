@@ -4,17 +4,20 @@ import { getQueryFn } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Bell, LogOut, Settings, Layers, Mail, Sparkles } from "lucide-react";
 import type { ShadowSubscription } from "@shared/schema";
 
-// Phase 3B.7.3: reads exclusively from GET /api/subscriptions, which in turn
-// reads only from the `subscriptions` shadow table (isShadow=true,
-// resolutionStatus="resolved"). Nothing on this page can create/update a
-// trial or reminder, and nothing here ever flips isShadow — nothing shown
-// is "confirmed," it's "detected." Labeled that way everywhere on purpose.
+// Phase 3B.7.3 / 3B.8 Step 4: reads exclusively from GET /api/subscriptions,
+// which reads from `subscriptions` filtered to resolutionStatus="resolved"
+// only (unresolved/ambiguous entities never appear here — enforced upstream
+// by entityResolver.ts, not by anything on this page). Some of these rows
+// are now genuinely active (isShadow=false, Phase 3B.7.4's controlled
+// promotion) rather than shadow-only previews, so the heading reads "Your
+// subscriptions" — but "Detected from your email" stays on every card as a
+// permanent provenance marker: this is email-derived data, not something
+// the user entered or confirmed themselves, regardless of promotion state.
 
 type SubscriptionsResponse = {
   subscriptions: ShadowSubscription[];
@@ -50,8 +53,29 @@ function statusLabel(status: ShadowSubscription["subscriptionStatus"]): string {
     case "active": return "Active";
     case "trial": return "Trial";
     case "past_due": return "Past due";
-    case "canceled": return "Canceled";
+    case "canceled": return "Cancelled";
+    case "expired": return "Expired";
     default: return "Unknown";
+  }
+}
+
+// Phase 3B.8 Step 4: lifecycle status colors — active=green, past_due=
+// yellow/orange, trial=blue, cancelled/expired/unknown=grey. Matches the
+// existing green/yellow badge convention already used for trial-suggestion
+// confidence in dashboard.tsx, extended with blue for trial and a neutral
+// grey for every terminal/unknown state.
+function statusBadgeClasses(status: ShadowSubscription["subscriptionStatus"]): string {
+  switch (status) {
+    case "active":
+      return "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700";
+    case "past_due":
+      return "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200 dark:border-yellow-700";
+    case "trial":
+      return "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200 dark:border-blue-700";
+    case "canceled":
+    case "expired":
+    default:
+      return "bg-muted text-muted-foreground border-border";
   }
 }
 
@@ -90,6 +114,9 @@ function computeMonthlyRecurringCost(subs: ShadowSubscription[]): { amount: numb
 function SubscriptionRow({ sub }: { sub: ShadowSubscription }) {
   const initial = sub.canonicalMerchantName.charAt(0).toUpperCase();
   const confidence = confidenceLabel(sub.merchantConfidence);
+  const amountLine = sub.amount
+    ? `${formatMoney(sub.amount, sub.currency)}/${(sub.billingInterval || "month").toLowerCase()}`
+    : "Unknown amount";
 
   return (
     <Card data-testid={`card-subscription-${sub.id}`}>
@@ -105,19 +132,22 @@ function SubscriptionRow({ sub }: { sub: ShadowSubscription }) {
             <span className="font-semibold truncate" data-testid={`text-merchant-${sub.id}`}>
               {sub.canonicalMerchantName}
             </span>
-            <Badge variant="outline" className="text-xs">{statusLabel(sub.subscriptionStatus)}</Badge>
-            <Badge variant={confidence.variant} className="text-xs">{confidence.label} confidence</Badge>
+            <span
+              className={`inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${statusBadgeClasses(sub.subscriptionStatus)}`}
+              data-testid={`badge-status-${sub.id}`}
+            >
+              {statusLabel(sub.subscriptionStatus)}
+            </span>
           </div>
-          <div className="text-sm text-muted-foreground flex items-center gap-3 flex-wrap">
-            <span>{formatMoney(sub.amount, sub.currency)}</span>
-            <span>·</span>
-            <span>{formatInterval(sub.billingInterval)}</span>
-            <span>·</span>
-            <span>Next renewal: {formatDate(sub.nextBillingDate)}</span>
+          <div className="text-sm text-muted-foreground">
+            {amountLine} · {statusLabel(sub.subscriptionStatus)}
+          </div>
+          <div className="text-sm text-muted-foreground">
+            Next renewal: {formatDate(sub.nextBillingDate)}
           </div>
           <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
             <Mail className="h-3 w-3" />
-            Detected from your email
+            Detected from your email · {confidence.label} confidence
           </div>
         </div>
       </CardContent>
@@ -163,10 +193,10 @@ export default function SubscriptionsPage() {
         <div className="mb-6">
           <h1 className="text-2xl font-bold flex items-center gap-2" data-testid="text-page-title">
             <Sparkles className="h-5 w-5 text-primary" />
-            Detected Subscriptions
+            Your subscriptions
           </h1>
           <p className="text-sm text-muted-foreground">
-            Subscriptions our email scan detected — not manually confirmed. Review before treating any of these as accurate.
+            Detected from your email — review the details on each before relying on them.
           </p>
         </div>
 

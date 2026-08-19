@@ -265,8 +265,14 @@ export type InsertEntityResolutionCandidate = typeof entityResolutionCandidates.
 // instead of a Postgres expression index — it's
 // COALESCE(canonicalMerchantDomain, canonicalMerchantName) computed at
 // write time, not a new independent piece of evidence.
+// Phase 3B.8: added "expired" as a reachable lifecycle state (see
+// server/subscriptionLifecycle.ts). Deliberately keeps the existing
+// "canceled" (single-L) spelling rather than renaming to match the task's
+// prose spelling of "cancelled" — an ALTER TYPE RENAME VALUE on an enum
+// with live production rows is unnecessary risk for a cosmetic spelling
+// difference; the STATE this represents is unambiguous either way.
 export const shadowSubscriptionStatusEnum = pgEnum("shadow_subscription_status", [
-  "active", "trial", "past_due", "canceled", "unknown",
+  "active", "trial", "past_due", "canceled", "expired", "unknown",
 ]);
 
 export const subscriptions = pgTable("subscriptions", {
@@ -304,6 +310,38 @@ export const subscriptions = pgTable("subscriptions", {
 
 export type ShadowSubscription = typeof subscriptions.$inferSelect;
 export type InsertShadowSubscription = typeof subscriptions.$inferInsert;
+
+// Phase 3B.8 Step 5: subscription-native reminders — deliberately a SEPARATE
+// table from `reminders`, not a reuse of it. `reminders.trialId` is
+// NOT NULL with a hard FK to `trials.id` (shared/schema.ts's original
+// table); loosening that constraint to support non-trial-linked reminders
+// would be exactly the kind of change to existing trial/reminder behavior
+// this phase's boundaries forbid. This also matches PHASE1_AUDIT.md §9's
+// own explicit recommendation: subscription-native alerts must be a
+// "distinct notification type" from trial reminders, not a shared row
+// shape, specifically so the two systems can never collide/double-remind
+// for the same date. Reuses reminderTypeEnum/reminderStatusEnum (same
+// THREE_DAYS/TWO_DAYS/ONE_DAY vocabulary, same PENDING/SENT/SKIPPED/FAILED
+// lifecycle) since those concepts are identical — only the "what this
+// reminder is about" foreign key differs.
+export const subscriptionReminders = pgTable("subscription_reminders", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  subscriptionId: varchar("subscription_id").notNull().references(() => subscriptions.id),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  remindAt: timestamp("remind_at").notNull(),
+  type: reminderTypeEnum("type").notNull(),
+  status: reminderStatusEnum("status").notNull().default("PENDING"),
+  sentAt: timestamp("sent_at"),
+  provider: text("provider").default("resend"),
+  providerMessageId: text("provider_message_id"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  unique("subscription_reminders_sub_type_unique").on(table.subscriptionId, table.type),
+]);
+
+export type SubscriptionReminder = typeof subscriptionReminders.$inferSelect;
+export type InsertSubscriptionReminder = typeof subscriptionReminders.$inferInsert;
 
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 
