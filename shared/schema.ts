@@ -289,6 +289,13 @@ export const subscriptions = pgTable("subscriptions", {
   isShadow: boolean("is_shadow").notNull().default(true),
   potentialFalseMerge: boolean("potential_false_merge").notNull().default(false),
   potentialFalseSplit: boolean("potential_false_split").notNull().default(false),
+  // Phase 3B.7.4: controlled production activation. promotedAt is set the
+  // instant isShadow flips true -> false; promotionReason/promotionEvidence
+  // record why, for auditability. All three stay null for rows that have
+  // never been promoted (still shadow, or shadow forever if ineligible).
+  promotedAt: timestamp("promoted_at"),
+  promotionReason: text("promotion_reason"),
+  promotionEvidence: text("promotion_evidence"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [

@@ -810,6 +810,53 @@ export async function registerRoutes(
     }
   });
 
+  // Phase 3B.7.4: controlled production activation. Same X-ADMIN-KEY gate.
+  // dryRun=true (default, safest) runs the exact same eligibility SQL as a
+  // read-only SELECT and changes nothing. dryRun=false runs the real
+  // idempotent UPDATE. Does not touch trials/reminders/computeReminders and
+  // does not send any email — it only flips is_shadow on rows that already
+  // exist.
+  app.post("/api/admin/subscriptions/promote", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const userId: string | undefined = req.body?.userId || undefined;
+      const dryRun: boolean = req.body?.dryRun !== false; // default true — safest default
+
+      const preview = await storage.previewShadowSubscriptionPromotion(userId);
+
+      if (dryRun) {
+        return res.json({
+          dryRun: true,
+          wouldPromote: preview.eligible.length,
+          wouldSkip: preview.ineligible.length,
+          alreadyActive: preview.alreadyActive.length,
+          promotedList: preview.eligible,
+          skippedList: preview.ineligible,
+        });
+      }
+
+      const result = await storage.promoteEligibleShadowSubscriptions(userId);
+      // Re-fetch the preview AFTER promotion so the response's promotedList
+      // reflects what's now actually active, not a stale pre-promotion view.
+      const after = await storage.previewShadowSubscriptionPromotion(userId);
+
+      return res.json({
+        dryRun: false,
+        promoted: result.promoted,
+        skipped: result.skipped,
+        alreadyActive: result.alreadyActive,
+        promotedList: after.alreadyActive,
+        skippedList: after.ineligible,
+      });
+    } catch (err) {
+      console.error("Admin subscription-promotion error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
   app.get("/api/services/search", (req: Request, res: Response) => {
     const q = (req.query.q as string || "").trim();
     if (!q || q.length < 2) {

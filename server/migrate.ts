@@ -352,5 +352,18 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] last_scan_messages_processed:", err.message);
   }
 
+  // ── Phase 3B.7.4: controlled promotion columns on subscriptions ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS promoted_at timestamp,
+        ADD COLUMN IF NOT EXISTS promotion_reason text,
+        ADD COLUMN IF NOT EXISTS promotion_evidence text;
+    `);
+    console.log("[migrate] subscriptions promotion columns OK");
+  } catch (err: any) {
+    console.error("[migrate] promotion columns:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

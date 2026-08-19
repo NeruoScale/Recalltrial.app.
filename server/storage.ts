@@ -65,6 +65,18 @@ export interface IStorage {
     potentialFalseSplits: number;
   }>;
 
+  // Phase 3B.7.4: controlled promotion of eligible shadow subscriptions to
+  // active (isShadow=false). See the implementation for the exact
+  // eligibility SQL (shared between both methods) and idempotency
+  // guarantee. Deliberately does NOT touch trials/reminders — this only
+  // flips a flag + records why on the `subscriptions` row itself.
+  promoteEligibleShadowSubscriptions(userId?: string): Promise<{ promoted: number; skipped: number; alreadyActive: number }>;
+  previewShadowSubscriptionPromotion(userId?: string): Promise<{
+    eligible: ShadowSubscription[];
+    ineligible: Array<{ subscription: ShadowSubscription; reason: string }>;
+    alreadyActive: ShadowSubscription[];
+  }>;
+
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
   getDueReminders(now: Date): Promise<(Reminder & { trial: Trial; user: User })[]>;
@@ -644,13 +656,20 @@ export class DatabaseStorage implements IStorage {
   // all, per entityResolver.ts's isEligibleForShadowSubscription()), but the
   // resolutionStatus filter is kept explicit here anyway so this query stays
   // correct on its own even if that upstream invariant ever changes.
+  //
+  // Phase 3B.7.4 note: deliberately does NOT filter on isShadow anymore.
+  // Promotion only flips isShadow false and stamps promotedAt/
+  // promotionReason/promotionEvidence — it never changes resolutionStatus,
+  // so a promoted row is exactly as "detected, not confirmed" as it was the
+  // moment before promotion, and the end-user dashboard must keep showing
+  // it (Step 6's explicit requirement) rather than having it silently
+  // disappear the instant it's promoted.
   async getShadowSubscriptionsForUser(userId: string): Promise<ShadowSubscription[]> {
     return db
       .select()
       .from(subscriptions)
       .where(and(
         eq(subscriptions.userId, userId),
-        eq(subscriptions.isShadow, true),
         eq(subscriptions.resolutionStatus, "resolved")
       ))
       .orderBy(subscriptions.canonicalMerchantName);
@@ -743,6 +762,167 @@ export class DatabaseStorage implements IStorage {
       perMerchantBreakdown,
       potentialFalseMerges: falseMergeRow?.count ?? 0,
       potentialFalseSplits: falseSplitRow?.count ?? 0,
+    };
+  }
+
+  // ── Phase 3B.7.4: controlled production activation ──────────────────────────
+  //
+  // Eligibility (all six conditions from the task, all enforced in SQL, not
+  // application code):
+  //   1. is_shadow = true                         (WHERE clause)
+  //   2/4. resolution_status = 'resolved'          (WHERE clause — this alone
+  //        also rules out "conflict" status by definition, since a row can't
+  //        equal both 'resolved' and 'conflict')
+  //   3. resolution_method = 'domain_match'        (WHERE clause — excludes
+  //        name_match, processor_body_match, ambiguous_platform_name)
+  //   5. canonical_merchant_domain IS NOT NULL     (WHERE clause)
+  //   6. userId exists and is valid                — already guaranteed
+  //        structurally: subscriptions.user_id has a NOT NULL FK to
+  //        users.id, so Postgres itself makes this condition impossible to
+  //        violate. No redundant EXISTS join added for a check the schema
+  //        already enforces.
+  // Plus the explicit "DO NOT promote... potentialFalseMerge=true" rule from
+  // the task, folded in as a seventh WHERE condition even though it wasn't
+  // in the numbered list of six.
+  //
+  // The trailing NOT EXISTS guards against ever having two ACTIVE rows for
+  // the same (userId, canonicalMerchantDomain) — provably redundant today
+  // given the (userId, entityKey) unique constraint (entityKey IS the
+  // domain for domain_match rows), but kept exactly as the task specified
+  // it: defense in depth against that invariant ever changing.
+  //
+  // shadowPromotionEligibilityWhere() is shared verbatim between the real
+  // UPDATE and the dry-run preview SELECT below, so the two can never drift
+  // apart into "preview says eligible, real run disagrees."
+  private shadowPromotionEligibilityWhere(userId?: string) {
+    const userScope = userId ? sql`AND user_id = ${userId}` : sql``;
+    return sql`
+      is_shadow = true
+      AND resolution_status = 'resolved'
+      AND resolution_method = 'domain_match'
+      AND canonical_merchant_domain IS NOT NULL
+      AND potential_false_merge = false
+      ${userScope}
+      AND NOT EXISTS (
+        SELECT 1 FROM subscriptions s2
+        WHERE s2.user_id = subscriptions.user_id
+          AND s2.canonical_merchant_domain = subscriptions.canonical_merchant_domain
+          AND s2.is_shadow = false
+      )
+    `;
+  }
+
+  async promoteEligibleShadowSubscriptions(userId?: string): Promise<{ promoted: number; skipped: number; alreadyActive: number }> {
+    const userScope = userId ? sql`AND user_id = ${userId}` : sql``;
+
+    const totalShadowResult = await db.execute(sql`
+      SELECT COUNT(*)::int AS count FROM subscriptions WHERE is_shadow = true ${userScope}
+    `);
+    const alreadyActiveResult = await db.execute(sql`
+      SELECT COUNT(*)::int AS count FROM subscriptions WHERE is_shadow = false ${userScope}
+    `);
+
+    // Idempotency: on a second run, every previously-promoted row already
+    // has is_shadow=false, so `WHERE is_shadow = true` alone excludes it —
+    // promoted converges to 0 with no duplicate active rows, while
+    // alreadyActive (computed above, BEFORE this UPDATE runs) reports how
+    // many rows didn't need promoting because a prior run already handled
+    // them.
+    const updateResult = await db.execute(sql`
+      UPDATE subscriptions
+      SET
+        is_shadow = false,
+        promoted_at = NOW(),
+        promotion_reason = 'domain_match_controlled_activation',
+        promotion_evidence = 'resolutionMethod=' || resolution_method ||
+          ', merchantConfidence=' || COALESCE(merchant_confidence::text, 'unknown')
+      WHERE ${this.shadowPromotionEligibilityWhere(userId)}
+      RETURNING id
+    `);
+
+    const promoted = updateResult.rowCount ?? 0;
+    const totalShadow = Number((totalShadowResult.rows[0] as any)?.count ?? 0);
+    const alreadyActive = Number((alreadyActiveResult.rows[0] as any)?.count ?? 0);
+
+    return { promoted, skipped: totalShadow - promoted, alreadyActive };
+  }
+
+  async previewShadowSubscriptionPromotion(userId?: string): Promise<{
+    eligible: ShadowSubscription[];
+    ineligible: Array<{ subscription: ShadowSubscription; reason: string }>;
+    alreadyActive: ShadowSubscription[];
+  }> {
+    const userScope = userId ? sql`AND user_id = ${userId}` : sql``;
+
+    const eligibleResult = await db.execute(sql`
+      SELECT * FROM subscriptions WHERE ${this.shadowPromotionEligibilityWhere(userId)}
+    `);
+
+    // Mirrors the same conditions as shadowPromotionEligibilityWhere() but
+    // as a CASE expression instead of a boolean filter, so every ineligible
+    // shadow row comes back with a specific, human-readable reason rather
+    // than a bare exclusion.
+    const ineligibleResult = await db.execute(sql`
+      SELECT *,
+        CASE
+          WHEN resolution_status != 'resolved' THEN 'resolutionStatus is ' || resolution_status || ', not resolved'
+          WHEN resolution_method != 'domain_match' THEN 'resolutionMethod is ' || resolution_method || ', not domain_match'
+          WHEN canonical_merchant_domain IS NULL THEN 'no canonical merchant domain'
+          WHEN potential_false_merge = true THEN 'flagged as a potential false merge'
+          WHEN EXISTS (
+            SELECT 1 FROM subscriptions s2
+            WHERE s2.user_id = subscriptions.user_id
+              AND s2.canonical_merchant_domain = subscriptions.canonical_merchant_domain
+              AND s2.is_shadow = false
+          ) THEN 'an active subscription already exists for this user+domain'
+          ELSE 'ineligible'
+        END AS reason
+      FROM subscriptions
+      WHERE is_shadow = true
+        AND NOT (${this.shadowPromotionEligibilityWhere(userId)})
+        ${userScope}
+    `);
+
+    const alreadyActiveResult = await db.execute(sql`
+      SELECT * FROM subscriptions WHERE is_shadow = false ${userScope}
+    `);
+
+    return {
+      eligible: eligibleResult.rows.map((r) => this.mapSubscriptionRow(r)),
+      ineligible: ineligibleResult.rows.map((r: any) => ({
+        subscription: this.mapSubscriptionRow(r),
+        reason: r.reason as string,
+      })),
+      alreadyActive: alreadyActiveResult.rows.map((r) => this.mapSubscriptionRow(r)),
+    };
+  }
+
+  private mapSubscriptionRow(r: any): ShadowSubscription {
+    return {
+      id: r.id,
+      userId: r.user_id,
+      entityKey: r.entity_key,
+      canonicalMerchantName: r.canonical_merchant_name,
+      canonicalMerchantDomain: r.canonical_merchant_domain,
+      merchantConfidence: r.merchant_confidence,
+      resolutionMethod: r.resolution_method,
+      resolutionStatus: r.resolution_status,
+      planName: r.plan_name,
+      subscriptionStatus: r.subscription_status,
+      amount: r.amount,
+      currency: r.currency,
+      billingInterval: r.billing_interval,
+      nextBillingDate: r.next_billing_date,
+      lastBillingDate: r.last_billing_date,
+      sourceCanonicalEventId: r.source_canonical_event_id,
+      isShadow: r.is_shadow,
+      potentialFalseMerge: r.potential_false_merge,
+      potentialFalseSplit: r.potential_false_split,
+      promotedAt: r.promoted_at,
+      promotionReason: r.promotion_reason,
+      promotionEvidence: r.promotion_evidence,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
     };
   }
 
