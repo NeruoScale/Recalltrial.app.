@@ -1062,13 +1062,37 @@ export async function registerRoutes(
       return res.status(403).json({ message: "Forbidden" });
     }
 
+    // Step 1: existing trial reminders — unchanged call, unchanged
+    // processRemindersNow(), runs first. Isolated in its own try/catch so a
+    // failure here can never prevent Step 2 below from running.
+    let trialReminders: Awaited<ReturnType<typeof processRemindersNow>> | { error: string };
     try {
-      const result = await processRemindersNow();
-      return res.json(result);
-    } catch (err) {
-      console.error("Cron error:", err);
-      return res.status(500).json({ message: "Internal error" });
+      trialReminders = await processRemindersNow();
+      console.log(`[Cron] trial reminders: ${JSON.stringify(trialReminders)}`);
+    } catch (err: any) {
+      console.error("[Cron] trial reminders failed:", err);
+      trialReminders = { error: err.message || "Internal error" };
     }
+
+    // Step 2 (Phase 3B.9.1): subscription-native reminder generation — a
+    // separate, isolated step, same reasoning in the other direction: a
+    // failure here must never affect the trial-reminder result above (it's
+    // already been computed and won't be touched by anything below).
+    // Reuses storage.generateRemindersForEligibleSubscriptions() exactly as
+    // already proven via POST /api/admin/subscriptions/generate-reminders —
+    // no algorithm duplicated or rewritten here, same idempotent
+    // (subscription_id, type) dedup guarantee. Does not touch the
+    // `reminders`/`trials` tables at all.
+    let subscriptionReminders: { created: number; skipped: number } | { error: string };
+    try {
+      subscriptionReminders = await storage.generateRemindersForEligibleSubscriptions();
+      console.log(`[Cron] subscription reminders: ${JSON.stringify(subscriptionReminders)}`);
+    } catch (err: any) {
+      console.error("[Cron] subscription reminders failed:", err);
+      subscriptionReminders = { error: err.message || "Internal error" };
+    }
+
+    return res.json({ trialReminders, subscriptionReminders });
   });
 
   app.post("/api/cron/email-scan", async (req: Request, res: Response) => {
