@@ -11,6 +11,7 @@ import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
 import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
+import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -61,54 +62,6 @@ async function requireEmailScanning(req: Request, res: Response, next: NextFunct
   }
   (req as any).currentUser = user;
   next();
-}
-
-type ReminderPlan = { remindAt: Date; type: string };
-
-function getTimezoneOffsetMs(timezone: string, refDate: Date): number {
-  try {
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-    const parts = formatter.formatToParts(refDate);
-    const get = (t: string) => parseInt(parts.find((p) => p.type === t)?.value || "0");
-    const localH = get("hour");
-    const localM = get("minute");
-    const utcH = refDate.getUTCHours();
-    const utcM = refDate.getUTCMinutes();
-    return ((localH - utcH) * 60 + (localM - utcM)) * 60 * 1000;
-  } catch {
-    return 0;
-  }
-}
-
-function computeReminders(endDateStr: string, now: Date, timezone: string): ReminderPlan[] {
-  const tzOffsetMs = getTimezoneOffsetMs(timezone, now);
-  const endDateTimeUtc = new Date(new Date(endDateStr + "T23:59:59.000Z").getTime() - tzOffsetMs);
-
-  const minFutureMs = 2 * 60 * 1000;
-  const offsets = [
-    { hoursBeforeEnd: 72, type: "THREE_DAYS" },
-    { hoursBeforeEnd: 48, type: "TWO_DAYS" },
-    { hoursBeforeEnd: 24, type: "ONE_DAY" },
-  ];
-
-  const results: ReminderPlan[] = [];
-  for (const offset of offsets) {
-    const remindAt = new Date(endDateTimeUtc.getTime() - offset.hoursBeforeEnd * 60 * 60 * 1000);
-    if (remindAt.getTime() > now.getTime() + minFutureMs) {
-      results.push({ remindAt, type: offset.type as any });
-    }
-  }
-
-  return results;
 }
 
 export async function registerRoutes(

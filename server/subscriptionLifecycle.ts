@@ -14,6 +14,7 @@
 //     event, automatically
 
 import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
+import { getTimezoneOffsetMs } from "./reminderScheduling";
 
 export type LifecycleState = "trial" | "active" | "past_due" | "canceled" | "expired" | "unknown";
 
@@ -195,40 +196,15 @@ export function isEligibleForReminder(subscription: ShadowSubscription): boolean
 
 export type SubscriptionReminderPlan = { remindAt: Date; type: "THREE_DAYS" | "TWO_DAYS" | "ONE_DAY" };
 
-// Mirrors routes.ts's getTimezoneOffsetMs() exactly — duplicated rather than
-// imported so this module has zero dependency on routes.ts (routes.ts
-// imports FROM server modules in this codebase, never the reverse) and so
-// the existing computeReminders() code path is not touched at all, per this
-// phase's strict boundary.
-function getTimezoneOffsetMs(timezone: string, refDate: Date): number {
-  try {
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit",
-      hour12: false,
-    });
-    const parts = formatter.formatToParts(refDate);
-    const get = (t: string) => parseInt(parts.find((p) => p.type === t)?.value || "0");
-    // Some ICU builds format midnight as "24" instead of "00" even with
-    // hour12:false — normalize so a spurious 24h offset never sneaks in at
-    // local midnight (found empirically while testing this function; the
-    // original routes.ts copy has the same latent issue, left untouched
-    // per this phase's boundaries since it's out of scope to fix there).
-    const localH = get("hour") % 24;
-    const localM = get("minute");
-    const utcH = refDate.getUTCHours();
-    const utcM = refDate.getUTCMinutes();
-    return ((localH - utcH) * 60 + (localM - utcM)) * 60 * 1000;
-  } catch {
-    return 0;
-  }
-}
+// getTimezoneOffsetMs() now lives in ./reminderScheduling.ts (extracted from
+// routes.ts as part of the maintenance patch that fixed the ICU
+// midnight-formatting bug both this module and routes.ts's computeReminders()
+// used to have their own copy of) — imported above instead of duplicated.
 
 /**
  * computeSubscriptionReminderPlan(): same 3-day/2-day/1-day-before math as
- * routes.ts's computeReminders(), reimplemented (not imported/called) so
- * that function stays completely untouched. targetDateStr is
+ * routes.ts's computeReminders() (server/reminderScheduling.ts), reusing
+ * that exact getTimezoneOffsetMs(). targetDateStr is
  * subscription.nextBillingDate — used uniformly whether it represents a
  * renewal date (active) or a trial end date (trial), since `subscriptions`
  * has no separate trialEndDate column.
