@@ -536,6 +536,7 @@ export class DatabaseStorage implements IStorage {
           extractedDate: data.extractedDate ?? null,
           userId: data.userId,
           canonicalMerchantDomain: data.canonicalMerchantDomain ?? null,
+          billingInterval: data.billingInterval ?? null,
         });
       } catch (err) {
         console.error("[Lifecycle] failed to apply event to subscription:", err);
@@ -987,7 +988,7 @@ export class DatabaseStorage implements IStorage {
       return { applied: false };
     }
 
-    const { transition, fields } = applyEventToSubscription(event, existing);
+    const { transition, fields, billingIntervalChange } = applyEventToSubscription(event, existing);
 
     if (Object.keys(fields).length === 0) {
       // no_op, or a data_update whose event carried no actual new data —
@@ -1008,6 +1009,9 @@ export class DatabaseStorage implements IStorage {
       console.log(`[Lifecycle] ${existing.canonicalMerchantName}: ${transition.from} -> ${transition.to} (${transition.reason})`);
     } else {
       console.log(`[Lifecycle] ${existing.canonicalMerchantName}: ${transition.kind} (${transition.reason})`);
+    }
+    if (billingIntervalChange) {
+      console.log(`[Lifecycle] billingInterval updated: ${billingIntervalChange.from ?? "null"} -> ${billingIntervalChange.to}`);
     }
 
     return { applied: true, transition, subscription: updated };

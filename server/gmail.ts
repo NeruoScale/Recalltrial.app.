@@ -579,6 +579,86 @@ function hasBillingInterval(text: string): boolean {
   return /\b(monthly|month|\/mo\b|annual(?:ly)?|yearly|\/yr\b|\/year\b|per month|per year)\b/i.test(text);
 }
 
+// ─── Billing interval extraction (Phase 3B.9.2A) ──────────────────────────────
+//
+// STRONG phrases are multi-word or symbol-containing ("per month", "/mo",
+// "billed annually") — inherently billing-shaped by construction, safe to
+// trust standalone via a plain substring check (spaces/slashes already act
+// as natural boundaries, so no accidental match inside an unrelated word).
+//
+// WEAK phrases are bare single words ("monthly", "annual", "weekly", ...)
+// that commonly appear in non-billing contexts too ("monthly newsletter",
+// "weekly digest") — these only count when the SAME message also carries
+// independent billing/payment context (reuses hasRecurringLanguage(), a
+// detected price, or an explicit billing/payment word). Matched with a
+// \b...\b word-boundary regex specifically so "annual" never accidentally
+// matches as a substring inside an unrelated word like "semiannual" (which
+// is caught by its own STRONG phrase first anyway, since all STRONG phrases
+// across every interval are checked before any WEAK phrase).
+type BillingIntervalValue = "monthly" | "annual" | "quarterly" | "semi_annual" | "weekly" | "biweekly";
+
+const BILLING_INTERVAL_PHRASES: Record<BillingIntervalValue, { strong: string[]; weak: string[] }> = {
+  monthly: {
+    strong: ["per month", "/month", "/mo", "billed monthly", "charged monthly", "each month", "every month"],
+    weak: ["monthly"],
+  },
+  annual: {
+    strong: ["per year", "/year", "/yr", "billed annually", "billed yearly", "charged annually"],
+    weak: ["annual", "annually", "yearly"],
+  },
+  quarterly: {
+    strong: ["every 3 months", "every three months", "per quarter"],
+    weak: ["quarterly"],
+  },
+  semi_annual: {
+    strong: ["semi-annual", "semiannual", "twice a year", "every 6 months", "every six months"],
+    weak: [],
+  },
+  weekly: {
+    strong: ["per week", "/week", "/wk"],
+    weak: ["weekly"],
+  },
+  biweekly: {
+    strong: ["every 2 weeks", "every two weeks"],
+    weak: ["biweekly"],
+  },
+};
+
+// Deliberately NOT reusing hasRecurringLanguage()/RECURRING_INDICATORS here:
+// that shared array itself lists "monthly"/"annual"/"annually" as recurring
+// signals, which would make this context gate circular — any message
+// containing the bare word "monthly" would trivially satisfy its own
+// "is there billing context" check. This pattern is self-contained and
+// deliberately excludes the six ambiguous interval words themselves.
+const BILLING_CONTEXT_PATTERN = /\$|\busd\b|\bprice\b|\bbilled\b|\bcharged?\b|\bpayment\b|\binvoice\b|\bsubscription\b|\brecurring\b|\bmembership\b|\bauto-?renew(?:s|al|ing)?\b|\brenews?\b|\brenewal\b|\brenewing\b/i;
+
+/**
+ * extractBillingInterval(): returns a specific recurrence interval only when
+ * there's explicit, billing-connected textual evidence for it — never
+ * guessed from price alone, never defaulted from the merchant. Returns null
+ * whenever that evidence isn't there, which callers must treat as "unknown,"
+ * not "monthly" (the common case) or any other assumed default.
+ */
+export function extractBillingInterval(text: string): BillingIntervalValue | null {
+  const lower = text.toLowerCase();
+
+  for (const [interval, phrases] of Object.entries(BILLING_INTERVAL_PHRASES) as [BillingIntervalValue, { strong: string[]; weak: string[] }][]) {
+    if (phrases.strong.some((p) => lower.includes(p))) {
+      return interval;
+    }
+  }
+
+  if (!BILLING_CONTEXT_PATTERN.test(lower)) return null;
+
+  for (const [interval, phrases] of Object.entries(BILLING_INTERVAL_PHRASES) as [BillingIntervalValue, { strong: string[]; weak: string[] }][]) {
+    if (phrases.weak.some((p) => new RegExp(`\\b${p}\\b`, "i").test(lower))) {
+      return interval;
+    }
+  }
+
+  return null;
+}
+
 // Phase 3B.3.1: RECURRING_INDICATORS (gmailKeywords.ts, shared with the
 // trial pipeline's passesReceiptFilter — left untouched here on purpose)
 // only contains the literal "renews", so "to renew your Replit Core..."
@@ -628,6 +708,7 @@ export type SubscriptionEventCandidate = {
   previousPrice: string | null;
   newPrice: string | null;
   confidence: number;
+  billingInterval: string | null;
 };
 
 /**
@@ -701,6 +782,7 @@ export function detectSubscriptionEvent(
   const extractedMerchant = resolveServiceName(fromDomain, snippet);
   const hasInterval = hasBillingInterval(combined);
   const hasRecurring = hasRecurringLanguage(combined);
+  const billingInterval = extractBillingInterval(combined);
 
   let eventType: SubscriptionEventType;
   let previousPrice: string | null = null;
@@ -777,6 +859,7 @@ export function detectSubscriptionEvent(
     previousPrice,
     newPrice,
     confidence,
+    billingInterval,
   };
 }
 
@@ -1051,6 +1134,7 @@ export async function scanGmailForTrials(
               previousPrice: candidate.previousPrice,
               newPrice: candidate.newPrice,
               confidence: candidate.confidence,
+              billingInterval: candidate.billingInterval,
               detectionSource: "deterministic",
               canonicalMerchantName: merchantResolution.canonicalMerchantName,
               canonicalMerchantDomain: merchantResolution.canonicalMerchantDomain,

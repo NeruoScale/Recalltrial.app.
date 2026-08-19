@@ -254,3 +254,40 @@ describe("Phase 3B.8 Step 5: computeSubscriptionReminderPlan — 3/2/1-day math"
     );
   });
 });
+
+describe("Phase 3B.9.2A Step 3: billingInterval propagation", () => {
+  it("null -> value: fills the gap when the subscription has no known interval yet", () => {
+    const sub = makeSubscription({ billingInterval: null });
+    const result = applyEventToSubscription(makeEvent({ eventType: "subscription_invoice", billingInterval: "monthly" }), sub);
+    expect(result.fields.billingInterval).toBe("monthly");
+    expect(result.billingIntervalChange).toEqual({ from: null, to: "monthly" });
+  });
+
+  it("value -> different value: updates to the most recent canonical event's value and reports the change", () => {
+    const sub = makeSubscription({ billingInterval: "monthly" });
+    const result = applyEventToSubscription(makeEvent({ eventType: "subscription_invoice", billingInterval: "annual" }), sub);
+    expect(result.fields.billingInterval).toBe("annual");
+    expect(result.billingIntervalChange).toEqual({ from: "monthly", to: "annual" });
+  });
+
+  it("value -> same value: no change reported (already correct)", () => {
+    const sub = makeSubscription({ billingInterval: "monthly" });
+    const result = applyEventToSubscription(makeEvent({ eventType: "subscription_invoice", billingInterval: "monthly" }), sub);
+    expect(result.fields.billingInterval).toBeUndefined();
+    expect(result.billingIntervalChange).toBeNull();
+  });
+
+  it("event carries no interval evidence (null) -> a known interval is NEVER overwritten with null", () => {
+    const sub = makeSubscription({ billingInterval: "annual" });
+    const result = applyEventToSubscription(makeEvent({ eventType: "subscription_invoice", billingInterval: null }), sub);
+    expect(result.fields.billingInterval).toBeUndefined();
+    expect(result.billingIntervalChange).toBeNull();
+  });
+
+  it("propagation is unconditional: happens even for a no_op state transition (e.g. payment_failed on an already past_due subscription)", () => {
+    const sub = makeSubscription({ subscriptionStatus: "past_due", billingInterval: null });
+    const result = applyEventToSubscription(makeEvent({ eventType: "payment_failed", billingInterval: "monthly" }), sub);
+    expect(result.transition.kind).toBe("no_op"); // payment_failed only transitions from active
+    expect(result.fields.billingInterval).toBe("monthly"); // but the interval still propagates
+  });
+});

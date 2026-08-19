@@ -400,5 +400,15 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscription_reminders table:", err.message);
   }
 
+  // ── Phase 3B.9.2A: extracted billing interval on subscription_events ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events ADD COLUMN IF NOT EXISTS billing_interval TEXT;
+    `);
+    console.log("[migrate] subscription_events.billing_interval OK");
+  } catch (err: any) {
+    console.error("[migrate] billing_interval column:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

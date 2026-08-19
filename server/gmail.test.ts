@@ -34,6 +34,7 @@ import {
   isKnownNoiseDomain,
   isSubscriptionEvidence,
   listMessages,
+  extractBillingInterval,
   buildScanTimeFilter,
   getMaxScanMessages,
 } from "./gmail";
@@ -988,5 +989,95 @@ describe("Phase 3B.7.2: Gmail scan reliability (pagination, completeness, increm
       expect(result.scanCompletedAt).toBeInstanceOf(Date);
       expect(result.scanCompletedAt.getTime()).toBeGreaterThanOrEqual(result.scanStartedAt.getTime());
     });
+  });
+});
+
+describe("Phase 3B.9.2A: extractBillingInterval()", () => {
+  it("'$19.99/month' -> monthly", () => {
+    expect(extractBillingInterval("Your subscription is $19.99/month, charged to your card on file.")).toBe("monthly");
+  });
+
+  it("'$19.99 per month' -> monthly", () => {
+    expect(extractBillingInterval("You will be charged $19.99 per month for this subscription.")).toBe("monthly");
+  });
+
+  it("'billed monthly' -> monthly", () => {
+    expect(extractBillingInterval("Your plan is billed monthly. Next charge: $9.99.")).toBe("monthly");
+  });
+
+  it("'$139/year' -> annual", () => {
+    expect(extractBillingInterval("Your subscription renews at $139/year.")).toBe("annual");
+  });
+
+  it("'billed annually' -> annual", () => {
+    expect(extractBillingInterval("Your plan is billed annually at $99.00.")).toBe("annual");
+  });
+
+  it("'every 3 months' -> quarterly", () => {
+    expect(extractBillingInterval("Your card will be charged $29.99 every 3 months for this subscription.")).toBe("quarterly");
+  });
+
+  it("'every 6 months' -> semi_annual", () => {
+    expect(extractBillingInterval("Your subscription is billed every 6 months at $59.99.")).toBe("semi_annual");
+  });
+
+  it("'weekly' (with billing context) -> weekly", () => {
+    expect(extractBillingInterval("Your weekly subscription charge of $4.99 has been processed.")).toBe("weekly");
+  });
+
+  it("'every 2 weeks' -> biweekly", () => {
+    expect(extractBillingInterval("You will be charged $14.99 every 2 weeks for your subscription.")).toBe("biweekly");
+  });
+
+  it("'monthly newsletter' -> null (false positive guard: bare word with NO billing context)", () => {
+    expect(extractBillingInterval("Subscribe to our monthly newsletter for the latest news and updates.")).toBeNull();
+  });
+
+  it("'$20 payment received' -> null (price present, but no interval phrase at all)", () => {
+    expect(extractBillingInterval("$20 payment received. Thank you for your purchase.")).toBeNull();
+  });
+
+  it("empty text -> null", () => {
+    expect(extractBillingInterval("")).toBeNull();
+  });
+
+  it("missing/whitespace-only text -> null", () => {
+    expect(extractBillingInterval("   ")).toBeNull();
+  });
+
+  it("additional false-positive guards: 'weekly digest' and 'quarterly report' with no billing context -> null", () => {
+    expect(extractBillingInterval("Check out this week's weekly digest of top stories.")).toBeNull();
+    expect(extractBillingInterval("Our quarterly report is now available to read.")).toBeNull();
+  });
+
+  it("bare word DOES count when other billing context co-occurs elsewhere in the message (not just adjacent)", () => {
+    // Realistic shape: subject has no interval word, snippet has "annual" AND
+    // separately mentions "subscription" — same message, not necessarily
+    // adjacent text — still correctly extracted since context is message-wide.
+    expect(extractBillingInterval("Your Acme subscription — annual plan confirmed, $120.00 charged.")).toBe("annual");
+  });
+
+  it("strong compound phrases are trusted even with no separate billing context word nearby", () => {
+    expect(extractBillingInterval("$4.99/wk")).toBe("weekly");
+  });
+
+  it("detectSubscriptionEvent() end-to-end: billingInterval flows through into the candidate", () => {
+    const candidate = detectSubscriptionEvent(
+      "Your subscription renews soon",
+      "Your Acme Pro plan renews on Sep 1, 2026. You'll be charged $19.99/month.",
+      "billing@acme.com",
+      "Sat, 01 Aug 2026 00:00:00 GMT"
+    );
+    expect(candidate?.billingInterval).toBe("monthly");
+  });
+
+  it("detectSubscriptionEvent() end-to-end: no interval evidence -> billingInterval is null, never guessed from price", () => {
+    const candidate = detectSubscriptionEvent(
+      "Your receipt",
+      "Payment received: $20.00. Thank you for your purchase.",
+      "billing@service.com",
+      "Sat, 01 Aug 2026 00:00:00 GMT"
+    );
+    expect(candidate?.billingInterval).toBeNull();
   });
 });

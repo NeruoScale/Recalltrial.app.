@@ -124,7 +124,7 @@ export function computeLifecycleTransition(
 
 export type LifecycleRelevantEvent = Pick<
   SubscriptionEvent,
-  "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain"
+  "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval"
 >;
 
 export type SubscriptionLifecycleUpdate = {
@@ -134,7 +134,13 @@ export type SubscriptionLifecycleUpdate = {
     amount?: string | null;
     currency?: string | null;
     nextBillingDate?: string | null;
+    billingInterval?: string;
   };
+  // Populated only when billingInterval is actually changing (null -> value,
+  // or value -> a DIFFERENT value) — lets the caller log the specific
+  // "[Lifecycle] billingInterval updated: X -> Y" line STEP 3 asks for,
+  // distinct from the state-transition log line.
+  billingIntervalChange: { from: string | null; to: string } | null;
 };
 
 // Event types whose whole purpose is carrying fresh billing evidence.
@@ -171,7 +177,20 @@ export function applyEventToSubscription(
     if (event.extractedDate) fields.nextBillingDate = event.extractedDate;
   }
 
-  return { transition, fields };
+  // Phase 3B.9.2A Step 3: billingInterval propagation is UNCONDITIONAL —
+  // independent of transition.kind and event type, since it's data, not a
+  // state transition. Only ever fills a gap (null -> value) or updates to a
+  // genuinely different value from the most recent canonical event; a known
+  // interval is never overwritten with null (event.billingInterval === null
+  // means "this particular email didn't mention it," not "there is no
+  // interval" — the subscription's existing value, once known, stays put).
+  let billingIntervalChange: SubscriptionLifecycleUpdate["billingIntervalChange"] = null;
+  if (event.billingInterval && event.billingInterval !== subscription.billingInterval) {
+    fields.billingInterval = event.billingInterval;
+    billingIntervalChange = { from: subscription.billingInterval, to: event.billingInterval };
+  }
+
+  return { transition, fields, billingIntervalChange };
 }
 
 // ─── Reminder eligibility (Phase 3B.8 Step 5) ──────────────────────────────────

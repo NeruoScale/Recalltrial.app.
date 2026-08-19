@@ -197,6 +197,9 @@ export const subscriptionEvents = pgTable("subscription_events", {
   extractedMerchant: text("extracted_merchant"),
   previousPrice: decimal("previous_price", { precision: 10, scale: 2 }),
   newPrice: decimal("new_price", { precision: 10, scale: 2 }),
+  // Phase 3B.9.2A: extracted directly from message text (server/gmail.ts's
+  // extractBillingInterval()) — never guessed from price or merchant.
+  billingInterval: text("billing_interval"),
   confidence: integer("confidence").notNull().default(0),
   detectionSource: text("detection_source").notNull().default("deterministic"),
   aiModel: text("ai_model"),
