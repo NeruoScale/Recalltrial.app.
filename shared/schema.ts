@@ -327,6 +327,16 @@ export const subscriptions = pgTable("subscriptions", {
   promotedAt: timestamp("promoted_at"),
   promotionReason: text("promotion_reason"),
   promotionEvidence: text("promotion_evidence"),
+  // Phase 3B.9.8: most recent price-change DETECTION result — server/
+  // priceChangeDetector.ts's output, written by server/subscriptionLifecycle.ts
+  // after processing an event. Purely observational (never read by
+  // computeReminders()/trials, never mutates `amount` itself — `amount`
+  // stays owned entirely by Phase 3B.8's existing lifecycle rules).
+  lastPriceChangeAt: timestamp("last_price_change_at"),
+  lastPriceChangeType: text("last_price_change_type"),
+  lastPriceChangeAbsolute: decimal("last_price_change_absolute", { precision: 10, scale: 2 }),
+  lastPriceChangePercentage: decimal("last_price_change_percentage", { precision: 6, scale: 2 }),
+  lastPriceChangeAnnualImpact: decimal("last_price_change_annual_impact", { precision: 10, scale: 2 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [

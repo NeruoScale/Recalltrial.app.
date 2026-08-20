@@ -7,6 +7,7 @@ import {
   determineSubscriptionAccessResult,
 } from "./subscriptionVault";
 import { buildPriceHistory } from "./priceHistory";
+import { detectPriceChanges } from "./priceChangeDetector";
 import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
 
 // Fixture conventions mirror subscriptionCostEngine.test.ts's makeSub() —
@@ -264,6 +265,44 @@ describe("Phase 3B.9.6B: buildSubscriptionVaultResponse includes priceHistory", 
     expect(response.priceHistory.observations).toEqual([]);
     expect(response.priceHistory.observationCount).toBe(0);
     expect(response.priceHistory.currentPrice).toBeNull();
+  });
+});
+
+describe("Phase 3B.9.8: buildSubscriptionVaultResponse includes priceChanges", () => {
+  it("GET /api/subscriptions/:id response includes a priceChanges field matching detectPriceChanges(priceHistory) exactly", () => {
+    const sub = makeSub();
+    const events = [
+      makeEvent({ extractedPrice: "18.00", extractedCurrency: "GBP", extractedDate: "2026-06-06" }),
+      makeEvent({ extractedPrice: "15.00", extractedCurrency: "GBP", extractedDate: "2026-07-09" }),
+    ];
+    const response = buildSubscriptionVaultResponse(sub, events, null);
+    expect(response.priceChanges).toEqual(detectPriceChanges(buildPriceHistory(events)));
+    expect(response.priceChanges.hasDecrease).toBe(true);
+    expect(response.priceChanges.latestChange?.percentageChange).toBe(-16.7);
+  });
+
+  it("no changes -> priceChanges.changes is empty, not omitted", () => {
+    const sub = makeSub();
+    const events = [makeEvent({ extractedPrice: "20.00", extractedCurrency: "USD", extractedDate: "2026-01-01" })];
+    const response = buildSubscriptionVaultResponse(sub, events, null);
+    expect(response.priceChanges.changes).toEqual([]);
+    expect(response.priceChanges.latestChange).toBeNull();
+    expect(response.priceChanges.hasIncrease).toBe(false);
+    expect(response.priceChanges.hasDecrease).toBe(false);
+  });
+
+  it("a one_time_purchase event with a price still contributes to priceChanges, per the approved architectural decision", () => {
+    const sub = makeSub();
+    const events = [
+      makeEvent({ eventType: "one_time_purchase", extractedPrice: "18.00", extractedCurrency: "GBP", extractedDate: "2026-06-06" }),
+      makeEvent({ eventType: "one_time_purchase", extractedPrice: "15.00", extractedCurrency: "GBP", extractedDate: "2026-07-09" }),
+    ];
+    const response = buildSubscriptionVaultResponse(sub, events, null);
+    expect(response.priceChanges.hasDecrease).toBe(true);
+    // The subscription's own `amount` field must never be mutated by this
+    // pure response builder — it only reflects whatever the caller already
+    // passed in on `sub`.
+    expect(response.subscription.amount).toBe(sub.amount);
   });
 });
 

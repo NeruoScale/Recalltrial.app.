@@ -475,6 +475,21 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscriptionId FK backfill:", err.message);
   }
 
+  // ── Phase 3B.9.8: price-change detection fields on subscriptions ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS last_price_change_at timestamp,
+        ADD COLUMN IF NOT EXISTS last_price_change_type text,
+        ADD COLUMN IF NOT EXISTS last_price_change_absolute decimal(10, 2),
+        ADD COLUMN IF NOT EXISTS last_price_change_percentage decimal(6, 2),
+        ADD COLUMN IF NOT EXISTS last_price_change_annual_impact decimal(10, 2);
+    `);
+    console.log("[migrate] subscriptions price-change columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscriptions price-change columns:", err.message);
+  }
+
   // ── Phase 3B.9.7: extraction-layer provenance columns ──
   try {
     await db.execute(sql`

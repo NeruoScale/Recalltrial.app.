@@ -140,6 +140,34 @@ type PriceHistoryResult = {
   observationCount: number;
 };
 
+// Phase 3B.9.8: mirrors server/priceChangeDetector.ts's PriceChangeResult exactly.
+type PriceChangeType = "increase" | "decrease" | "currency_change" | "interval_change";
+
+type PriceChange = {
+  detectedAt: string;
+  previousAmount: string;
+  previousCurrency: string;
+  previousInterval: string | null;
+  newAmount: string;
+  newCurrency: string;
+  newInterval: string | null;
+  absoluteChange: number;
+  percentageChange: number;
+  monthlyImpact: number;
+  annualImpact: number;
+  changeType: PriceChangeType;
+};
+
+type PriceChangeResult = {
+  changes: PriceChange[];
+  hasIncrease: boolean;
+  hasDecrease: boolean;
+  hasCurrencyChange: boolean;
+  hasIntervalChange: boolean;
+  latestChange: PriceChange | null;
+  totalAnnualImpact: number | null;
+};
+
 type SubscriptionVaultResponse = {
   subscription: {
     id: string;
@@ -182,7 +210,26 @@ type SubscriptionVaultResponse = {
     resolutionMethod: string;
   };
   priceHistory: PriceHistoryResult;
+  priceChanges: PriceChangeResult;
 };
+
+/** UI copy is deliberately factual ("Price decreased"), never attributive ("Anthropic lowered your price") — the evidence only proves the observed amount changed, not why. */
+function formatSignedMoney(amount: number, currency: string | null): string {
+  const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
+  return `${sign}${formatMoney(Math.abs(amount).toFixed(2), currency)}`;
+}
+
+function formatSignedPercent(pct: number): string {
+  const sign = pct > 0 ? "+" : pct < 0 ? "-" : "";
+  return `${sign}${Math.abs(pct).toFixed(1)}%`;
+}
+
+function findLastChangeOfType(changes: PriceChange[], type: PriceChangeType): PriceChange | null {
+  for (let i = changes.length - 1; i >= 0; i--) {
+    if (changes[i].changeType === type) return changes[i];
+  }
+  return null;
+}
 
 function formatMonthYear(date: string): string {
   return new Date(date).toLocaleDateString(undefined, { month: "short", year: "numeric" });
@@ -314,6 +361,38 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
 
               <div>
                 <h3 className="text-sm font-semibold mb-2">Price history</h3>
+
+                {/* STEP 5: factual, evidence-scoped copy only — "Price
+                    decreased," never "Anthropic lowered your price." The
+                    banner reflects the most recent increase/decrease found
+                    anywhere in the timeline, prioritizing increase (⚠️) over
+                    decrease (✓) when both exist. */}
+                {(() => {
+                  const inc = data.priceChanges.hasIncrease ? findLastChangeOfType(data.priceChanges.changes, "increase") : null;
+                  const dec = !inc && data.priceChanges.hasDecrease ? findLastChangeOfType(data.priceChanges.changes, "decrease") : null;
+                  if (inc) {
+                    return (
+                      <div className="mb-3 text-sm font-medium text-amber-600 dark:text-amber-500" data-testid="text-price-change-banner-increase">
+                        ⚠️ Price increased
+                        <div className="text-xs font-normal">
+                          {formatSignedMoney(inc.monthlyImpact, inc.newCurrency)}/month · {formatSignedMoney(inc.annualImpact, inc.newCurrency)}/year
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (dec) {
+                    return (
+                      <div className="mb-3 text-sm font-medium text-emerald-600 dark:text-emerald-500" data-testid="text-price-change-banner-decrease">
+                        ✓ Price decreased
+                        <div className="text-xs font-normal">
+                          {formatSignedMoney(dec.monthlyImpact, dec.newCurrency)}/month · {formatSignedMoney(dec.annualImpact, dec.newCurrency)}/year
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
                 {data.priceHistory.observationCount === 0 ? (
                   <p className="text-sm text-muted-foreground" data-testid="text-price-history-empty">
                     No pricing information available
@@ -332,20 +411,53 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                   </div>
                 ) : (
                   <div className="space-y-1.5" data-testid="text-price-history-list">
-                    {[...data.priceHistory.observations].reverse().map((obs, idx) => (
-                      <div
-                        key={`${obs.observedAt}-${obs.amount}-${obs.currency}`}
-                        className="flex items-center justify-between gap-3 text-sm"
-                        data-testid={`row-price-history-${idx}`}
-                      >
-                        <span className="text-muted-foreground w-20 shrink-0">{formatMonthYear(obs.observedAt)}</span>
-                        <span className="flex-1 min-w-0 font-medium">
-                          {formatMoney(obs.amount, obs.currency)}
-                          {obs.billingInterval ? `/${formatInterval(obs.billingInterval).toLowerCase()}` : ""}
-                        </span>
-                        {idx === 0 && <span className="text-xs text-muted-foreground shrink-0">(current)</span>}
-                      </div>
-                    ))}
+                    {[...data.priceHistory.observations].reverse().map((obs, idx) => {
+                      const total = data.priceHistory.observations.length;
+                      const chronologicalIndex = total - 1 - idx;
+                      // detectPriceChanges() walks observations pairwise with no
+                      // skipped pairs, so observation[i] (i>=1) always maps 1:1
+                      // to changes[i-1].
+                      const change = chronologicalIndex >= 1 ? data.priceChanges.changes[chronologicalIndex - 1] : null;
+                      return (
+                        <div
+                          key={`${obs.observedAt}-${obs.amount}-${obs.currency}`}
+                          className="flex items-center justify-between gap-3 text-sm"
+                          data-testid={`row-price-history-${idx}`}
+                        >
+                          <span className="text-muted-foreground w-20 shrink-0">{formatMonthYear(obs.observedAt)}</span>
+                          <span className="flex-1 min-w-0 font-medium">
+                            {formatMoney(obs.amount, obs.currency)}
+                            {obs.billingInterval ? `/${formatInterval(obs.billingInterval).toLowerCase()}` : ""}
+                          </span>
+                          {idx === 0 && <span className="text-xs text-muted-foreground shrink-0">(current)</span>}
+                          {obs.isFirstKnownPrice && (
+                            <span className="text-xs text-muted-foreground shrink-0" data-testid={`text-price-first-known-${idx}`}>
+                              (first known price)
+                            </span>
+                          )}
+                          {change && change.changeType === "increase" && (
+                            <span className="text-xs text-amber-600 dark:text-amber-500 shrink-0" data-testid={`text-price-change-indicator-${idx}`}>
+                              ↑ {formatSignedPercent(change.percentageChange)}
+                            </span>
+                          )}
+                          {change && change.changeType === "decrease" && (
+                            <span className="text-xs text-emerald-600 dark:text-emerald-500 shrink-0" data-testid={`text-price-change-indicator-${idx}`}>
+                              ↓ {formatSignedPercent(change.percentageChange)}
+                            </span>
+                          )}
+                          {change && change.changeType === "currency_change" && (
+                            <span className="text-xs text-muted-foreground shrink-0" data-testid={`text-price-change-indicator-${idx}`}>
+                              currency changed
+                            </span>
+                          )}
+                          {change && change.changeType === "interval_change" && (
+                            <span className="text-xs text-muted-foreground shrink-0" data-testid={`text-price-change-indicator-${idx}`}>
+                              billing frequency changed
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -698,6 +810,23 @@ export default function SubscriptionsPage() {
   const summary = data?.summary;
   const incompleteTotal = (summary?.incompleteBillingCount ?? 0) + (summary?.unknownCostCount ?? 0);
 
+  // Phase 3B.9.8 STEP 6: subscriptions.lastPriceChange* is written by
+  // server/storage.ts's runPriceChangeDetection() and flows through
+  // GET /api/subscriptions unmodified (ShadowSubscription's own columns,
+  // no extra endpoint needed). "Active" mirrors subscriptionCostEngine.ts's
+  // ACTIVE_LIKE_STATUSES exactly so this badge only ever counts
+  // subscriptions the cost summary itself already treats as active.
+  const ACTIVE_STATUSES = new Set(["active", "trial", "past_due"]);
+  const ninetyDaysAgo = new Date();
+  ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+  const recentPriceChange = (sub: SubscriptionWithCost, type: "increase" | "decrease") =>
+    ACTIVE_STATUSES.has(sub.subscriptionStatus) &&
+    sub.lastPriceChangeType === type &&
+    !!sub.lastPriceChangeAt &&
+    new Date(sub.lastPriceChangeAt as unknown as string) >= ninetyDaysAgo;
+  const priceIncreaseCount = subs.filter((s) => recentPriceChange(s, "increase")).length;
+  const priceDecreaseCount = subs.filter((s) => recentPriceChange(s, "decrease")).length;
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b sticky top-0 bg-background z-50">
@@ -778,6 +907,16 @@ export default function SubscriptionsPage() {
                 </CardContent>
               </Card>
             </div>
+
+            {priceIncreaseCount > 0 ? (
+              <p className="text-xs font-medium text-amber-600 dark:text-amber-500 mb-1" data-testid="text-price-increase-badge">
+                ⚠️ {priceIncreaseCount} price increase{priceIncreaseCount === 1 ? "" : "s"} detected
+              </p>
+            ) : priceDecreaseCount > 0 ? (
+              <p className="text-xs font-medium text-emerald-600 dark:text-emerald-500 mb-1" data-testid="text-price-decrease-badge">
+                ✓ {priceDecreaseCount} price decrease{priceDecreaseCount === 1 ? "" : "s"}
+              </p>
+            ) : null}
 
             {incompleteTotal > 0 && (
               <p className="text-xs text-muted-foreground mb-4" data-testid="text-incomplete-billing">

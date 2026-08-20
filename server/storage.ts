@@ -6,6 +6,8 @@ import { decideCanonicalization } from "./canonicalEvents";
 import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
 import { lookupMerchantKnowledge } from "./merchantKnowledge";
+import { buildPriceHistory } from "./priceHistory";
+import { detectPriceChanges } from "./priceChangeDetector";
 
 // ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
 //
@@ -1066,6 +1068,11 @@ export class DatabaseStorage implements IStorage {
       promotedAt: r.promoted_at,
       promotionReason: r.promotion_reason,
       promotionEvidence: r.promotion_evidence,
+      lastPriceChangeAt: r.last_price_change_at,
+      lastPriceChangeType: r.last_price_change_type,
+      lastPriceChangeAbsolute: r.last_price_change_absolute,
+      lastPriceChangePercentage: r.last_price_change_percentage,
+      lastPriceChangeAnnualImpact: r.last_price_change_annual_impact,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
@@ -1126,7 +1133,8 @@ export class DatabaseStorage implements IStorage {
       // inference accumulates regardless of whether THIS event also
       // triggered a state/data change.
       const withBillingIntel = await this.runBillingIntelligence(existing);
-      return { applied: transition.kind !== "no_op", transition, subscription: withBillingIntel };
+      const withPriceChange = await this.runPriceChangeDetection(withBillingIntel);
+      return { applied: transition.kind !== "no_op", transition, subscription: withPriceChange };
     }
 
     const [updated] = await db
@@ -1145,7 +1153,8 @@ export class DatabaseStorage implements IStorage {
     }
 
     const withBillingIntel = await this.runBillingIntelligence(updated);
-    return { applied: true, transition, subscription: withBillingIntel };
+    const withPriceChange = await this.runPriceChangeDetection(withBillingIntel);
+    return { applied: true, transition, subscription: withPriceChange };
   }
 
   // ── Phase 3B.9.3: billing intelligence orchestration ──────────────────────────
@@ -1210,6 +1219,58 @@ export class DatabaseStorage implements IStorage {
     );
 
     return updated;
+  }
+
+  // ── Phase 3B.9.8: price change detection orchestration ────────────────────────
+  //
+  // Per the approved architectural decision for this phase, price
+  // observations are INDEPENDENT of subscriptions.amount and Phase 3B.8's
+  // lifecycle state machine: this method NEVER writes subscriptions.amount
+  // (that stays owned entirely by applyEventToSubscription()'s existing
+  // BILLING_DATA_EVENT_TYPES rule, untouched here) — it only records the
+  // most recent DETECTED change as its own separate lastPriceChange*
+  // fields. Runs against EVERY canonical event for this subscription
+  // (same query shape as runBillingIntelligence() above, deliberately not
+  // filtered by eventType) so a one_time_purchase event's price
+  // contributes to the observation timeline exactly like any other event —
+  // it still never causes a lifecycle transition or touches `amount`,
+  // per STEP 1's hard rule.
+  private async runPriceChangeDetection(subscription: ShadowSubscription): Promise<ShadowSubscription> {
+    const canonicalEvents = await db
+      .select()
+      .from(subscriptionEvents)
+      .where(and(
+        eq(subscriptionEvents.userId, subscription.userId),
+        eq(subscriptionEvents.canonicalMerchantDomain, subscription.canonicalMerchantDomain ?? ""),
+        eq(subscriptionEvents.isCanonical, true)
+      ));
+
+    const priceHistory = buildPriceHistory(canonicalEvents);
+    const priceChanges = detectPriceChanges(priceHistory);
+
+    if (!priceChanges.latestChange) return subscription;
+
+    const change = priceChanges.latestChange;
+
+    const [updated] = await db
+      .update(subscriptions)
+      .set({
+        lastPriceChangeAt: new Date(change.detectedAt),
+        lastPriceChangeType: change.changeType,
+        lastPriceChangeAbsolute: String(change.absoluteChange),
+        lastPriceChangePercentage: String(change.percentageChange),
+        lastPriceChangeAnnualImpact: String(change.annualImpact),
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.id, subscription.id))
+      .returning();
+
+    console.log(
+      `[Lifecycle] price change detected for ${subscription.canonicalMerchantName}: ` +
+      `${change.previousAmount}${change.previousCurrency} -> ${change.newAmount}${change.newCurrency} (${change.percentageChange}%)`
+    );
+
+    return updated ?? subscription;
   }
 
   // "Check for existing reminders before creating (no duplicates)" is

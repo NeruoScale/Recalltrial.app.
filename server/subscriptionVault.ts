@@ -15,6 +15,7 @@ import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
 import { calculateSubscriptionCosts, type SubscriptionWithCost } from "./subscriptionCostEngine";
 import type { BillingIntervalSource } from "./billingIntelligence";
 import { buildPriceHistory, type PriceHistoryResult } from "./priceHistory";
+import { detectPriceChanges, type PriceChangeResult } from "./priceChangeDetector";
 
 // ─── Event type labels ──────────────────────────────────────────────────────
 //
@@ -161,6 +162,10 @@ export type SubscriptionVaultResponse = {
   // percentage/savings math added here or anywhere in this module (that's
   // explicitly Phase 3B.9.7's job, not this one's).
   priceHistory: PriceHistoryResult;
+  // Phase 3B.9.8: server/priceChangeDetector.ts's output, derived from the
+  // SAME priceHistory computed just above — no separate event fetch, no
+  // separate DB query.
+  priceChanges: PriceChangeResult;
 };
 
 /**
@@ -181,6 +186,7 @@ export function buildSubscriptionVaultResponse(
 
   const history = buildHistory(events);
   const priceHistory = buildPriceHistory(events);
+  const priceChanges = detectPriceChanges(priceHistory);
 
   // Detection confidence: merchantConfidence is the resolution engine's own
   // 0-100 score for this subscription's identity — the same value
@@ -236,6 +242,7 @@ export function buildSubscriptionVaultResponse(
       resolutionMethod: subscription.resolutionMethod,
     },
     priceHistory,
+    priceChanges,
   };
 }
 
