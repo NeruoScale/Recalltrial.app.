@@ -1,11 +1,60 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, isNull, lte, sql, count, desc, inArray } from "drizzle-orm";
+import { eq, and, isNull, lte, sql, count, desc, inArray, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
 import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
 import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
 import { lookupMerchantKnowledge } from "./merchantKnowledge";
+
+// ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
+//
+// Mirrors server/sourcePrecedence.ts's isEligibleToUpgrade() rule (ai=4 >
+// body=3 > snippet=2 > metadata=1 > null=0) directly in SQL — raw SQL inside
+// onConflictDoUpdate() can't call a TS function, so the numbers are
+// hand-duplicated here; if sourcePrecedence.ts's table ever changes, this
+// must change with it. Equal-tier comparisons resolve to TRUE (>=)
+// deliberately: a same-tier re-scan of the same message can carry
+// genuinely fresher data (e.g. a merchant's stated price changed between
+// two scans of the same email — unlikely but not impossible for a
+// re-classification), so equal tiers are allowed to overwrite. This is the
+// LIVE re-scan path; server/backfillBodyExtraction.ts's one-time backfill
+// additionally checks whether the VALUE itself actually changed before
+// counting/writing an update, which matters there for idempotency but is
+// unnecessary here.
+function sourceRank(columnSql: SQLWrapper) {
+  return sql`(CASE ${columnSql} WHEN 'ai' THEN 4 WHEN 'body' THEN 3 WHEN 'snippet' THEN 2 WHEN 'metadata' THEN 1 ELSE 0 END)`;
+}
+
+/**
+ * buildSourceAwareConflictSet(): the onConflictDoUpdate() `set` clause
+ * shared by both insert paths in createSubscriptionEvent() below. Per-field
+ * independent — amount/interval/date each compare their OWN provenance
+ * column, so e.g. a re-scan with a worse amount but a better interval only
+ * upgrades interval, never regresses amount just because they arrived in
+ * the same write. Never touches eventType/confidence/detectionSource/etc —
+ * those remain owned entirely by classification, not extraction quality.
+ */
+function buildSourceAwareConflictSet(data: InsertSubscriptionEvent) {
+  const amountWins = sql`${sourceRank(sql`excluded.amount_source`)} >= ${sourceRank(subscriptionEvents.amountSource)}`;
+  const intervalWins = sql`${sourceRank(sql`excluded.interval_source`)} >= ${sourceRank(subscriptionEvents.intervalSource)}`;
+  const dateWins = sql`${sourceRank(sql`excluded.date_source`)} >= ${sourceRank(subscriptionEvents.dateSource)}`;
+
+  return {
+    canonicalMerchantName: data.canonicalMerchantName,
+    canonicalMerchantDomain: data.canonicalMerchantDomain,
+    paymentProcessor: data.paymentProcessor,
+    merchantConfidence: data.merchantConfidence,
+    merchantResolutionStatus: data.merchantResolutionStatus,
+    extractedPrice: sql`CASE WHEN ${amountWins} THEN excluded.extracted_price ELSE ${subscriptionEvents.extractedPrice} END`,
+    extractedCurrency: sql`CASE WHEN ${amountWins} THEN excluded.extracted_currency ELSE ${subscriptionEvents.extractedCurrency} END`,
+    amountSource: sql`CASE WHEN ${amountWins} THEN excluded.amount_source ELSE ${subscriptionEvents.amountSource} END`,
+    billingInterval: sql`CASE WHEN ${intervalWins} THEN excluded.billing_interval ELSE ${subscriptionEvents.billingInterval} END`,
+    intervalSource: sql`CASE WHEN ${intervalWins} THEN excluded.interval_source ELSE ${subscriptionEvents.intervalSource} END`,
+    extractedDate: sql`CASE WHEN ${dateWins} THEN excluded.extracted_date ELSE ${subscriptionEvents.extractedDate} END`,
+    dateSource: sql`CASE WHEN ${dateWins} THEN excluded.date_source ELSE ${subscriptionEvents.dateSource} END`,
+  };
+}
 
 export interface IStorage {
   getUserById(id: string): Promise<User | undefined>;
@@ -439,18 +488,22 @@ export class DatabaseStorage implements IStorage {
     // classifier itself hasn't changed since the last scan — used to be a
     // silent no-op (onConflictDoNothing), which meant new columns added
     // after a row already existed (like Phase 3B.3's merchant-resolution
-    // fields) could never backfill onto it. Now upserts, but ONLY the
-    // merchant-resolution columns on conflict — eventType/extractedPrice/
-    // extractedDate/confidence/etc, established by Phase 3B.1/3B.2's
-    // classification, are deliberately left untouched on conflict rather
-    // than silently re-applied from a later scan.
+    // fields) could never backfill onto it. Now upserts merchant fields
+    // unconditionally, and upserts extractedPrice/extractedCurrency/
+    // billingInterval/extractedDate too — but ONLY per-field, and ONLY when
+    // buildSourceAwareConflictSet()'s precedence check says the new value's
+    // source is at least as good as what's already stored (Phase
+    // 3B.9.7-PATCH). A worse-sourced re-scan (e.g. snippet-only) can never
+    // regress a field a previous body-fetch already improved.
     //
     // Phase 3B.5: a re-scan that lands on a DIFFERENT eventType than the
     // message's current canonical row is a reclassification, not an
     // independent event — see server/canonicalEvents.ts for the decision
     // logic. This whole method runs in a transaction so the "old row
     // superseded + new row canonical" state change is atomic.
-    const writtenId: string | null = await db.transaction(async (tx): Promise<string | null> => {
+    type WrittenRow = Pick<SubscriptionEvent, "id" | "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval">;
+
+    const writtenRow: WrittenRow | null = await db.transaction(async (tx): Promise<WrittenRow | null> => {
       const existingRows = await tx
         .select()
         .from(subscriptionEvents)
@@ -459,19 +512,13 @@ export class DatabaseStorage implements IStorage {
       const decision = decideCanonicalization(existingRows, data.eventType);
 
       if (decision.kind === "same_classification") {
-        const result = await tx.insert(subscriptionEvents).values(data)
+        const [row] = await tx.insert(subscriptionEvents).values(data)
           .onConflictDoUpdate({
             target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
-            set: {
-              canonicalMerchantName: data.canonicalMerchantName,
-              canonicalMerchantDomain: data.canonicalMerchantDomain,
-              paymentProcessor: data.paymentProcessor,
-              merchantConfidence: data.merchantConfidence,
-              merchantResolutionStatus: data.merchantResolutionStatus,
-            },
+            set: buildSourceAwareConflictSet(data),
           })
-          .returning({ id: subscriptionEvents.id });
-        return result.length > 0 ? result[0].id : null;
+          .returning();
+        return row ?? null;
       }
 
       // first_generation or reclassification: this scan produces a new
@@ -497,18 +544,14 @@ export class DatabaseStorage implements IStorage {
         .onConflictDoUpdate({
           target: [subscriptionEvents.userId, subscriptionEvents.sourceMessageId, subscriptionEvents.eventType],
           set: {
+            ...buildSourceAwareConflictSet(data),
             classificationGeneration: generation,
             isCanonical: true,
             canonicalEventId: sql`${subscriptionEvents.id}`,
             supersededBy: null,
-            canonicalMerchantName: data.canonicalMerchantName,
-            canonicalMerchantDomain: data.canonicalMerchantDomain,
-            paymentProcessor: data.paymentProcessor,
-            merchantConfidence: data.merchantConfidence,
-            merchantResolutionStatus: data.merchantResolutionStatus,
           },
         })
-        .returning({ id: subscriptionEvents.id });
+        .returning();
 
       if (!canonicalRow) return null;
 
@@ -524,7 +567,7 @@ export class DatabaseStorage implements IStorage {
         }
       }
 
-      return canonicalRow.id;
+      return canonicalRow;
     });
 
     // Phase 3B.8: the lifecycle engine runs AFTER the event write commits,
@@ -532,24 +575,31 @@ export class DatabaseStorage implements IStorage {
     // the underlying subscription_event write succeeded or roll it back.
     // Same isolation pattern as gmail.ts's sub-detector write relative to
     // the trial-suggestion pipeline.
-    if (writtenId) {
+    //
+    // Phase 3B.9.7-PATCH: uses writtenRow's ACTUAL post-merge stored values,
+    // not the raw incoming `data` — when the conflict-resolution above
+    // PRESERVED an existing higher-quality field (e.g. kept a body-sourced
+    // price over this scan's worse snippet-only price), the lifecycle
+    // engine must see what's really in the row now, not what this
+    // particular scan happened to propose.
+    if (writtenRow) {
       try {
         await this.applyLifecycleEventToSubscription({
-          id: writtenId,
-          eventType: data.eventType,
-          extractedPrice: data.extractedPrice ?? null,
-          extractedCurrency: data.extractedCurrency ?? null,
-          extractedDate: data.extractedDate ?? null,
-          userId: data.userId,
-          canonicalMerchantDomain: data.canonicalMerchantDomain ?? null,
-          billingInterval: data.billingInterval ?? null,
+          id: writtenRow.id,
+          eventType: writtenRow.eventType,
+          extractedPrice: writtenRow.extractedPrice,
+          extractedCurrency: writtenRow.extractedCurrency,
+          extractedDate: writtenRow.extractedDate,
+          userId: writtenRow.userId,
+          canonicalMerchantDomain: writtenRow.canonicalMerchantDomain,
+          billingInterval: writtenRow.billingInterval,
         });
       } catch (err) {
         console.error("[Lifecycle] failed to apply event to subscription:", err);
       }
     }
 
-    return writtenId !== null;
+    return writtenRow !== null;
   }
 
   async getSubscriptionEventMetrics(): Promise<{

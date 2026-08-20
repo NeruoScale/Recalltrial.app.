@@ -11,6 +11,7 @@ import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
 import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
+import { backfillCanonicalEventBodies } from "./backfillBodyExtraction";
 import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
 import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
 import { calculateRenewalCalendar } from "./renewalCalendar";
@@ -879,6 +880,29 @@ export async function registerRoutes(
       return res.json(result);
     } catch (err) {
       console.error("Admin reminder-generation error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3B.9.7-PATCH: one-time historical body-extraction backfill,
+  // admin-triggered (same X-ADMIN-KEY gate as every other /api/admin/*
+  // route) rather than wired into any cron — this is a one-off enrichment
+  // pass, not a recurring job. dryRun=true (the default when omitted) runs
+  // every extraction/comparison and returns the full count breakdown
+  // without writing anything, matching this phase's explicit "dry-run
+  // first, report the numbers" requirement.
+  app.post("/api/admin/backfill-body-extraction", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const userId: string | undefined = req.body?.userId || undefined;
+      const dryRun: boolean = req.body?.dryRun !== false; // default true — an explicit dryRun:false is required to write
+      const report = await backfillCanonicalEventBodies(userId, dryRun);
+      return res.json({ dryRun, ...report });
+    } catch (err) {
+      console.error("Admin body-extraction backfill error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

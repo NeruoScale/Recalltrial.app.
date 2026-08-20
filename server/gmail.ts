@@ -20,6 +20,26 @@ function getOAuthClient() {
   );
 }
 
+/**
+ * buildGmailClient(): same OAuth2Client + gmail client construction
+ * scanGmailForTrials() does inline — extracted (Phase 3B.9.7-PATCH) so
+ * server/backfillBodyExtraction.ts can build an authenticated client for a
+ * user without duplicating this wiring.
+ */
+export function buildGmailClient(
+  accessToken: string,
+  refreshToken: string | null,
+  tokenExpiry: Date | null
+): ReturnType<typeof google.gmail> {
+  const oauth2Client = getOAuthClient();
+  oauth2Client.setCredentials({
+    access_token: accessToken,
+    refresh_token: refreshToken || undefined,
+    expiry_date: tokenExpiry?.getTime(),
+  });
+  return google.gmail({ version: "v1", auth: oauth2Client });
+}
+
 export function generateAuthUrl(userId: string): string {
   const oauth2Client = getOAuthClient();
   return oauth2Client.generateAuthUrl({
@@ -1256,14 +1276,7 @@ export async function scanGmailForTrials(
   lastEmailScanAt?: Date | null
 ): Promise<ScanResult> {
   const scanStartedAt = new Date();
-  const oauth2Client = getOAuthClient();
-  oauth2Client.setCredentials({
-    access_token: accessToken,
-    refresh_token: refreshToken || undefined,
-    expiry_date: tokenExpiry?.getTime(),
-  });
-
-  const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+  const gmail = buildGmailClient(accessToken, refreshToken, tokenExpiry);
 
   const timeFilter = buildScanTimeFilter(lastEmailScanAt);
 
