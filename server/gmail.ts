@@ -225,7 +225,7 @@ function resolveFutureCalendarDate(year: number, month: number, day: number, tod
   return formatCalendarDate(resolved.year, resolved.month, resolved.day);
 }
 
-export function extractDate(
+function extractDateFromSingleText(
   text: string,
   receivedAt: Date
 ): { date: string | null; source: EndDateSource } {
@@ -358,6 +358,29 @@ export function extractDate(
   return { date: null, source: "none" };
 }
 
+/**
+ * extractDate(): tries `text` (subject+snippet) first; only falls back to
+ * `fullBodyText` when nothing is found there — the full body frequently
+ * carries an explicit "next billing date"/renewal date the truncated
+ * snippet cuts off. `receivedAt` anchors relative/duration calculations
+ * (e.g. "ends tomorrow") the same way regardless of which layer the phrase
+ * was found in — it describes when the email itself arrived, not where the
+ * date phrase was read from.
+ */
+export function extractDate(
+  text: string,
+  receivedAt: Date,
+  fullBodyText?: string
+): { date: string | null; source: EndDateSource } {
+  const found = extractDateFromSingleText(text, receivedAt);
+  if (found.date) return found;
+  if (fullBodyText) {
+    const foundInBody = extractDateFromSingleText(fullBodyText, receivedAt);
+    if (foundInBody.date) return foundInBody;
+  }
+  return found;
+}
+
 // ─── Start date extraction ─────────────────────────────────────────────────────
 // Only extract if an explicit start date phrase is present. Never defaults to today.
 
@@ -385,22 +408,70 @@ export function extractStartDate(text: string): { date: string | null; source: "
 }
 
 // ─── Amount extraction ────────────────────────────────────────────────────────
+//
+// Phase 3B.9.7: currency coverage extended past $/€/£/USD/EUR/GBP/QAR to the
+// full symbol/code set the task requires. ¥ (JPY/CNY) and "kr" (SEK/DKK/NOK)
+// are inherently ambiguous symbols with no further disambiguating text
+// available at this layer — defaulted to the more common of the pair (JPY,
+// SEK respectively) rather than guessing per-message; a genuinely wrong
+// default here is no worse than the pre-existing behavior of not detecting
+// the amount at all.
+const CURRENCY_SYMBOL_MAP: Record<string, string> = {
+  "$": "USD",
+  "£": "GBP",
+  "€": "EUR",
+  "¥": "JPY",
+  "₹": "INR",
+};
 
-export function extractAmount(text: string): { amount: string | null; currency: string } {
-  const match = text.match(/(?:[\$\£\€])\s*(\d+(?:\.\d{2})?)|\b(\d+(?:\.\d{2})?)\s*(?:USD|EUR|GBP|QAR)\b/i);
-  if (match) {
-    const amount = match[1] || match[2];
-    const currencyMatch = text.match(/(\$|£|€|USD|EUR|GBP|QAR)/i);
-    let currency = "USD";
-    if (currencyMatch) {
-      const c = currencyMatch[1].toUpperCase();
-      if (c === "$") currency = "USD";
-      else if (c === "£") currency = "GBP";
-      else if (c === "€") currency = "EUR";
-      else currency = c;
-    }
-    return { amount, currency };
+const CURRENCY_CODE_LIST = ["USD", "EUR", "GBP", "QAR", "CHF", "CAD", "AUD", "NZD", "SEK", "DKK", "NOK", "JPY", "CNY", "INR"];
+const CURRENCY_CODE_PATTERN = CURRENCY_CODE_LIST.join("|");
+
+function findAmountInText(text: string): { amount: string; currency: string } | null {
+  const symbolMatch = text.match(/([\$£€¥₹])\s*(\d+(?:\.\d{2})?)/);
+  if (symbolMatch) {
+    return { amount: symbolMatch[2], currency: CURRENCY_SYMBOL_MAP[symbolMatch[1]] };
   }
+
+  const codeAfter = text.match(new RegExp(`\\b(\\d+(?:\\.\\d{2})?)\\s*(${CURRENCY_CODE_PATTERN})\\b`, "i"));
+  if (codeAfter) {
+    return { amount: codeAfter[1], currency: codeAfter[2].toUpperCase() };
+  }
+
+  const codeBefore = text.match(new RegExp(`\\b(${CURRENCY_CODE_PATTERN})\\s*(\\d+(?:\\.\\d{2})?)\\b`, "i"));
+  if (codeBefore) {
+    return { amount: codeBefore[2], currency: codeBefore[1].toUpperCase() };
+  }
+
+  // "kr" (SEK/DKK/NOK) has no distinguishing symbol of its own — checked
+  // last, after every ISO-code form above, so an explicit "199.00 SEK" or
+  // "199.00 NOK" elsewhere in the same text is never shadowed by a bare
+  // "kr" match.
+  const krMatch = text.match(/\b(\d+(?:\.\d{2})?)\s*kr\b/i);
+  if (krMatch) {
+    return { amount: krMatch[1], currency: "SEK" };
+  }
+
+  return null;
+}
+
+/**
+ * extractAmount(): tries `text` (subject+snippet) first; only falls back to
+ * `fullBodyText` when the snippet-scoped search finds nothing. Return shape
+ * is unchanged from before Phase 3B.9.7 — callers that need to know WHICH
+ * layer the amount came from (subscriptionEvents.amountSource) derive that
+ * themselves by comparing a snippet-only call against this one, rather than
+ * this function reporting its own provenance (see detectSubscriptionEvent()).
+ */
+export function extractAmount(text: string, fullBodyText?: string): { amount: string | null; currency: string } {
+  const inSnippet = findAmountInText(text);
+  if (inSnippet) return inSnippet;
+
+  if (fullBodyText) {
+    const inBody = findAmountInText(fullBodyText);
+    if (inBody) return inBody;
+  }
+
   return { amount: null, currency: "USD" };
 }
 
@@ -436,6 +507,172 @@ export function scoreConfidenceDetailed(
   if (!passesReceiptFilter(text)) add("Receipt without recurring indicator", -30);
 
   return { score: Math.min(Math.max(score, 0), 95), breakdown };
+}
+
+// ─── Full body fetch (Phase 3B.9.7) ────────────────────────────────────────────
+//
+// Second-stage, best-effort enrichment for messages that already passed the
+// candidate gate (hasSubscriptionEventSignal, checked by the caller before
+// this is invoked — see scanGmailForTrials). Layer 1 (metadata + snippet)
+// is completely unchanged and is still what decides whether a message is a
+// candidate at all; this layer only extends what a message that ALREADY
+// qualified can additionally reveal.
+//
+// PRIVACY: the decoded body string is a local variable inside this function
+// and whatever calls it — never assigned to a module-level variable, never
+// passed to console.log/console.error, never included in any object that
+// gets written to the database. The only things that leave this function
+// are (a) the plaintext itself, returned to the immediate caller for
+// synchronous extraction, or (b) null. Once the caller's extraction calls
+// return, nothing keeps a reference to it and it is eligible for GC exactly
+// like any other local value — there is no separate "discard" step needed
+// beyond simply not storing it anywhere, which the code below (and every
+// call site of fetchMessageBody in this file) satisfies by construction.
+
+const MAX_BODY_CHARS = 8000;
+
+function decodeBase64Url(data: string): string {
+  const normalized = data.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64").toString("utf-8");
+}
+
+/**
+ * htmlToPlainText(): link URLs are pulled out into `text (url)` form BEFORE
+ * tags are stripped — a plain "strip every tag" pass would silently drop
+ * every href, which would make extractCancellationUrl() below unable to
+ * ever find a cancel/unsubscribe link that only exists as an <a href> in an
+ * HTML email (the common case), not as bare visible text.
+ */
+function htmlToPlainText(html: string): string {
+  let text = html;
+  text = text.replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, url, inner) => `${inner} (${url})`);
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ");
+  text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ");
+  text = text.replace(/<br\s*\/?>/gi, "\n");
+  text = text.replace(/<\/p>/gi, "\n");
+  text = text.replace(/<[^>]+>/g, " ");
+  text = text
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+  return text.replace(/[ \t]+/g, " ").replace(/\n[ \t]*\n+/g, "\n").trim();
+}
+
+/** Depth-first search through a (possibly nested, multipart/alternative) MIME tree for the first part matching `mimeType`. */
+function findBodyPart(part: any, mimeType: string): string | null {
+  if (!part) return null;
+  if (part.mimeType === mimeType && part.body?.data) {
+    return decodeBase64Url(part.body.data);
+  }
+  if (Array.isArray(part.parts)) {
+    for (const sub of part.parts) {
+      const found = findBodyPart(sub, mimeType);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * fetchMessageBody(): second Gmail API call (format:"full") for a single
+ * already-qualified candidate message. text/plain is preferred; text/html
+ * is only used when no text/plain part exists anywhere in the MIME tree.
+ * Truncated to MAX_BODY_CHARS. Returns null on any failure (network error,
+ * missing payload, no usable part) — callers must treat null as "proceed
+ * with snippet-only extraction," never as an error to surface to the user.
+ */
+export async function fetchMessageBody(
+  gmail: ReturnType<typeof google.gmail>,
+  messageId: string
+): Promise<string | null> {
+  try {
+    const res = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
+
+    const payload = res.data.payload;
+    if (!payload) return null;
+
+    let raw: string | null = null;
+
+    if (!payload.parts && payload.body?.data) {
+      raw = decodeBase64Url(payload.body.data);
+      if (payload.mimeType === "text/html") raw = htmlToPlainText(raw);
+    } else {
+      const plainText = findBodyPart(payload, "text/plain");
+      if (plainText) {
+        raw = plainText;
+      } else {
+        const htmlText = findBodyPart(payload, "text/html");
+        if (htmlText) raw = htmlToPlainText(htmlText);
+      }
+    }
+
+    if (!raw) return null;
+    return raw.slice(0, MAX_BODY_CHARS);
+  } catch {
+    // Never log `err` here in a way that could echo body content — Gmail
+    // API failures at this stage are transport/auth errors, not partial
+    // body echoes, but the catch stays silent regardless (see PRIVACY note
+    // above) and the caller falls back to snippet-only extraction.
+    return null;
+  }
+}
+
+// ─── Cancellation URL / next-billing-date / account-id extraction (3B.9.7) ─────
+
+const CANCEL_URL_KEYWORD_PATTERN = /cancel|unsubscribe|manage[-_ ]?(?:subscription|billing|plan|account)/i;
+
+function findCancellationUrlInText(text: string): string | null {
+  const urls = text.match(/https?:\/\/[^\s)"'<>]+/gi);
+  if (urls) {
+    for (const url of urls) {
+      if (CANCEL_URL_KEYWORD_PATTERN.test(url)) return url;
+    }
+  }
+  // Fallback: a URL appearing shortly after a "cancel"/"unsubscribe" word in
+  // surrounding text, even when the URL itself has no matching keyword in
+  // its path (e.g. an opaque tracking-shortened link right after "Cancel:").
+  const contextMatch = text.match(/(?:cancel|unsubscribe)[^\n]{0,60}?(https?:\/\/[^\s)"'<>]+)/i);
+  return contextMatch?.[1] ?? null;
+}
+
+/** extractCancellationUrl(): never invents a URL — only ever returns one actually present in the text. */
+export function extractCancellationUrl(text: string, fullBodyText?: string): string | null {
+  return findCancellationUrlInText(text) ?? (fullBodyText ? findCancellationUrlInText(fullBodyText) : null);
+}
+
+const NEXT_BILLING_DATE_PATTERN = /(?:next billing date|next payment date|next charge date|renews on|renewal date)[:\s]+(?:on\s+)?([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/i;
+
+function findNextBillingDateInText(text: string): string | null {
+  const match = text.match(NEXT_BILLING_DATE_PATTERN);
+  if (!match?.[1]) return null;
+  const components = parseCalendarDateComponents(match[1]);
+  if (!components) return null;
+  const today = utcDateParts(new Date());
+  return resolveFutureCalendarDate(components.year ?? today.year, components.month, components.day, today);
+}
+
+/** extractNextBillingDate(): narrower than extractDate() — only matches explicit "next billing/renewal date" phrasing, not any lifecycle date. */
+export function extractNextBillingDate(text: string, fullBodyText?: string): string | null {
+  return findNextBillingDateInText(text) ?? (fullBodyText ? findNextBillingDateInText(fullBodyText) : null);
+}
+
+const SUBSCRIPTION_ID_PATTERN = /(?:subscription (?:id|number)|account (?:id|number)|order (?:id|number|#)|reference (?:id|number)?)[:\s#]+([A-Za-z0-9\-]{4,40})/i;
+
+function findSubscriptionIdInText(text: string): string | null {
+  const match = text.match(SUBSCRIPTION_ID_PATTERN);
+  return match?.[1] ?? null;
+}
+
+/** extractSubscriptionId(): merchant-issued account/subscription identifier, when the email states one explicitly. */
+export function extractSubscriptionId(text: string, fullBodyText?: string): string | null {
+  return findSubscriptionIdInText(text) ?? (fullBodyText ? findSubscriptionIdInText(fullBodyText) : null);
 }
 
 // ─── Subscription-event detection (Phase 2 Step 5, parallel to trial detection) ─
@@ -632,14 +869,7 @@ const BILLING_INTERVAL_PHRASES: Record<BillingIntervalValue, { strong: string[];
 // deliberately excludes the six ambiguous interval words themselves.
 const BILLING_CONTEXT_PATTERN = /\$|\busd\b|\bprice\b|\bbilled\b|\bcharged?\b|\bpayment\b|\binvoice\b|\bsubscription\b|\brecurring\b|\bmembership\b|\bauto-?renew(?:s|al|ing)?\b|\brenews?\b|\brenewal\b|\brenewing\b/i;
 
-/**
- * extractBillingInterval(): returns a specific recurrence interval only when
- * there's explicit, billing-connected textual evidence for it — never
- * guessed from price alone, never defaulted from the merchant. Returns null
- * whenever that evidence isn't there, which callers must treat as "unknown,"
- * not "monthly" (the common case) or any other assumed default.
- */
-export function extractBillingInterval(text: string): BillingIntervalValue | null {
+function extractBillingIntervalFromSingleText(text: string): BillingIntervalValue | null {
   const lower = text.toLowerCase();
 
   for (const [interval, phrases] of Object.entries(BILLING_INTERVAL_PHRASES) as [BillingIntervalValue, { strong: string[]; weak: string[] }][]) {
@@ -656,6 +886,24 @@ export function extractBillingInterval(text: string): BillingIntervalValue | nul
     }
   }
 
+  return null;
+}
+
+/**
+ * extractBillingInterval(): returns a specific recurrence interval only when
+ * there's explicit, billing-connected textual evidence for it — never
+ * guessed from price alone, never defaulted from the merchant. Returns null
+ * whenever that evidence isn't there, which callers must treat as "unknown,"
+ * not "monthly" (the common case) or any other assumed default.
+ *
+ * Phase 3B.9.7: `fullBodyText` is a fallback only, tried after `text`
+ * (subject+snippet) finds nothing — the full email body frequently states
+ * "monthly"/"billed annually" even when the truncated Gmail snippet doesn't.
+ */
+export function extractBillingInterval(text: string, fullBodyText?: string): BillingIntervalValue | null {
+  const found = extractBillingIntervalFromSingleText(text);
+  if (found) return found;
+  if (fullBodyText) return extractBillingIntervalFromSingleText(fullBodyText);
   return null;
 }
 
@@ -699,6 +947,8 @@ export function isSubscriptionEvidence(eventType: SubscriptionEventType): boolea
   return eventType !== "one_time_purchase";
 }
 
+export type ExtractionSource = "snippet" | "body" | null;
+
 export type SubscriptionEventCandidate = {
   eventType: SubscriptionEventType;
   extractedPrice: string | null;
@@ -709,6 +959,12 @@ export type SubscriptionEventCandidate = {
   newPrice: string | null;
   confidence: number;
   billingInterval: string | null;
+  // Phase 3B.9.7: which layer (snippet-only text vs. the second-stage full
+  // body fetch) actually supplied each field — null when the field itself
+  // is null (nothing was found in either layer).
+  amountSource: ExtractionSource;
+  intervalSource: ExtractionSource;
+  dateSource: ExtractionSource;
 };
 
 /**
@@ -764,25 +1020,47 @@ export function detectSubscriptionEvent(
   subject: string,
   snippet: string,
   from: string,
-  dateHeader: string
+  dateHeader: string,
+  // Phase 3B.9.7: optional second-stage full body text (already fetched via
+  // fetchMessageBody() by the caller, already truncated/decoded). `null`/
+  // undefined means Layer 2 wasn't available for this message — every
+  // extractor below already treats that as "use snippet-only" gracefully.
+  fullBodyText?: string | null
 ): SubscriptionEventCandidate | null {
   const combined = (subject + " " + snippet).toLowerCase();
+  const body = fullBodyText ? fullBodyText.toLowerCase() : undefined;
   const receivedAt = dateHeader ? new Date(dateHeader) : new Date();
 
   // Must have SOME subscription-lifecycle signal at all, or there's
   // nothing to log — extends the trial pipeline's baseline gate with this
   // detector's own local phrase categories (see hasSubscriptionEventSignal).
+  // Deliberately checked against `combined` (snippet layer) only, matching
+  // the existing candidate gate exactly — the full body is never allowed to
+  // manufacture a candidate that the snippet-only gate wouldn't have passed.
   if (!hasSubscriptionEventSignal(combined)) return null;
 
-  const { date: extractedDate, source: endDateSource } = extractDate(combined, receivedAt);
-  const { amount, currency } = extractAmount(combined);
+  // Each extractor is called once snippet-only and once with the body
+  // fallback included, so the *Source fields below can report which layer
+  // actually supplied the value — without changing extractAmount/
+  // extractBillingInterval/extractDate's own return shapes.
+  const dateSnippetOnly = extractDate(combined, receivedAt);
+  const { date: extractedDate, source: endDateSource } = extractDate(combined, receivedAt, body);
+  const dateSource: ExtractionSource = extractedDate === null ? null : (dateSnippetOnly.date ? "snippet" : "body");
+
+  const amountSnippetOnly = extractAmount(combined);
+  const { amount, currency } = extractAmount(combined, body);
+  const amountSource: ExtractionSource = amount === null ? null : (amountSnippetOnly.amount ? "snippet" : "body");
+
   const fromDomain = extractDomainFromEmail(from);
   const isProcessorDomain = isPaymentProcessor(fromDomain);
   const merchantClear = !isProcessorDomain || hasClearProcessorMerchant(snippet);
   const extractedMerchant = resolveServiceName(fromDomain, snippet);
   const hasInterval = hasBillingInterval(combined);
   const hasRecurring = hasRecurringLanguage(combined);
-  const billingInterval = extractBillingInterval(combined);
+
+  const intervalSnippetOnly = extractBillingInterval(combined);
+  const billingInterval = extractBillingInterval(combined, body);
+  const intervalSource: ExtractionSource = billingInterval === null ? null : (intervalSnippetOnly ? "snippet" : "body");
 
   let eventType: SubscriptionEventType;
   let previousPrice: string | null = null;
@@ -860,6 +1138,9 @@ export function detectSubscriptionEvent(
     newPrice,
     confidence,
     billingInterval,
+    amountSource,
+    intervalSource,
+    dateSource,
   };
 }
 
@@ -1049,6 +1330,13 @@ export async function scanGmailForTrials(
   let subDetectorExcluded = 0;
   let subDetectorCandidates = 0;
   let subDetectorWritten = 0;
+  // Phase 3B.9.7: Layer 2 (full body) benchmark counters — reported the same
+  // way, never the body content itself.
+  let subDetectorBodyFetched = 0;
+  let subDetectorBodyUnavailable = 0;
+  let subDetectorBodyCharsTotal = 0;
+  let subDetectorBodyImproved = 0;
+  let subDetectorCancellationUrlsFound = 0;
 
   for (const { id: msgId, phase } of allMessages) {
     try {
@@ -1092,9 +1380,35 @@ export async function scanGmailForTrials(
           console.log(`[SubDetector] excluded: ${fromDomain} (noise domain)`);
         } else {
         try {
-          const candidate = detectSubscriptionEvent(subject, snippet, from, dateStr);
+          // Phase 3B.9.7 Layer 2: full body fetch, ONLY for messages that
+          // already pass the same relevance gate detectSubscriptionEvent()
+          // checks internally — checked here too so the (expensive) body
+          // fetch is skipped entirely for messages that were never going to
+          // produce a candidate anyway. The body itself never leaves this
+          // block as anything other than a function argument: not logged,
+          // not stored, not assigned outside this scope.
+          let fullBodyText: string | null = null;
+          if (hasSubscriptionEventSignal(combined)) {
+            fullBodyText = await fetchMessageBody(gmail, msgId);
+            if (fullBodyText) {
+              subDetectorBodyFetched++;
+              subDetectorBodyCharsTotal += fullBodyText.length;
+              console.log(`[SubDetector] full body fetched for candidate ${msgId} (${fullBodyText.length} chars)`);
+              if (extractCancellationUrl(subject + " " + snippet, fullBodyText)) {
+                subDetectorCancellationUrlsFound++;
+              }
+            } else {
+              subDetectorBodyUnavailable++;
+              console.log(`[SubDetector] full body unavailable for ${msgId} (fallback to snippet only)`);
+            }
+          }
+
+          const candidate = detectSubscriptionEvent(subject, snippet, from, dateStr, fullBodyText);
           if (candidate) {
             subDetectorCandidates++;
+            if (candidate.amountSource === "body" || candidate.intervalSource === "body" || candidate.dateSource === "body") {
+              subDetectorBodyImproved++;
+            }
             // Phase 3B.3: canonical merchant/processor resolution, run
             // after classification using the same raw inputs plus the
             // classifier's own extractedMerchant guess. resolveMerchant()
@@ -1135,6 +1449,9 @@ export async function scanGmailForTrials(
               newPrice: candidate.newPrice,
               confidence: candidate.confidence,
               billingInterval: candidate.billingInterval,
+              amountSource: candidate.amountSource,
+              intervalSource: candidate.intervalSource,
+              dateSource: candidate.dateSource,
               detectionSource: "deterministic",
               canonicalMerchantName: merchantResolution.canonicalMerchantName,
               canonicalMerchantDomain: merchantResolution.canonicalMerchantDomain,
@@ -1226,8 +1543,13 @@ export async function scanGmailForTrials(
   }
 
   if (userId) {
+    const avgBodyChars = subDetectorBodyFetched > 0 ? Math.round(subDetectorBodyCharsTotal / subDetectorBodyFetched) : 0;
     console.log(
       `[SubDetector] processed ${subDetectorProcessed} messages, ${subDetectorExcluded} excluded, ${subDetectorCandidates} candidates, ${subDetectorWritten} written`
+    );
+    console.log(
+      `[SubDetector] Layer 2: ${subDetectorBodyFetched} bodies fetched (avg ${avgBodyChars} chars), ${subDetectorBodyUnavailable} unavailable, ` +
+      `${subDetectorBodyImproved} candidates improved by body, ${subDetectorCancellationUrlsFound} cancellation URLs found`
     );
   }
 

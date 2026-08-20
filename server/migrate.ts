@@ -475,5 +475,18 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscriptionId FK backfill:", err.message);
   }
 
+  // ── Phase 3B.9.7: extraction-layer provenance columns ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events
+        ADD COLUMN IF NOT EXISTS amount_source text,
+        ADD COLUMN IF NOT EXISTS interval_source text,
+        ADD COLUMN IF NOT EXISTS date_source text;
+    `);
+    console.log("[migrate] subscription_events extraction provenance columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_events extraction provenance columns:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

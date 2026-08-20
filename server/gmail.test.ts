@@ -37,7 +37,15 @@ import {
   extractBillingInterval,
   buildScanTimeFilter,
   getMaxScanMessages,
+  fetchMessageBody,
+  extractCancellationUrl,
+  extractNextBillingDate,
+  extractSubscriptionId,
 } from "./gmail";
+
+function b64url(s: string): string {
+  return Buffer.from(s, "utf-8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+}
 
 // Given email input -> detector -> expected structured output.
 // These are the pure, side-effect-free functions scanGmailForTrials() composes;
@@ -1079,5 +1087,270 @@ describe("Phase 3B.9.2A: extractBillingInterval()", () => {
       "Sat, 01 Aug 2026 00:00:00 GMT"
     );
     expect(candidate?.billingInterval).toBeNull();
+  });
+});
+
+describe("Phase 3B.9.7: full Gmail body extraction (Layer 2)", () => {
+  function makeGmailClient(getImpl: (args: any) => Promise<any>) {
+    const messagesGet = vi.fn().mockImplementation(getImpl);
+    return { users: { messages: { get: messagesGet, list: vi.fn() } } };
+  }
+
+  describe("fetchMessageBody()", () => {
+    it("returns plaintext from a text/plain part", async () => {
+      const gmail = makeGmailClient(async () => ({
+        data: {
+          payload: {
+            parts: [
+              { mimeType: "text/plain", body: { data: b64url("Your Anthropic subscription is now £15.00/month.") } },
+            ],
+          },
+        },
+      })) as any;
+
+      const body = await fetchMessageBody(gmail, "msg-1");
+      expect(body).toBe("Your Anthropic subscription is now £15.00/month.");
+    });
+
+    it("falls back to HTML to text when no text/plain part exists, preserving link URLs", async () => {
+      const html = '<html><body><p>Renews monthly.</p><a href="https://example.com/cancel">Cancel subscription</a></body></html>';
+      const gmail = makeGmailClient(async () => ({
+        data: {
+          payload: {
+            parts: [
+              { mimeType: "text/html", body: { data: b64url(html) } },
+            ],
+          },
+        },
+      })) as any;
+
+      const body = await fetchMessageBody(gmail, "msg-1");
+      expect(body).not.toBeNull();
+      expect(body).not.toMatch(/<[^>]+>/);
+      expect(body).toContain("Renews monthly");
+      expect(body).toContain("https://example.com/cancel");
+    });
+
+    it("returns null gracefully when no body is available", async () => {
+      const gmail = makeGmailClient(async () => ({ data: { payload: { parts: [] } } })) as any;
+      const body = await fetchMessageBody(gmail, "msg-1");
+      expect(body).toBeNull();
+    });
+
+    it("returns null gracefully when the Gmail API call throws", async () => {
+      const gmail = makeGmailClient(async () => { throw new Error("network error"); }) as any;
+      const body = await fetchMessageBody(gmail, "msg-1");
+      expect(body).toBeNull();
+    });
+
+    it("truncates at MAX 8000 chars", async () => {
+      const longText = "A".repeat(9000);
+      const gmail = makeGmailClient(async () => ({
+        data: { payload: { parts: [{ mimeType: "text/plain", body: { data: b64url(longText) } }] } },
+      })) as any;
+
+      const body = await fetchMessageBody(gmail, "msg-1");
+      expect(body).not.toBeNull();
+      expect(body!.length).toBe(8000);
+    });
+  });
+
+  describe("extractAmount() with fullBodyText fallback", () => {
+    it("finds £15.00 in body text when the snippet has no amount at all (the Anthropic case)", () => {
+      const snippet = "your subscription details have been updated";
+      const body = "Your Anthropic subscription is now billed at £15.00 per month.";
+      const { amount, currency } = extractAmount(snippet, body);
+      expect(amount).toBe("15.00");
+      expect(currency).toBe("GBP");
+    });
+
+    it("prefers the snippet's own amount over the body when both are present", () => {
+      const snippet = "you were charged $9.99 today";
+      const body = "Historical note: your old plan was $19.99/month.";
+      const { amount, currency } = extractAmount(snippet, body);
+      expect(amount).toBe("9.99");
+      expect(currency).toBe("USD");
+    });
+
+    it("supports the extended currency set (CHF, kr) via the body", () => {
+      const chf = extractAmount("no amount here", "You are charged CHF 12.50 monthly.");
+      expect(chf.amount).toBe("12.50");
+      expect(chf.currency).toBe("CHF");
+      const kr = extractAmount("no amount here", "Total: 199 kr per month.");
+      expect(kr.currency).toBe("SEK");
+    });
+  });
+
+  describe("extractBillingInterval() with fullBodyText fallback", () => {
+    it("finds 'monthly' in body when the snippet has no interval evidence", () => {
+      const snippet = "your subscription is active";
+      const body = "You are billed monthly for this subscription, $9.99 charged today.";
+      expect(extractBillingInterval(snippet, body)).toBe("monthly");
+    });
+
+    it("prefers the snippet's own interval over the body when both are present", () => {
+      const snippet = "billed annually at $99.00";
+      const body = "Note: this plan used to be billed monthly.";
+      expect(extractBillingInterval(snippet, body)).toBe("annual");
+    });
+  });
+
+  describe("extractDate() with fullBodyText fallback", () => {
+    it("finds a renewal date in body when the snippet has none", () => {
+      const receivedAt = new Date("2026-08-01T00:00:00Z");
+      const snippet = "your account was updated";
+      const body = "Your subscription renews on Sep 15, 2026.";
+      const { date, source } = extractDate(snippet, receivedAt, body);
+      expect(date).toBe("2026-09-15");
+      expect(source).toBe("explicit");
+    });
+  });
+
+  describe("extractCancellationUrl()", () => {
+    it("finds a cancel URL in body text", () => {
+      const body = "To cancel, visit https://example.com/account/cancel-subscription at any time.";
+      expect(extractCancellationUrl("no url here", body)).toBe("https://example.com/account/cancel-subscription");
+    });
+
+    it("finds an unsubscribe URL preserved from an HTML link", async () => {
+      const html = '<a href="https://mail.example.com/u/12345/unsubscribe">Unsubscribe</a>';
+      const gmail = makeGmailClient(async () => ({
+        data: { payload: { parts: [{ mimeType: "text/html", body: { data: b64url(html) } }] } },
+      })) as any;
+      const body = await fetchMessageBody(gmail, "msg-1");
+      expect(extractCancellationUrl("no url here", body!)).toBe("https://mail.example.com/u/12345/unsubscribe");
+    });
+
+    it("returns null when no URL is present", () => {
+      expect(extractCancellationUrl("your subscription renews soon")).toBeNull();
+    });
+  });
+
+  describe("extractNextBillingDate()", () => {
+    it("extracts an explicit next billing date phrase", () => {
+      expect(extractNextBillingDate("Next billing date: Sep 1, 2026")).toBe("2026-09-01");
+    });
+
+    it("returns null when no explicit next-billing phrase is present", () => {
+      expect(extractNextBillingDate("thanks for your purchase")).toBeNull();
+    });
+  });
+
+  describe("extractSubscriptionId()", () => {
+    it("extracts an explicit subscription/account identifier", () => {
+      expect(extractSubscriptionId("Your Subscription ID: SUB-88421-XZ")).toBe("SUB-88421-XZ");
+    });
+
+    it("returns null when no identifier phrase is present", () => {
+      expect(extractSubscriptionId("thanks for your purchase")).toBeNull();
+    });
+  });
+
+  describe("detectSubscriptionEvent() with fullBodyText: provenance + graceful fallback", () => {
+    it("reports amountSource/intervalSource = body when only the body supplied that field", () => {
+      const candidate = detectSubscriptionEvent(
+        "Your subscription",
+        "your subscription is active",
+        "billing@anthropic.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT",
+        "Your Anthropic subscription renews monthly at £15.00. Next billing date: Sep 1, 2026."
+      );
+      expect(candidate?.extractedPrice).toBe("15.00");
+      expect(candidate?.amountSource).toBe("body");
+      expect(candidate?.billingInterval).toBe("monthly");
+      expect(candidate?.intervalSource).toBe("body");
+    });
+
+    it("reports 'snippet' when the snippet alone already supplied the field", () => {
+      const candidate = detectSubscriptionEvent(
+        "Your receipt",
+        "your monthly subscription invoice is ready, $9.99 charged",
+        "billing@service.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT",
+        "irrelevant body text with no billing info"
+      );
+      expect(candidate?.amountSource).toBe("snippet");
+      expect(candidate?.intervalSource).toBe("snippet");
+    });
+
+    it("extraction still works identically when fullBodyText is null (snippet-only fallback, unchanged from pre-3B.9.7 behavior)", () => {
+      const withoutBody = detectSubscriptionEvent(
+        "Your receipt",
+        "your monthly subscription invoice is ready, $9.99 charged",
+        "billing@service.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT"
+      );
+      const withNullBody = detectSubscriptionEvent(
+        "Your receipt",
+        "your monthly subscription invoice is ready, $9.99 charged",
+        "billing@service.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT",
+        null
+      );
+      expect(withoutBody).toEqual(withNullBody);
+      expect(withoutBody?.extractedPrice).toBe("9.99");
+      expect(withoutBody?.amountSource).toBe("snippet");
+    });
+
+    it("amountSource/intervalSource are both null when nothing was found in either layer", () => {
+      const candidate = detectSubscriptionEvent(
+        "Your subscription is cancelled",
+        "your subscription has been cancelled as requested",
+        "billing@service.com",
+        "Sat, 01 Aug 2026 00:00:00 GMT",
+        "no price or interval info here"
+      );
+      expect(candidate?.amountSource).toBeNull();
+      expect(candidate?.intervalSource).toBeNull();
+    });
+  });
+
+  describe("Privacy: body content never appears in log output", () => {
+    it("scanGmailForTrials() never logs the raw body text, even when it drives extraction", async () => {
+      const SECRET_MARKER = "SECRET_BODY_CONTENT_MARKER_9f3a1c";
+      const messagesGet = vi.fn().mockImplementation(async (args: any) => {
+        if (args.format === "full") {
+          return {
+            data: {
+              payload: {
+                parts: [{
+                  mimeType: "text/plain",
+                  body: { data: b64url("Your subscription renews monthly at $19.99. Ref: " + SECRET_MARKER) },
+                }],
+              },
+            },
+          };
+        }
+        return {
+          data: {
+            payload: {
+              headers: [
+                { name: "From", value: "billing@service.com" },
+                { name: "Subject", value: "Your trial ends in 3 days" },
+                { name: "Date", value: new Date().toUTCString() },
+              ],
+            },
+            snippet: "your trial ends in 3 days, you will be charged $9.99",
+          },
+        };
+      });
+      const messagesList = vi.fn().mockResolvedValue({ data: { messages: [{ id: "msg-1" }], nextPageToken: undefined } });
+      (google.gmail as any).mockReturnValue({ users: { messages: { list: messagesList, get: messagesGet } } });
+      (storage.createSubscriptionEvent as any).mockResolvedValue(true);
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      const allLoggedText = [...logSpy.mock.calls, ...errorSpy.mock.calls]
+        .map((call) => call.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "))
+        .join("\n");
+
+      expect(allLoggedText).not.toContain(SECRET_MARKER);
+
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
   });
 });

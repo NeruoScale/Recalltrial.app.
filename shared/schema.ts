@@ -207,6 +207,14 @@ export const subscriptionEvents = pgTable("subscription_events", {
   // subscription level, not the individual-event level).
   billingIntervalSource: text("billing_interval_source"),
   billingIntervalConfidence: text("billing_interval_confidence"),
+  // Phase 3B.9.7: which extraction layer supplied extractedPrice/
+  // billingInterval/extractedDate on THIS row — 'snippet' (metadata+snippet,
+  // Layer 1) or 'body' (second-stage full-body fetch, Layer 2). Null means
+  // that field itself is null (nothing found in either layer) or this row
+  // predates Phase 3B.9.7 (written before these columns existed).
+  amountSource: text("amount_source"),
+  intervalSource: text("interval_source"),
+  dateSource: text("date_source"),
   confidence: integer("confidence").notNull().default(0),
   detectionSource: text("detection_source").notNull().default("deterministic"),
   aiModel: text("ai_model"),
