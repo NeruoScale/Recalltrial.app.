@@ -53,6 +53,28 @@ function b64url(s: string): string {
 
 const RECEIVED = new Date("2026-08-01T00:00:00.000Z");
 
+// extractDate()'s explicit-date resolution rolls a past calendar date
+// forward to next year based on the REAL wall-clock "today" (see
+// resolveFutureCalendarDate() in gmail.ts) — not on RECEIVED, and not on
+// anything else the test controls. A hardcoded date string ("Aug 20,
+// 2026") eventually becomes a past date and starts failing for reasons
+// completely unrelated to any code change. futureTestDate() sidesteps this
+// permanently by computing a date genuinely ahead of whatever "today"
+// happens to be when the suite runs, so resolveFutureCalendarDate() never
+// has a reason to roll it forward.
+const MONTH_NAMES_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function futureTestDate(daysAhead: number): { display: string; iso: string } {
+  const now = new Date();
+  const target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead));
+  const y = target.getUTCFullYear();
+  const m = target.getUTCMonth();
+  const d = target.getUTCDate();
+  return {
+    display: `${MONTH_NAMES_SHORT[m]} ${d}, ${y}`,
+    iso: `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+  };
+}
+
 describe("detection: trial lifecycle", () => {
   it("flags a trial-ending email as a strong positive", () => {
     const text = "your trial ends in 3 days".toLowerCase();
@@ -92,9 +114,10 @@ describe("detection: subscription / renewal", () => {
   // timezone-safe helpers above extractDate() in gmail.ts. Promoted to a
   // real assertion now that it's fixed.
   it("extracts an explicit 'renews on' date", () => {
-    const { date, source } = extractDate("your subscription renews on Aug 20, 2026", RECEIVED);
+    const { display, iso } = futureTestDate(30);
+    const { date, source } = extractDate(`your subscription renews on ${display}`, RECEIVED);
     expect(source).toBe("explicit");
-    expect(date).toBe("2026-08-20");
+    expect(date).toBe(iso);
   });
 
   it("extracts an explicit next-billing-date", () => {
