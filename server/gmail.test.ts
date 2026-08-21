@@ -12,7 +12,7 @@ vi.mock("googleapis", () => ({
 }));
 
 vi.mock("./storage", () => ({
-  storage: { createSubscriptionEvent: vi.fn() },
+  storage: { createSubscriptionEvent: vi.fn(), queueAIEnrichmentJob: vi.fn() },
 }));
 
 import { google } from "googleapis";
@@ -1409,5 +1409,179 @@ describe("Phase 3B.9.7: full Gmail body extraction (Layer 2)", () => {
       logSpy.mockRestore();
       errorSpy.mockRestore();
     });
+  });
+});
+
+// ─── Phase 3B.9.9-BUGFIX: bodyFetched persistence + AI-eligibility wiring ──────
+//
+// Regression coverage for the body_fetched=false bug (server/storage.ts's
+// buildSourceAwareConflictSet() was missing bodyFetched from its
+// onConflictDoUpdate SET clause — fixed by OR-ing the existing and
+// incoming values). These tests exercise the REAL end-to-end
+// scanGmailForTrials() path (not a refactored extraction), asserting on
+// exactly what gets passed to storage.createSubscriptionEvent() and
+// storage.queueAIEnrichmentJob() — the two integration points the bug
+// actually lived between. isEligibleForAI() itself is imported for real
+// (not mocked) since it's a pure function with no DB/network dependency;
+// only ./storage and googleapis are mocked.
+describe("Phase 3B.9.9-BUGFIX: bodyFetched persistence and AI-eligibility wiring", () => {
+  function mockGmailClientWithBody(
+    message: { from: string; subject: string; date: string; snippet: string },
+    bodyMode: "success" | "unavailable" | "throws",
+    bodyText?: string
+  ) {
+    const messagesGet = vi.fn().mockImplementation(async (args: any) => {
+      if (args.format === "full") {
+        if (bodyMode === "throws") throw new Error("simulated Gmail API failure fetching full body");
+        if (bodyMode === "unavailable") return { data: { payload: { parts: [] } } }; // no usable part -> fetchMessageBody() returns null
+        return {
+          data: {
+            payload: {
+              parts: [{ mimeType: "text/plain", body: { data: b64url(bodyText ?? "") } }],
+            },
+          },
+        };
+      }
+      return {
+        data: {
+          payload: {
+            headers: [
+              { name: "From", value: message.from },
+              { name: "Subject", value: message.subject },
+              { name: "Date", value: message.date },
+            ],
+          },
+          snippet: message.snippet,
+        },
+      };
+    });
+    const messagesList = vi.fn().mockResolvedValue({ data: { messages: [{ id: "msg-1" }], nextPageToken: undefined } });
+    (google.gmail as any).mockReturnValue({ users: { messages: { list: messagesList, get: messagesGet } } });
+    return { messagesGet, messagesList };
+  }
+
+  function mockWrittenRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "evt-ai-1",
+      userId: "fake-user-id",
+      isCanonical: true,
+      bodyFetched: true,
+      extractedPrice: null,
+      extractedCurrency: null,
+      billingInterval: null,
+      eventType: "subscription_invoice",
+      canonicalMerchantDomain: "service.com",
+      ...overrides,
+    };
+  }
+
+  const AMBIGUOUS_MESSAGE = {
+    from: "billing@service.com",
+    subject: "Your subscription invoice",
+    date: new Date().toUTCString(),
+    snippet: "your monthly subscription invoice is ready to view",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("body successfully fetched -> event written with bodyFetched=true", async () => {
+    mockGmailClientWithBody(AMBIGUOUS_MESSAGE, "success", "We couldn't determine your exact renewal amount this cycle.");
+    (storage.createSubscriptionEvent as any).mockResolvedValue(mockWrittenRow({ bodyFetched: true }));
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    expect(storage.createSubscriptionEvent).toHaveBeenCalledTimes(1);
+    const writeArg = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+    expect(writeArg.bodyFetched).toBe(true);
+  });
+
+  it("body unavailable (fetchMessageBody returns null) -> event written with bodyFetched=false, no AI job queued", async () => {
+    mockGmailClientWithBody(AMBIGUOUS_MESSAGE, "unavailable");
+    (storage.createSubscriptionEvent as any).mockResolvedValue(mockWrittenRow({ bodyFetched: false, extractedPrice: null }));
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    const writeArg = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+    expect(writeArg.bodyFetched).toBe(false);
+    expect(storage.queueAIEnrichmentJob).not.toHaveBeenCalled();
+  });
+
+  it("body fetch failed/threw -> event written with bodyFetched=false, no AI job queued (never blocks the scan)", async () => {
+    mockGmailClientWithBody(AMBIGUOUS_MESSAGE, "throws");
+    (storage.createSubscriptionEvent as any).mockResolvedValue(mockWrittenRow({ bodyFetched: false, extractedPrice: null }));
+
+    const { suggestions } = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    const writeArg = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+    expect(writeArg.bodyFetched).toBe(false);
+    expect(storage.queueAIEnrichmentJob).not.toHaveBeenCalled();
+    // The scan itself completes normally despite the body-fetch failure.
+    expect(Array.isArray(suggestions)).toBe(true);
+  });
+
+  it("a non-candidate email never attempts a body fetch, and createSubscriptionEvent is never called", async () => {
+    const { messagesGet } = mockGmailClientWithBody(
+      { from: "news@service.com", subject: "Weekly newsletter", date: new Date().toUTCString(), snippet: "check out this week's roundup of articles" },
+      "success",
+      "irrelevant"
+    );
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    expect(messagesGet).not.toHaveBeenCalledWith(expect.objectContaining({ format: "full" }));
+    expect(storage.createSubscriptionEvent).not.toHaveBeenCalled();
+  });
+
+  it("fully-resolved event (price+currency+interval all already known) -> AI job NOT created even with bodyFetched=true and AI enabled", async () => {
+    mockGmailClientWithBody(AMBIGUOUS_MESSAGE, "success", "Your subscription is $9.99/month, billed monthly.");
+    (storage.createSubscriptionEvent as any).mockResolvedValue(mockWrittenRow({
+      bodyFetched: true, extractedPrice: "9.99", extractedCurrency: "USD", billingInterval: "monthly",
+    }));
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    expect(storage.queueAIEnrichmentJob).not.toHaveBeenCalled();
+  });
+
+  it("ambiguous body extraction (a field still missing) -> AI job IS created when aiScanningEnabled=true", async () => {
+    mockGmailClientWithBody(AMBIGUOUS_MESSAGE, "success", "We couldn't determine your exact renewal amount this cycle.");
+    (storage.createSubscriptionEvent as any).mockResolvedValue(mockWrittenRow({
+      bodyFetched: true, extractedPrice: null, extractedCurrency: null, billingInterval: "monthly",
+    }));
+    (storage.queueAIEnrichmentJob as any).mockResolvedValue(true);
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    expect(storage.queueAIEnrichmentJob).toHaveBeenCalledWith("fake-user-id", "evt-ai-1");
+  });
+
+  it("ambiguous body extraction, but aiScanningEnabled=false -> no AI job queued", async () => {
+    mockGmailClientWithBody(AMBIGUOUS_MESSAGE, "success", "We couldn't determine your exact renewal amount this cycle.");
+    (storage.createSubscriptionEvent as any).mockResolvedValue(mockWrittenRow({ bodyFetched: true, extractedPrice: null }));
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, false);
+
+    expect(storage.queueAIEnrichmentJob).not.toHaveBeenCalled();
+  });
+
+  it("RecallTrial's own reminder email is excluded at the shared noise gate BEFORE any body fetch is attempted", async () => {
+    const { messagesGet } = mockGmailClientWithBody(
+      {
+        from: "RecallTrial <notifications@recalltrial.app>",
+        subject: "[RecallTrial] YouTube Premium renews in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "Your YouTube Premium subscription renews on: Aug 19, 2026. Renewal amount: 22.00 USD.",
+      },
+      "success",
+      "irrelevant"
+    );
+
+    await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, true);
+
+    expect(messagesGet).not.toHaveBeenCalledWith(expect.objectContaining({ format: "full" }));
+    expect(storage.createSubscriptionEvent).not.toHaveBeenCalled();
+    expect(storage.queueAIEnrichmentJob).not.toHaveBeenCalled();
   });
 });
