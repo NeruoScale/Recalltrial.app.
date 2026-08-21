@@ -203,6 +203,7 @@ export async function registerRoutes(
       trialLimit: limit,
       billingEnabled: BILLING_ENABLED,
       emailScanningEnabled: user.emailScanningEnabled,
+      aiScanningEnabled: user.aiScanningEnabled,
       gmailConnected: user.gmailConnected,
       lastEmailScanAt: user.lastEmailScanAt,
       createdAt: user.createdAt,
@@ -230,6 +231,40 @@ export async function registerRoutes(
       return res.json({ id: user.id, email: user.email, timezone: user.timezone });
     } catch (err) {
       console.error("Settings error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Pre-3B.9.9 Privacy Gate: dedicated AI-scanning-consent endpoints,
+  // separate from the existing /api/auth/settings (timezone +
+  // emailScanningEnabled) — this setting governs a materially different
+  // decision (sending email content to an external AI provider) and is
+  // deployed ahead of the AI enrichment engine itself so the opt-in surface
+  // exists before there's anything for it to gate. Deliberately no Pro-plan
+  // gate here (unlike emailScanningEnabled's PRO_REQUIRED check) — nothing
+  // in this pre-gate phase depends on plan, and adding a plan restriction
+  // is a product decision for Phase 3B.9.9 itself, not this one.
+  app.get("/api/user/settings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+      return res.json({ aiScanningEnabled: user.aiScanningEnabled });
+    } catch (err) {
+      console.error("Get user settings error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  app.patch("/api/user/settings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { aiScanningEnabled } = req.body;
+      if (typeof aiScanningEnabled !== "boolean") {
+        return res.status(400).json({ message: "aiScanningEnabled must be a boolean" });
+      }
+      const updated = await storage.toggleAiScanning(req.session.userId!, aiScanningEnabled);
+      return res.json({ aiScanningEnabled: updated.aiScanningEnabled });
+    } catch (err) {
+      console.error("Update user settings error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Bell, ArrowLeft, Loader2, Save, Star, CreditCard, Sparkles, Mail, Link, Unlink, ScanLine, Lock } from "lucide-react";
+import { Bell, ArrowLeft, Loader2, Save, Star, CreditCard, Sparkles, Mail, Link, Unlink, ScanLine, Lock, Bot } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const TIMEZONES = [
@@ -93,6 +93,18 @@ export default function SettingsPage() {
     },
     onError: (err: any) => {
       toast({ title: "Failed to toggle scanning", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const toggleAiScanningMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("PATCH", "/api/user/settings", { aiScanningEnabled: enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to toggle AI scanning", description: err.message, variant: "destructive" });
     },
   });
 
@@ -339,6 +351,34 @@ export default function SettingsPage() {
             )}
             <p className="text-xs text-muted-foreground border-t pt-3">
               Optional and opt-in. We only scan subscription-related emails using keywords. We store minimal metadata — no email content. You can disconnect anytime.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card data-testid="card-ai-scanning">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Bot className="h-4 w-4 text-muted-foreground" />
+                <CardTitle className="text-base">AI Email Scanning</CardTitle>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="switch-ai-scanning" className="text-sm font-normal">
+                Enable AI scanning
+              </Label>
+              <Switch
+                id="switch-ai-scanning"
+                checked={!!user.aiScanningEnabled}
+                onCheckedChange={(v) => toggleAiScanningMutation.mutate(v)}
+                disabled={toggleAiScanningMutation.isPending}
+                data-testid="switch-ai-scanning"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              When enabled, RecallTrial may send relevant content from subscription-related emails to our AI provider to improve subscription detection. Email content is processed for this purpose only and is not stored by RecallTrial or our AI provider.
             </p>
           </CardContent>
         </Card>

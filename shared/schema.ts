@@ -20,6 +20,16 @@ export const users = pgTable("users", {
   subscriptionStatus: userSubStatusEnum("user_sub_status"),
   currentPeriodEnd: timestamp("current_period_end"),
   emailScanningEnabled: boolean("email_scanning_enabled").notNull().default(false),
+  // Pre-3B.9.9 Privacy Gate: separate from emailScanningEnabled (which only
+  // gates deterministic keyword-based Gmail scanning, already live). This
+  // one specifically gates sending email content to an external AI
+  // provider — a materially different privacy decision that needs its own
+  // explicit opt-in, never inferred from the existing scanning toggle.
+  // Defaults false: no user gets AI scanning without deliberately turning
+  // it on. Deployed ahead of the AI enrichment engine itself (Phase
+  // 3B.9.9) so the consent surface exists before there's anything for it
+  // to gate.
+  aiScanningEnabled: boolean("ai_scanning_enabled").notNull().default(false),
   gmailConnected: boolean("gmail_connected").notNull().default(false),
   gmailAccessToken: text("gmail_access_token"),
   gmailRefreshToken: text("gmail_refresh_token"),

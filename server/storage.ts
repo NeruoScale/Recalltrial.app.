@@ -176,6 +176,7 @@ export interface IStorage {
   updateUserGmailTokens(userId: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<void>;
   clearUserGmailTokens(userId: string): Promise<void>;
   toggleEmailScanning(userId: string, enabled: boolean): Promise<User>;
+  toggleAiScanning(userId: string, enabled: boolean): Promise<User>;
   updateLastEmailScan(userId: string, messagesProcessed?: number): Promise<void>;
   getProUsersWithScanningEnabled(): Promise<User[]>;
 
@@ -455,6 +456,11 @@ export class DatabaseStorage implements IStorage {
 
   async toggleEmailScanning(userId: string, enabled: boolean): Promise<User> {
     const [user] = await db.update(users).set({ emailScanningEnabled: enabled }).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  async toggleAiScanning(userId: string, enabled: boolean): Promise<User> {
+    const [user] = await db.update(users).set({ aiScanningEnabled: enabled }).where(eq(users.id, userId)).returning();
     return user;
   }
 

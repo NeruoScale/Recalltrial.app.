@@ -475,6 +475,16 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscriptionId FK backfill:", err.message);
   }
 
+  // ── Pre-3B.9.9 Privacy Gate: AI scanning opt-in ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_scanning_enabled BOOLEAN DEFAULT FALSE;
+    `);
+    console.log("[migrate] users.ai_scanning_enabled OK");
+  } catch (err: any) {
+    console.error("[migrate] users.ai_scanning_enabled:", err.message);
+  }
+
   // ── Phase 3B.9.8: price-change detection fields on subscriptions ──
   try {
     await db.execute(sql`
