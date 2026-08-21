@@ -55,6 +55,16 @@ function buildSourceAwareConflictSet(data: InsertSubscriptionEvent) {
     intervalSource: sql`CASE WHEN ${intervalWins} THEN excluded.interval_source ELSE ${subscriptionEvents.intervalSource} END`,
     extractedDate: sql`CASE WHEN ${dateWins} THEN excluded.extracted_date ELSE ${subscriptionEvents.extractedDate} END`,
     dateSource: sql`CASE WHEN ${dateWins} THEN excluded.date_source ELSE ${subscriptionEvents.dateSource} END`,
+    // Bugfix (Phase 3B.9.9): this was missing entirely, so bodyFetched was
+    // only ever persisted on a genuine first-time INSERT (no conflict) —
+    // any re-scan of an already-known message silently dropped it back to
+    // the column's false default regardless of what this scan's `data`
+    // said, which meant isEligibleForAI() could never see bodyFetched=true
+    // for a previously-scanned message. Sticky-true (OR, not overwrite):
+    // once a body fetch has ever succeeded for this row, deterministic
+    // extraction has had its full shot at it, and a later scan where the
+    // fetch happens to fail (transient Gmail hiccup) must not erase that.
+    bodyFetched: sql`(${subscriptionEvents.bodyFetched} OR excluded.body_fetched)`,
   };
 }
 
