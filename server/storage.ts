@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, isNull, lte, sql, count, desc, inArray, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
 import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
@@ -75,7 +75,17 @@ export interface IStorage {
 
   // Phase 2 (Subscription Intelligence, PHASE1_AUDIT.md §18): parallel,
   // observation-only write path.
-  createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<boolean>;
+  createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<SubscriptionEvent | null>;
+  queueAIEnrichmentJob(userId: string, subscriptionEventId: string): Promise<boolean>;
+  getAIEnrichmentMetrics(): Promise<{
+    totalJobs: number;
+    byStatus: Record<string, number>;
+    avgInputTokens: number;
+    avgOutputTokens: number;
+    estimatedTotalCostUsd: number;
+    fieldsImproved: { amount: number; currency: number; billingInterval: number };
+    successRate: number;
+  }>;
   getSubscriptionEventMetrics(): Promise<{
     totalCount: number;
     byEventType: { eventType: string; count: number }[];
@@ -490,7 +500,7 @@ export class DatabaseStorage implements IStorage {
     ).orderBy(sql`${users.lastEmailScanAt} ASC NULLS FIRST`);
   }
 
-  async createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<boolean> {
+  async createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<SubscriptionEvent | null> {
     // Phase 3B.3 note: a re-scan of a message already classified with the
     // same (userId, sourceMessageId, eventType) — expected whenever the
     // classifier itself hasn't changed since the last scan — used to be a
@@ -509,9 +519,11 @@ export class DatabaseStorage implements IStorage {
     // independent event — see server/canonicalEvents.ts for the decision
     // logic. This whole method runs in a transaction so the "old row
     // superseded + new row canonical" state change is atomic.
-    type WrittenRow = Pick<SubscriptionEvent, "id" | "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval">;
-
-    const writtenRow: WrittenRow | null = await db.transaction(async (tx): Promise<WrittenRow | null> => {
+    // Phase 3B.9.9: widened from a narrow lifecycle-only Pick<> to the full
+    // row — server/gmail.ts's AI-enrichment queueing (STEP 4) needs
+    // isCanonical/bodyFetched/amountSource/intervalSource, not just the
+    // lifecycle-relevant subset the previous phase needed.
+    const writtenRow: SubscriptionEvent | null = await db.transaction(async (tx): Promise<SubscriptionEvent | null> => {
       const existingRows = await tx
         .select()
         .from(subscriptionEvents)
@@ -607,7 +619,76 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
-    return writtenRow !== null;
+    return writtenRow;
+  }
+
+  // Phase 3B.9.9 STEP 4: idempotency is the UNIQUE constraint on
+  // subscription_event_id + onConflictDoNothing — not a pre-check SELECT.
+  // Returns whether a NEW row was actually inserted (false on a genuine
+  // conflict — a job already exists for this event), purely for the
+  // caller's own logging; gmail.ts's scan must never block or throw on
+  // either outcome.
+  async queueAIEnrichmentJob(userId: string, subscriptionEventId: string): Promise<boolean> {
+    const result = await db.insert(aiEnrichmentJobs)
+      .values({ userId, subscriptionEventId, status: "pending" })
+      .onConflictDoNothing({ target: aiEnrichmentJobs.subscriptionEventId })
+      .returning({ id: aiEnrichmentJobs.id });
+    return result.length > 0;
+  }
+
+  // Phase 3B.9.9 STEP 6: aggregate observability only — same "no per-user
+  // detail, counts/averages only" shape as getSubscriptionEventMetrics()
+  // above, which this deliberately mirrors.
+  async getAIEnrichmentMetrics(): Promise<{
+    totalJobs: number;
+    byStatus: Record<string, number>;
+    avgInputTokens: number;
+    avgOutputTokens: number;
+    estimatedTotalCostUsd: number;
+    fieldsImproved: { amount: number; currency: number; billingInterval: number };
+    successRate: number;
+  }> {
+    const [totalRow] = await db.select({ count: sql<number>`count(*)::int` }).from(aiEnrichmentJobs);
+
+    const byStatusRows = await db
+      .select({ status: aiEnrichmentJobs.status, count: sql<number>`count(*)::int` })
+      .from(aiEnrichmentJobs)
+      .groupBy(aiEnrichmentJobs.status);
+
+    const [aggRow] = await db.select({
+      avgInput: sql<number>`coalesce(avg(${aiEnrichmentJobs.inputTokenCount}), 0)::float`,
+      avgOutput: sql<number>`coalesce(avg(${aiEnrichmentJobs.outputTokenCount}), 0)::float`,
+      totalCost: sql<number>`coalesce(sum(${aiEnrichmentJobs.estimatedCostUsd}), 0)::float`,
+    }).from(aiEnrichmentJobs);
+
+    const byStatus: Record<string, number> = { pending: 0, processing: 0, completed: 0, failed: 0, dead_letter: 0 };
+    for (const r of byStatusRows) byStatus[r.status] = r.count;
+
+    const completedRows = await db
+      .select({ fieldsImproved: aiEnrichmentJobs.fieldsImproved })
+      .from(aiEnrichmentJobs)
+      .where(eq(aiEnrichmentJobs.status, "completed"));
+
+    const fieldsImproved = { amount: 0, currency: 0, billingInterval: 0 };
+    for (const row of completedRows) {
+      for (const field of row.fieldsImproved ?? []) {
+        if (field === "amount") fieldsImproved.amount++;
+        else if (field === "currency") fieldsImproved.currency++;
+        else if (field === "billingInterval") fieldsImproved.billingInterval++;
+      }
+    }
+
+    const terminalCount = byStatus.completed + byStatus.failed + byStatus.dead_letter;
+
+    return {
+      totalJobs: totalRow?.count ?? 0,
+      byStatus,
+      avgInputTokens: aggRow?.avgInput ?? 0,
+      avgOutputTokens: aggRow?.avgOutput ?? 0,
+      estimatedTotalCostUsd: aggRow?.totalCost ?? 0,
+      fieldsImproved,
+      successRate: terminalCount > 0 ? byStatus.completed / terminalCount : 0,
+    };
   }
 
   async getSubscriptionEventMetrics(): Promise<{

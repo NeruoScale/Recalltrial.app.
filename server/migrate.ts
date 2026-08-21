@@ -513,5 +513,58 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscription_events extraction provenance columns:", err.message);
   }
 
+  // ── Phase 3B.9.9: body_fetched column (see shared/schema.ts for why this
+  // is distinct from amountSource/intervalSource/dateSource being 'body') ──
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events ADD COLUMN IF NOT EXISTS body_fetched boolean NOT NULL DEFAULT false;
+    `);
+    console.log("[migrate] subscription_events.body_fetched OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_events.body_fetched:", err.message);
+  }
+
+  // ── Phase 3B.9.9: AI enrichment job queue ──
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ai_enrichment_job_status') THEN
+          CREATE TYPE ai_enrichment_job_status AS ENUM ('pending', 'processing', 'completed', 'failed', 'dead_letter');
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] ai_enrichment_job_status enum OK");
+  } catch (err: any) {
+    console.error("[migrate] ai_enrichment_job_status enum:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS ai_enrichment_jobs (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id varchar NOT NULL REFERENCES users(id),
+        subscription_event_id varchar NOT NULL REFERENCES subscription_events(id),
+        status ai_enrichment_job_status NOT NULL DEFAULT 'pending',
+        attempts integer NOT NULL DEFAULT 0,
+        max_attempts integer NOT NULL DEFAULT 3,
+        provider text NOT NULL DEFAULT 'anthropic',
+        model text NOT NULL DEFAULT 'claude-haiku-4-5',
+        requested_at timestamp DEFAULT now() NOT NULL,
+        started_at timestamp,
+        completed_at timestamp,
+        error_code text,
+        input_token_count integer,
+        output_token_count integer,
+        estimated_cost_usd decimal(10, 6),
+        fields_improved text[],
+        created_at timestamp DEFAULT now() NOT NULL,
+        CONSTRAINT ai_enrichment_jobs_subscription_event_id_unique UNIQUE (subscription_event_id)
+      );
+    `);
+    console.log("[migrate] ai_enrichment_jobs table OK");
+  } catch (err: any) {
+    console.error("[migrate] ai_enrichment_jobs table:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

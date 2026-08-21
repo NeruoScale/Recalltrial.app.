@@ -225,6 +225,15 @@ export const subscriptionEvents = pgTable("subscription_events", {
   amountSource: text("amount_source"),
   intervalSource: text("interval_source"),
   dateSource: text("date_source"),
+  // Phase 3B.9.9: whether a full-body fetch was actually AVAILABLE for this
+  // event at write time — distinct from amountSource/intervalSource/
+  // dateSource being 'body' (which only means the body supplied THAT
+  // specific field). A body can be fetched successfully yet supply nothing
+  // new (e.g. every field was already snippet-sourced, or the body simply
+  // didn't mention them) — isEligibleForAI() needs to know "did we already
+  // give deterministic extraction its best shot at the full email," not
+  // "did the body happen to win any individual field."
+  bodyFetched: boolean("body_fetched").notNull().default(false),
   confidence: integer("confidence").notNull().default(0),
   detectionSource: text("detection_source").notNull().default("deterministic"),
   aiModel: text("ai_model"),
@@ -257,6 +266,48 @@ export const subscriptionEvents = pgTable("subscription_events", {
 
 export type SubscriptionEvent = typeof subscriptionEvents.$inferSelect;
 export type InsertSubscriptionEvent = typeof subscriptionEvents.$inferInsert;
+
+// Phase 3B.9.9: AI enrichment job queue. One row per subscription_events
+// row ever queued for AI enrichment — the unique constraint on
+// subscriptionEventId is what makes queueing idempotent (ON CONFLICT DO
+// NOTHING at the storage layer, not a pre-check SELECT). 'failed' is a
+// RETRYABLE terminal-for-now state (transient errors — timeout, rate
+// limit — set this, and a later cron pass may re-claim it once its
+// backoff window elapses and attempts < maxAttempts); 'dead_letter' is a
+// truly terminal state (attempts exhausted, or a non-retryable error like
+// a Zod schema violation that would never succeed on retry).
+export const aiEnrichmentJobStatusEnum = pgEnum("ai_enrichment_job_status", [
+  "pending", "processing", "completed", "failed", "dead_letter",
+]);
+
+export const aiEnrichmentJobs = pgTable("ai_enrichment_jobs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  subscriptionEventId: varchar("subscription_event_id").notNull().references(() => subscriptionEvents.id),
+  status: aiEnrichmentJobStatusEnum("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(3),
+  provider: text("provider").notNull().default("anthropic"),
+  model: text("model").notNull().default("claude-haiku-4-5"),
+  requestedAt: timestamp("requested_at").defaultNow().notNull(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  // Distinguishes retryable transient failures ('timeout', 'rate_limited')
+  // from non-retryable ones ('schema_validation_failed',
+  // 'ai_scanning_disabled', 'claude_error') — see server/aiEnrichmentQueue.ts's
+  // RETRYABLE_ERROR_CODES, which the cron re-fetch query keys off of.
+  errorCode: text("error_code"),
+  inputTokenCount: integer("input_token_count"),
+  outputTokenCount: integer("output_token_count"),
+  estimatedCostUsd: decimal("estimated_cost_usd", { precision: 10, scale: 6 }),
+  fieldsImproved: text("fields_improved").array(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  unique("ai_enrichment_jobs_subscription_event_id_unique").on(table.subscriptionEventId),
+]);
+
+export type AIEnrichmentJob = typeof aiEnrichmentJobs.$inferSelect;
+export type InsertAIEnrichmentJob = typeof aiEnrichmentJobs.$inferInsert;
 
 // Phase 3B.4: SHADOW MODE ONLY. server/entityResolver.ts's proposed
 // groupings, written here for observation only — nothing in the app reads

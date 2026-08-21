@@ -1273,7 +1273,13 @@ export async function scanGmailForTrials(
   // Phase 3B.7.2: null/undefined = first scan ever for this user (90-day
   // window, as before). Non-null = an incremental scan scoped to new mail
   // only via buildScanTimeFilter() above.
-  lastEmailScanAt?: Date | null
+  lastEmailScanAt?: Date | null,
+  // Phase 3B.9.9: the user's own aiScanningEnabled flag, passed through
+  // rather than re-fetched per-message inside the loop (both existing
+  // callers already have the full user row in scope). Purely additive,
+  // defaults to false (no AI queueing) when omitted — existing callers/tests
+  // that don't pass it keep behaving exactly as before.
+  aiScanningEnabled?: boolean
 ): Promise<ScanResult> {
   const scanStartedAt = new Date();
   const gmail = buildGmailClient(accessToken, refreshToken, tokenExpiry);
@@ -1450,7 +1456,7 @@ export async function scanGmailForTrials(
             // alias resolution. Same lazy-import pattern already used
             // elsewhere in this codebase (e.g. stripeClient.ts).
             const { storage } = await import("./storage");
-            const written = await storage.createSubscriptionEvent({
+            const writtenRow = await storage.createSubscriptionEvent({
               userId,
               sourceMessageId: msgId,
               eventType: candidate.eventType,
@@ -1465,6 +1471,7 @@ export async function scanGmailForTrials(
               amountSource: candidate.amountSource,
               intervalSource: candidate.intervalSource,
               dateSource: candidate.dateSource,
+              bodyFetched: !!fullBodyText,
               detectionSource: "deterministic",
               canonicalMerchantName: merchantResolution.canonicalMerchantName,
               canonicalMerchantDomain: merchantResolution.canonicalMerchantDomain,
@@ -1472,7 +1479,25 @@ export async function scanGmailForTrials(
               merchantConfidence: merchantResolution.merchantConfidence,
               merchantResolutionStatus: merchantResolution.merchantResolutionStatus,
             });
-            if (written) subDetectorWritten++;
+            if (writtenRow) subDetectorWritten++;
+
+            // Phase 3B.9.9 STEP 4: fire-and-forget AI enrichment queueing —
+            // never awaited beyond the INSERT itself, never blocks or fails
+            // the scan. isEligibleForAI() is checked against the row
+            // ACTUALLY written (not the pre-write candidate), since the
+            // source-aware conflict merge above may have preserved
+            // different values than what this scan proposed.
+            if (writtenRow) {
+              try {
+                const { isEligibleForAI } = await import("./aiEnrichment");
+                if (isEligibleForAI(writtenRow, { aiScanningEnabled: !!aiScanningEnabled })) {
+                  const queued = await storage.queueAIEnrichmentJob(userId, writtenRow.id);
+                  if (queued) console.log(`[AI] queued enrichment job for event ${writtenRow.id}`);
+                }
+              } catch (aiQueueErr) {
+                console.warn(`[AI] failed to queue enrichment job for event ${writtenRow.id}:`, aiQueueErr);
+              }
+            }
           }
         } catch (subErr) {
           console.error(`[SubDetector] failed for message ${msgId}:`, subErr);

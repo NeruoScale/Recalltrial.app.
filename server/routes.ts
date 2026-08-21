@@ -12,6 +12,7 @@ import { pool } from "./db";
 import { searchServices } from "./serviceSearch";
 import { generateAuthUrl, exchangeCodeForTokens, revokeToken, scanGmailForTrials, isGoogleConfigured } from "./gmail";
 import { backfillCanonicalEventBodies } from "./backfillBodyExtraction";
+import { processAIEnrichmentBatch } from "./aiEnrichmentQueue";
 import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
 import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
 import { calculateRenewalCalendar } from "./renewalCalendar";
@@ -323,7 +324,8 @@ export async function registerRoutes(
         user.gmailRefreshToken,
         user.gmailTokenExpiry,
         user.id,
-        user.lastEmailScanAt
+        user.lastEmailScanAt,
+        user.aiScanningEnabled
       );
       const { suggestions } = scanResult;
 
@@ -832,6 +834,21 @@ export async function registerRoutes(
     }
   });
 
+  // Phase 3B.9.9 STEP 6: AI enrichment observability, same X-ADMIN-KEY gate.
+  app.get("/api/admin/ai-enrichment/metrics", async (req: Request, res: Response) => {
+    const adminKey = req.headers["x-admin-key"] || req.query.key;
+    if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const metrics = await storage.getAIEnrichmentMetrics();
+      return res.json(metrics);
+    } catch (err) {
+      console.error("AI enrichment metrics error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
   // Phase 3B.6: admin-only shadow-subscription preview dashboard. Read-only,
   // same X-ADMIN-KEY gate as every other /api/admin/* route. isShadow is
   // always true today — this never drives reminders or any user-facing UX.
@@ -1231,7 +1248,8 @@ export async function registerRoutes(
             user.gmailRefreshToken,
             user.gmailTokenExpiry,
             user.id,
-            user.lastEmailScanAt
+            user.lastEmailScanAt,
+            user.aiScanningEnabled
           );
           for (const s of scanResult.suggestions) {
             await storage.upsertSuggestedTrial({ ...s, userId: user.id });
@@ -1253,6 +1271,27 @@ export async function registerRoutes(
       return res.json({ usersScanned: batch.length, results });
     } catch (err) {
       console.error("Cron email-scan error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3B.9.9 STEP 5: AI enrichment batch processor. Same X-CRON-KEY
+  // gate as every other /api/cron/* route. Deliberately its own endpoint —
+  // enrichment jobs are QUEUED by the email-scan cron but PROCESSED on
+  // their own schedule (retry backoff makes tight coupling to the scan
+  // cadence wrong), so this stays a separate cron trigger rather than
+  // folding into /api/cron/email-scan.
+  app.post("/api/cron/ai-enrichment", async (req: Request, res: Response) => {
+    const cronKey = req.headers["x-cron-key"];
+    if (!process.env.CRON_KEY || cronKey !== process.env.CRON_KEY) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    try {
+      const result = await processAIEnrichmentBatch(10);
+      console.log(`[Cron] AI enrichment: ${JSON.stringify(result)}`);
+      return res.json(result);
+    } catch (err) {
+      console.error("Cron AI enrichment error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });
