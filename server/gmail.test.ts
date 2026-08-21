@@ -703,6 +703,40 @@ describe("Phase 3B.3.1: precision patch regression tests", () => {
       expect(storage.createSubscriptionEvent).not.toHaveBeenCalled();
     });
 
+    // Noise-filter-gap bugfix: this same RecallTrial reminder email was
+    // previously ALSO slipping through the ORIGINAL trial-suggestion
+    // pipeline (a completely separate code path from the sub-detector
+    // above, whose own filters — hasSoftNegative/passesReceiptFilter/
+    // hasStrongPositive/hasRequiredTrigger — never looked at sender domain
+    // at all) and being suggested as a trial for "Recalltrial" itself. The
+    // noise-domain check now runs once, before either pipeline, so both are
+    // covered by the same guarantee.
+    it("end-to-end: RecallTrial's own reminder email produces NO trial suggestion either (the original bug)", async () => {
+      mockGmailClient({
+        from: "RecallTrial <notifications@recalltrial.app>",
+        subject: "[RecallTrial] YouTube Premium renews in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "Your YouTube Premium subscription renews on: Aug 19, 2026. Renewal amount: 22.00 USD.",
+      });
+
+      const { suggestions } = await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      expect(suggestions).toHaveLength(0);
+    });
+
+    it("end-to-end: a noise-domain sender is excluded even when userId is not provided (trial-only scan path)", async () => {
+      mockGmailClient({
+        from: "RecallTrial <notifications@recalltrial.app>",
+        subject: "[RecallTrial] YouTube Premium renews in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "Your YouTube Premium subscription renews on: Aug 19, 2026. Renewal amount: 22.00 USD.",
+      });
+
+      const { suggestions } = await scanGmailForTrials("fake-access-token", null, null);
+
+      expect(suggestions).toHaveLength(0);
+    });
+
     it("end-to-end: a genuine, non-noise merchant is NOT excluded and is still written", async () => {
       mockGmailClient({
         from: "billing@service.com",

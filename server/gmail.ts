@@ -1379,6 +1379,30 @@ export async function scanGmailForTrials(
       const fromDomain = extractDomainFromEmail(from);
       if (!fromDomain || fromDomain.endsWith("gmail.com")) continue;
 
+      // Noise-filter-gap fix: confirmed noise domains (recalltrial.app's
+      // own reminder emails, Meta's ad-billing template) are now excluded
+      // HERE, before EITHER pipeline runs. Previously this check (Phase
+      // 3B.3.1) was scoped to the subscription-intelligence sub-detector
+      // only — the ORIGINAL trial-suggestion pipeline below it (whose
+      // filters only ever look at subject/snippet keywords, never sender
+      // domain) had no noise-domain protection at all. That gap let a
+      // RecallTrial reminder email like "[RecallTrial] YouTube Premium
+      // renews in 3 days" pass straight through the trial pipeline's
+      // keyword filters and get suggested as a trial for "Recalltrial"
+      // itself, in addition to being independently caught (or, before this
+      // fix, sometimes NOT caught depending on scan timing) by the
+      // sub-detector. isKnownNoiseDomain() itself is unchanged — it already
+      // correctly matches subdomains via getRootDomain(); the bug was
+      // purely that only one of the two pipelines ever consulted it.
+      if (isKnownNoiseDomain(fromDomain)) {
+        if (userId) {
+          subDetectorProcessed++;
+          subDetectorExcluded++;
+          console.log(`[SubDetector] excluded: ${fromDomain} (noise domain)`);
+        }
+        continue;
+      }
+
       // ── Parallel subscription-event detection (Phase 2 Step 5) ──
       // Runs on every candidate message that survives only the domain check
       // above — deliberately BEFORE the trial-specific filters below, so a
@@ -1390,14 +1414,6 @@ export async function scanGmailForTrials(
       // below, which is completely unmodified from this point on.
       if (userId) {
         subDetectorProcessed++;
-        // Phase 3B.3.1: confirmed noise domains, excluded before
-        // classification even runs — scoped to this sub-detector only, not
-        // the shared domain gate above (which the trial pipeline also
-        // reads and which this task's boundaries don't permit touching).
-        if (isKnownNoiseDomain(fromDomain)) {
-          subDetectorExcluded++;
-          console.log(`[SubDetector] excluded: ${fromDomain} (noise domain)`);
-        } else {
         try {
           // Phase 3B.9.7 Layer 2: full body fetch, ONLY for messages that
           // already pass the same relevance gate detectSubscriptionEvent()
@@ -1501,7 +1517,6 @@ export async function scanGmailForTrials(
           }
         } catch (subErr) {
           console.error(`[SubDetector] failed for message ${msgId}:`, subErr);
-        }
         }
       }
 
