@@ -16,6 +16,10 @@ type AuthUser = {
   billingEnabled: boolean;
   emailScanningEnabled: boolean;
   aiScanningEnabled: boolean;
+  aiCreditsIncluded: number;
+  aiCreditsPurchased: number;
+  aiCreditsTotal: number;
+  aiCreditsResetAt: string | null;
   gmailConnected: boolean;
   lastEmailScanAt: string | null;
   createdAt: string;

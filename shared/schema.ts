@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, date, decimal, pgEnum, integer, boolean, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, date, decimal, pgEnum, integer, boolean, unique, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -41,6 +41,24 @@ export const users = pgTable("users", {
   // subscription_events (which would only count messages that produced a
   // candidate, undercounting true scan volume).
   lastScanMessagesProcessed: integer("last_scan_messages_processed"),
+  // Phase 3B.9.10: AI credit balances. aiCreditsIncluded is a monthly
+  // allowance that RESETS (overwrites, does not accumulate) on each grant —
+  // "use it or lose it," matching RECALLTRIAL_ROADMAP.md's "reset monthly"
+  // language. aiCreditsPurchased is a separate, never-expiring balance from
+  // Stripe top-up packs; the monthly reset must never touch it. Both are
+  // authoritative current balances — server/aiCreditLedger.ts's ledger
+  // table is the append-only audit trail of every change to them, not the
+  // other way around.
+  aiCreditsIncluded: integer("ai_credits_included").notNull().default(0),
+  aiCreditsPurchased: integer("ai_credits_purchased").notNull().default(0),
+  aiCreditsResetAt: timestamp("ai_credits_reset_at"),
+  // Consent record for sending email content to an external AI provider —
+  // separate from the aiScanningEnabled boolean toggle itself (Pre-3B.9.9
+  // Privacy Gate): this captures WHEN and under WHICH version of the
+  // consent text the user agreed, for auditability if the consent language
+  // ever changes.
+  aiScanningConsentAt: timestamp("ai_scanning_consent_at"),
+  aiScanningConsentVersion: text("ai_scanning_consent_version"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -278,6 +296,12 @@ export type InsertSubscriptionEvent = typeof subscriptionEvents.$inferInsert;
 // a Zod schema violation that would never succeed on retry).
 export const aiEnrichmentJobStatusEnum = pgEnum("ai_enrichment_job_status", [
   "pending", "processing", "completed", "failed", "dead_letter",
+  // Phase 3B.9.10: terminal, non-retryable — the user's credit balance was
+  // exhausted at claim time. Distinct from 'failed' (a Claude-side error)
+  // since retrying without new credits would just fail the same way again;
+  // if the user tops up later, a fresh scan queues a fresh job rather than
+  // this one being resurrected.
+  "no_credits",
 ]);
 
 export const aiEnrichmentJobs = pgTable("ai_enrichment_jobs", {
@@ -308,6 +332,46 @@ export const aiEnrichmentJobs = pgTable("ai_enrichment_jobs", {
 
 export type AIEnrichmentJob = typeof aiEnrichmentJobs.$inferSelect;
 export type InsertAIEnrichmentJob = typeof aiEnrichmentJobs.$inferInsert;
+
+// Phase 3B.9.10: append-only audit trail for every change to
+// users.aiCreditsIncluded/aiCreditsPurchased — the users-table columns are
+// the authoritative CURRENT balance (every mutation goes through
+// server/aiCredits.ts, which updates both the balance and this ledger in
+// the same operation), this table exists purely for observability/
+// auditability, never as a second source of truth to sum on the fly.
+//
+// The unique constraint on (referenceId, type) is what makes usage/refund/
+// purchase entries idempotent at the DB level (onConflictDoNothing, not a
+// pre-check SELECT — the same "let the constraint own it" pattern used
+// throughout this feature line). referenceId is nullable and Postgres
+// treats every NULL as distinct for uniqueness purposes, so monthly_grant/
+// adjustment entries (referenceId always null, idempotency instead owned
+// by users.aiCreditsResetAt's own 30-day check) are never constrained by
+// this index. referenceId for a 'usage'/'refund' pair is scoped to a
+// single AI-enrichment ATTEMPT (`${jobId}:${attemptNumber}`, see
+// server/aiEnrichmentQueue.ts), not the job as a whole — a retried job
+// legitimately reserves and (on failure) refunds a fresh credit on each
+// attempt, so the referenceId must be attempt-scoped or a second attempt's
+// genuine new reservation would collide with the first attempt's.
+export const aiCreditLedgerTypeEnum = pgEnum("ai_credit_ledger_type", [
+  "monthly_grant", "purchase", "usage", "refund", "adjustment", "expiration",
+]);
+
+export const aiCreditLedger = pgTable("ai_credit_ledger", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  type: aiCreditLedgerTypeEnum("type").notNull(),
+  amount: integer("amount").notNull(),
+  balanceAfter: integer("balance_after").notNull(),
+  referenceId: text("reference_id"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  unique("ai_credit_ledger_reference_type_unique").on(table.referenceId, table.type),
+]);
+
+export type AICreditLedgerEntry = typeof aiCreditLedger.$inferSelect;
+export type InsertAICreditLedgerEntry = typeof aiCreditLedger.$inferInsert;
 
 // Phase 3B.4: SHADOW MODE ONLY. server/entityResolver.ts's proposed
 // groupings, written here for observation only — nothing in the app reads

@@ -197,8 +197,10 @@ export interface IStorage {
   clearUserGmailTokens(userId: string): Promise<void>;
   toggleEmailScanning(userId: string, enabled: boolean): Promise<User>;
   toggleAiScanning(userId: string, enabled: boolean): Promise<User>;
+  recordAiScanningConsent(userId: string, version: string): Promise<void>;
   updateLastEmailScan(userId: string, messagesProcessed?: number): Promise<void>;
   getProUsersWithScanningEnabled(): Promise<User[]>;
+  getUsersDueForMonthlyAiCreditGrant(): Promise<User[]>;
 
   getSuggestedTrials(userId: string): Promise<SuggestedTrial[]>;
   upsertSuggestedTrial(data: Omit<SuggestedTrial, "id" | "createdAt" | "status"> & { userId: string }): Promise<void>;
@@ -484,6 +486,14 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
+  // Phase 3B.9.10 STEP 7: recorded ONLY on the transition to enabled (see
+  // the route), never cleared on disable — it's a historical record of
+  // "when/under what version did this user last consent," not a live flag
+  // (aiScanningEnabled itself is the live flag).
+  async recordAiScanningConsent(userId: string, version: string): Promise<void> {
+    await db.update(users).set({ aiScanningConsentAt: new Date(), aiScanningConsentVersion: version }).where(eq(users.id, userId));
+  }
+
   async updateLastEmailScan(userId: string, messagesProcessed?: number): Promise<void> {
     await db.update(users)
       .set({
@@ -508,6 +518,21 @@ export class DatabaseStorage implements IStorage {
         eq(users.gmailConnected, true),
       )
     ).orderBy(sql`${users.lastEmailScanAt} ASC NULLS FIRST`);
+  }
+
+  // Phase 3B.9.10 STEP 4: candidates for a monthly AI-credit grant. Free
+  // plan is excluded entirely (creditsForPlan("FREE") is 0 anyway, so
+  // including them would just be wasted work). The actual 30-day
+  // idempotency check is re-verified atomically inside
+  // grantMonthlyCredits() itself — this query is a coarse candidate list,
+  // not the source of truth for "is this user actually due."
+  async getUsersDueForMonthlyAiCreditGrant(): Promise<User[]> {
+    return db.select().from(users).where(
+      and(
+        inArray(users.plan, ["PLUS", "PRO", "PREMIUM"]),
+        sql`(${users.aiCreditsResetAt} IS NULL OR ${users.aiCreditsResetAt} < now() - interval '30 days')`,
+      )
+    );
   }
 
   async createSubscriptionEvent(data: InsertSubscriptionEvent): Promise<SubscriptionEvent | null> {

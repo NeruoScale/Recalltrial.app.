@@ -35,6 +35,12 @@ const TIMEZONES = [
   "America/Sao_Paulo",
 ];
 
+// Mirrors server/aiCredits.ts's creditsForPlan() — the monthly INCLUDED
+// allotment per plan, used only to derive "X used this month" for display
+// (the server is still the sole source of truth for the actual remaining
+// balance, user.aiCreditsIncluded).
+const AI_CREDIT_PLAN_TOTALS: Record<string, number> = { FREE: 0, PLUS: 100, PRO: 200, PREMIUM: 200 };
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
@@ -55,6 +61,15 @@ export default function SettingsPage() {
     if (params.get("gmailError")) {
       toast({ title: "Gmail connection failed", description: "Something went wrong. Please try again.", variant: "destructive" });
       window.history.replaceState({}, "", "/settings");
+    }
+    if (params.get("aiCreditsPurchased") === "1") {
+      // Purely a UX confirmation — the actual credits were already granted
+      // server-side by the Stripe webhook (server/index.ts), never by this
+      // redirect itself. Invalidating /api/auth/me just picks up whatever
+      // the webhook has (or hasn't, if it hasn't landed yet) already done.
+      toast({ title: "Purchase complete", description: "Your AI credits will appear shortly." });
+      window.history.replaceState({}, "", "/settings");
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
     }
   }, []);
 
@@ -105,6 +120,19 @@ export default function SettingsPage() {
     },
     onError: (err: any) => {
       toast({ title: "Failed to toggle AI scanning", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const purchaseAiCreditsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/billing/purchase-ai-credits", { pack: "1000" });
+      return res.json();
+    },
+    onSuccess: (data: { url: string }) => {
+      if (data.url) window.location.href = data.url;
+    },
+    onError: (err: any) => {
+      toast({ title: "Unable to start checkout", description: err.message, variant: "destructive" });
     },
   });
 
@@ -380,6 +408,32 @@ export default function SettingsPage() {
             <p className="text-xs text-muted-foreground">
               When enabled, RecallTrial may send relevant content from subscription-related emails to our AI provider to improve subscription detection. Email content is processed for this purpose only and is not stored by RecallTrial or our AI provider.
             </p>
+
+            {user.aiScanningEnabled && (
+              <div className="space-y-2 border-t pt-3" data-testid="section-ai-credits">
+                <h4 className="text-sm font-medium">AI enrichment</h4>
+                <p className="text-sm text-muted-foreground" data-testid="text-ai-credits-included">
+                  {Math.max(0, (AI_CREDIT_PLAN_TOTALS[user.plan] ?? 0) - user.aiCreditsIncluded)} / {AI_CREDIT_PLAN_TOTALS[user.plan] ?? 0} included credits used this month
+                </p>
+                <p className="text-sm text-muted-foreground" data-testid="text-ai-credits-purchased">
+                  {user.aiCreditsPurchased} purchased credits remaining
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => purchaseAiCreditsMutation.mutate()}
+                  disabled={purchaseAiCreditsMutation.isPending}
+                  data-testid="button-buy-ai-credits"
+                >
+                  {purchaseAiCreditsMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : (
+                    <Sparkles className="h-4 w-4 mr-1" />
+                  )}
+                  Buy 1,000 more credits — $5
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
 

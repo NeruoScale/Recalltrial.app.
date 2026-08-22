@@ -205,6 +205,10 @@ export async function registerRoutes(
       billingEnabled: BILLING_ENABLED,
       emailScanningEnabled: user.emailScanningEnabled,
       aiScanningEnabled: user.aiScanningEnabled,
+      aiCreditsIncluded: user.aiCreditsIncluded,
+      aiCreditsPurchased: user.aiCreditsPurchased,
+      aiCreditsTotal: user.aiCreditsIncluded + user.aiCreditsPurchased,
+      aiCreditsResetAt: user.aiCreditsResetAt,
       gmailConnected: user.gmailConnected,
       lastEmailScanAt: user.lastEmailScanAt,
       createdAt: user.createdAt,
@@ -263,6 +267,11 @@ export async function registerRoutes(
         return res.status(400).json({ message: "aiScanningEnabled must be a boolean" });
       }
       const updated = await storage.toggleAiScanning(req.session.userId!, aiScanningEnabled);
+      // Phase 3B.9.10 STEP 7: consent is recorded only on the transition TO
+      // enabled — disabling never clears the historical consent record.
+      if (aiScanningEnabled) {
+        await storage.recordAiScanningConsent(req.session.userId!, "1.0");
+      }
       return res.json({ aiScanningEnabled: updated.aiScanningEnabled });
     } catch (err) {
       console.error("Update user settings error:", err);
@@ -1025,6 +1034,63 @@ export async function registerRoutes(
     }
   });
 
+  // Phase 3B.9.10 STEP 5: one-time AI-credits top-up purchase. Same
+  // requireBilling+requireAuth gate every other billing route uses — no
+  // plan restriction, matching the existing precedent that plan checks
+  // don't gate checkout/portal routes themselves. Deliberately mode:
+  // "payment" (one-time), not "subscription" — no subscription_data, since
+  // this never creates or touches a Stripe Subscription. Credits are
+  // granted ONLY by the webhook handler after Stripe confirms the payment
+  // (server/index.ts) — never here, and never from the browser's
+  // success_url redirect alone (a user can reach that URL without ever
+  // having paid, e.g. by navigating back).
+  app.post("/api/billing/purchase-ai-credits", requireBilling, requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { pack } = req.body;
+      if (pack !== "1000") {
+        return res.status(400).json({ message: "Unknown credit pack" });
+      }
+
+      const priceId = process.env.STRIPE_AI_CREDITS_1000_PRICE_ID;
+      if (!priceId) {
+        return res.status(503).json({ message: "AI credit purchases are not configured on this server." });
+      }
+
+      const user = await storage.getUserById(req.session.userId!);
+      if (!user) return res.status(401).json({ message: "User not found" });
+
+      const { getUncachableStripeClient } = await import("./stripeClient");
+      const stripe = await getUncachableStripeClient();
+
+      let customerId = user.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripe.customers.create({
+          email: user.email,
+          metadata: { userId: user.id },
+        });
+        await storage.updateUserStripeInfo(user.id, { stripeCustomerId: customer.id });
+        customerId = customer.id;
+      }
+
+      const appUrl = process.env.APP_URL || "https://recalltrial.app";
+
+      const checkoutSession = await stripe.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ["card"],
+        line_items: [{ price: priceId, quantity: 1 }],
+        mode: "payment",
+        success_url: `${appUrl}/settings?aiCreditsPurchased=1`,
+        cancel_url: `${appUrl}/settings`,
+        metadata: { userId: user.id, creditAmount: "1000", type: "ai_credits" },
+      });
+
+      return res.json({ url: checkoutSession.url });
+    } catch (err) {
+      console.error("AI credits checkout error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
   async function processRemindersNow() {
     const now = new Date();
     const dueReminders = await storage.getDueReminders(now);
@@ -1218,7 +1284,26 @@ export async function registerRoutes(
       subscriptionReminders = { error: err.message || "Internal error" };
     }
 
-    return res.json({ trialReminders, subscriptionReminders });
+    // Step 3 (Phase 3B.9.10): monthly AI-credit grant — a third isolated
+    // step, same reasoning again: a failure here must never affect the two
+    // reminder steps above. grantMonthlyCredits() is itself idempotent
+    // (atomic 30-day check), so re-running this for a user who was already
+    // granted this period is a harmless no-op, not a double-grant risk.
+    let aiCreditGrants: { granted: number; error?: string };
+    try {
+      const { grantMonthlyCredits } = await import("./aiCredits");
+      const dueUsers = await storage.getUsersDueForMonthlyAiCreditGrant();
+      for (const dueUser of dueUsers) {
+        await grantMonthlyCredits(dueUser.id, dueUser.plan);
+      }
+      aiCreditGrants = { granted: dueUsers.length };
+      console.log(`[Cron] AI credit grants: ${JSON.stringify(aiCreditGrants)}`);
+    } catch (err: any) {
+      console.error("[Cron] AI credit grants failed:", err);
+      aiCreditGrants = { granted: 0, error: err.message || "Internal error" };
+    }
+
+    return res.json({ trialReminders, subscriptionReminders, aiCreditGrants });
   });
 
   app.post("/api/cron/email-scan", async (req: Request, res: Response) => {

@@ -54,7 +54,32 @@ app.post(
         const event = JSON.parse(req.body.toString());
         const eventData = event.data?.object;
 
-        if (event.type === 'checkout.session.completed') {
+        if (event.type === 'checkout.session.completed' && eventData?.metadata?.type === 'ai_credits') {
+          // Phase 3B.9.10 STEP 6: AI-credit top-up fulfillment. Handled as
+          // its own branch, BEFORE the subscription-purchase logic below
+          // (which never applies here anyway — purchaseTracking.ts bails
+          // out for non-subscription-mode sessions, and syncUserSubscription*
+          // has nothing to sync for a one-time payment). Credits are
+          // granted ONLY here, from the verified webhook event — never
+          // from the browser's success_url redirect. Real money changed
+          // hands, so failures are logged loudly rather than swallowed by
+          // the bare catch{} this whole block otherwise sits inside.
+          const userId = eventData?.metadata?.userId;
+          const creditAmount = parseInt(eventData?.metadata?.creditAmount, 10);
+          if (userId && Number.isFinite(creditAmount) && creditAmount > 0) {
+            setTimeout(async () => {
+              try {
+                const { grantPurchasedCredits } = await import("./aiCredits");
+                await grantPurchasedCredits(userId, creditAmount, eventData.id);
+                console.log(`[AI Credits] granted ${creditAmount} purchased credits to user ${userId} (session ${eventData.id})`);
+              } catch (err) {
+                console.error(`[AI Credits] failed to grant purchased credits for session ${eventData?.id}:`, err);
+              }
+            }, 2000);
+          } else {
+            console.error(`[AI Credits] checkout.session.completed(type=ai_credits) missing/invalid userId or creditAmount for session ${eventData?.id}`);
+          }
+        } else if (event.type === 'checkout.session.completed') {
           const userId = eventData?.metadata?.userId;
           if (userId) {
             setTimeout(() => syncUserSubscriptionByUserId(userId), 2000);

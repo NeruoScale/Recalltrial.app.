@@ -11,6 +11,7 @@ vi.mock("./db", () => ({ db: {} }));
 vi.mock("./storage", () => ({ storage: {} }));
 vi.mock("@shared/schema", () => ({ aiEnrichmentJobs: {}, subscriptionEvents: {}, users: {} }));
 vi.mock("./gmail", () => ({ buildGmailClient: vi.fn(), fetchMessageBody: vi.fn() }));
+vi.mock("./aiCredits", () => ({ reserveCredit: vi.fn(), refundCredit: vi.fn() }));
 vi.mock("./aiEnrichment", () => ({
   buildAIPayload: vi.fn(),
   callClaudeHaiku: vi.fn(),

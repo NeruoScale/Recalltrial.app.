@@ -22,6 +22,7 @@ import {
   AISchemaValidationError,
   AIProviderError,
 } from "./aiEnrichment";
+import { reserveCredit, refundCredit } from "./aiCredits";
 import { storage } from "./storage";
 
 class AIScanningDisabledError extends Error {
@@ -122,7 +123,7 @@ export async function fetchEligibleJobIds(limit: number): Promise<string[]> {
 const INPUT_COST_PER_TOKEN_USD = 1.0 / 1_000_000;
 const OUTPUT_COST_PER_TOKEN_USD = 5.0 / 1_000_000;
 
-export type ProcessJobOutcome = "completed" | "failed" | "dead_letter" | "skipped";
+export type ProcessJobOutcome = "completed" | "failed" | "dead_letter" | "skipped" | "no_credits";
 
 /**
  * processAIEnrichmentJob(): STEP 1-10 of Phase 3B.9.9's spec, in order.
@@ -177,7 +178,39 @@ export async function processAIEnrichmentJob(jobId: string): Promise<ProcessJobO
       bodyText,
     });
 
-    const { result, inputTokens, outputTokens } = await callClaudeHaiku(payload);
+    // Phase 3B.9.10 STEP 3: reserved as late as possible — right before the
+    // actual Claude call, only once we know a real request is about to be
+    // sent — so a job that fails for a reason unrelated to AI (Gmail
+    // disconnected, body unavailable) never costs the user a credit.
+    // `referenceId` is scoped to THIS attempt (jobId:attemptNumber), not
+    // the job as a whole, so a retried job's later attempt reserves (and,
+    // on failure, refunds) its own fresh credit rather than colliding with
+    // a previous attempt's ledger entry.
+    const referenceId = `${jobId}:${claimed.attempts}`;
+    const reserved = await reserveCredit(claimed.userId, referenceId);
+    if (!reserved) {
+      await db.update(aiEnrichmentJobs).set({
+        status: "no_credits",
+        completedAt: new Date(),
+      }).where(eq(aiEnrichmentJobs.id, jobId));
+      console.log(`[AI] job ${jobId} skipped: no AI credits available`);
+      return "no_credits";
+    }
+
+    let result: Awaited<ReturnType<typeof callClaudeHaiku>>["result"];
+    let inputTokens: number;
+    let outputTokens: number;
+    try {
+      ({ result, inputTokens, outputTokens } = await callClaudeHaiku(payload));
+    } catch (claudeErr) {
+      // The credit was reserved but the call itself failed (timeout/429/5xx)
+      // or Claude's response failed Zod validation — never let a failed AI
+      // call silently consume a credit. Re-thrown so the existing outer
+      // catch block below still classifies/records the failure exactly as
+      // it did before credits existed.
+      await refundCredit(claimed.userId, referenceId);
+      throw claudeErr;
+    }
     console.log(`[AI] enrichment completed: inputTokens=${inputTokens} outputTokens=${outputTokens} confidence=${result.confidence}`);
 
     const updates = applyAIEnrichment(event, result);
@@ -236,16 +269,17 @@ export async function processAIEnrichmentJob(jobId: string): Promise<ProcessJobO
   }
 }
 
-export type BatchResult = { processed: number; succeeded: number; failed: number; deadLettered: number };
+export type BatchResult = { processed: number; succeeded: number; failed: number; deadLettered: number; noCredits: number };
 
 export async function processAIEnrichmentBatch(limit = 10): Promise<BatchResult> {
   const ids = await fetchEligibleJobIds(limit);
-  let succeeded = 0, failed = 0, deadLettered = 0;
+  let succeeded = 0, failed = 0, deadLettered = 0, noCredits = 0;
   for (const id of ids) {
     const outcome = await processAIEnrichmentJob(id);
     if (outcome === "completed") succeeded++;
     else if (outcome === "failed") failed++;
     else if (outcome === "dead_letter") deadLettered++;
+    else if (outcome === "no_credits") noCredits++;
   }
-  return { processed: ids.length, succeeded, failed, deadLettered };
+  return { processed: ids.length, succeeded, failed, deadLettered, noCredits };
 }

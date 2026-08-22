@@ -566,5 +566,69 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] ai_enrichment_jobs table:", err.message);
   }
 
+  // ── Phase 3B.9.10: AI credits & monetization ──
+
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_enum
+          WHERE enumlabel = 'no_credits' AND enumtypid = 'ai_enrichment_job_status'::regtype
+        ) THEN
+          ALTER TYPE ai_enrichment_job_status ADD VALUE 'no_credits';
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] ai_enrichment_job_status.no_credits OK");
+  } catch (err: any) {
+    console.error("[migrate] ai_enrichment_job_status.no_credits:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS ai_credits_included integer NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS ai_credits_purchased integer NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS ai_credits_reset_at timestamp,
+        ADD COLUMN IF NOT EXISTS ai_scanning_consent_at timestamp,
+        ADD COLUMN IF NOT EXISTS ai_scanning_consent_version text;
+    `);
+    console.log("[migrate] users AI credit columns OK");
+  } catch (err: any) {
+    console.error("[migrate] users AI credit columns:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ai_credit_ledger_type') THEN
+          CREATE TYPE ai_credit_ledger_type AS ENUM ('monthly_grant', 'purchase', 'usage', 'refund', 'adjustment', 'expiration');
+        END IF;
+      END $$;
+    `);
+    console.log("[migrate] ai_credit_ledger_type enum OK");
+  } catch (err: any) {
+    console.error("[migrate] ai_credit_ledger_type enum:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS ai_credit_ledger (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id varchar NOT NULL REFERENCES users(id),
+        type ai_credit_ledger_type NOT NULL,
+        amount integer NOT NULL,
+        balance_after integer NOT NULL,
+        reference_id text,
+        metadata jsonb,
+        created_at timestamp DEFAULT now() NOT NULL,
+        CONSTRAINT ai_credit_ledger_reference_type_unique UNIQUE (reference_id, type)
+      );
+    `);
+    console.log("[migrate] ai_credit_ledger table OK");
+  } catch (err: any) {
+    console.error("[migrate] ai_credit_ledger table:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
