@@ -17,6 +17,9 @@ import { computeReminders, getTimezoneOffsetMs } from "./reminderScheduling";
 import { calculateSubscriptionCosts, calculateUpcomingCharges } from "./subscriptionCostEngine";
 import { calculateRenewalCalendar } from "./renewalCalendar";
 import { buildSubscriptionVaultResponse, determineSubscriptionAccessResult } from "./subscriptionVault";
+import { buildPriceHistory } from "./priceHistory";
+import { detectPriceChanges, type PriceChangeResult } from "./priceChangeDetector";
+import { analyzeSavingsOpportunities } from "./savingsIntelligence";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -408,6 +411,35 @@ export async function registerRoutes(
       });
     } catch (err) {
       console.error("Get subscriptions error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3C.1: Savings Intelligence foundation. Pure, deterministic scoring
+  // over the user's own active/past_due subscriptions only — requireAuth
+  // plus storage.getShadowSubscriptionsForUser()'s own userId-scoped WHERE
+  // clause together mean this can never return another user's data (same
+  // isolation guarantee GET /api/subscriptions already relies on).
+  //
+  // MUST be registered before GET /api/subscriptions/:id below — Express
+  // matches routes in registration order, so "/savings" would otherwise be
+  // captured as an :id value and never reach this handler.
+  app.get("/api/subscriptions/savings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = req.session.userId!;
+      const subscriptions = await storage.getShadowSubscriptionsForUser(userId);
+      const eventsBySubscriptionId = await storage.getCanonicalEventsForUserSubscriptions(userId, subscriptions);
+
+      const priceChanges: Record<string, PriceChangeResult> = {};
+      for (const sub of subscriptions) {
+        const events = eventsBySubscriptionId[sub.id] ?? [];
+        priceChanges[sub.id] = detectPriceChanges(buildPriceHistory(events));
+      }
+
+      const analysis = analyzeSavingsOpportunities(subscriptions, eventsBySubscriptionId, priceChanges);
+      return res.json(analysis);
+    } catch (err) {
+      console.error("Get savings opportunities error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

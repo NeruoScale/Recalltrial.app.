@@ -128,6 +128,10 @@ export interface IStorage {
   // Phase 3B.9.5: subscription vault detail view.
   getShadowSubscriptionById(id: string, userId: string): Promise<ShadowSubscription | undefined>;
   getCanonicalEventsForSubscription(subscription: ShadowSubscription): Promise<SubscriptionEvent[]>;
+  // Phase 3C.1: batch variant of the above for endpoints that need canonical
+  // events for a user's ENTIRE subscription list at once (savings
+  // intelligence) — one query total instead of N, keyed by subscription id.
+  getCanonicalEventsForUserSubscriptions(userId: string, subscriptions: ShadowSubscription[]): Promise<Record<string, SubscriptionEvent[]>>;
   getShadowSubscriptionMetrics(): Promise<{
     canonicalEvents: number;
     supersededClassifications: number;
@@ -940,6 +944,48 @@ export class DatabaseStorage implements IStorage {
         merchantMatch
       ))
       .orderBy(desc(subscriptionEvents.createdAt));
+  }
+
+  // Phase 3C.1: same FK-then-merchant-fallback matching as
+  // getCanonicalEventsForSubscription() above, but for a user's whole
+  // subscription list in ONE query rather than N — avoids the N+1 pattern a
+  // naive per-subscription loop would create for savings intelligence.
+  async getCanonicalEventsForUserSubscriptions(
+    userId: string,
+    subscriptions: ShadowSubscription[]
+  ): Promise<Record<string, SubscriptionEvent[]>> {
+    const allEvents = await db
+      .select()
+      .from(subscriptionEvents)
+      .where(and(eq(subscriptionEvents.userId, userId), eq(subscriptionEvents.isCanonical, true)))
+      .orderBy(desc(subscriptionEvents.createdAt));
+
+    const byForeignKey = new Map<string, SubscriptionEvent[]>();
+    const unmatched: SubscriptionEvent[] = [];
+    for (const event of allEvents) {
+      if (event.subscriptionId) {
+        const list = byForeignKey.get(event.subscriptionId) ?? [];
+        list.push(event);
+        byForeignKey.set(event.subscriptionId, list);
+      } else {
+        unmatched.push(event);
+      }
+    }
+
+    const result: Record<string, SubscriptionEvent[]> = {};
+    for (const sub of subscriptions) {
+      const fkMatches = byForeignKey.get(sub.id);
+      if (fkMatches && fkMatches.length > 0) {
+        result[sub.id] = fkMatches;
+        continue;
+      }
+      result[sub.id] = unmatched.filter((event) =>
+        sub.canonicalMerchantDomain
+          ? event.canonicalMerchantDomain === sub.canonicalMerchantDomain
+          : event.canonicalMerchantDomain === null && event.canonicalMerchantName === sub.canonicalMerchantName
+      );
+    }
+    return result;
   }
 
   async getShadowSubscriptionMetrics(): Promise<{
