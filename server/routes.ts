@@ -20,6 +20,14 @@ import { buildSubscriptionVaultResponse, determineSubscriptionAccessResult } fro
 import { buildPriceHistory } from "./priceHistory";
 import { detectPriceChanges, type PriceChangeResult } from "./priceChangeDetector";
 import { analyzeSavingsOpportunities } from "./savingsIntelligence";
+import {
+  askSavingsAnalyst,
+  buildAnalystContext,
+  validateQuestion,
+  isClaudeConfigured,
+  savingsAnalystRateLimiter,
+  AnalystUnavailableError,
+} from "./savingsAnalyst";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -447,6 +455,65 @@ export async function registerRoutes(
       return res.json(analysis);
     } catch (err) {
       console.error("Get savings opportunities error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3C.3: AI Savings Analyst. Answers natural-language questions using
+  // ONLY structured data this user's own subscriptions/savings/price-change/
+  // renewal computations already produced — never a raw email body (see
+  // server/savingsAnalyst.ts's buildAnalystContext() for why that's
+  // structurally impossible, not just a policy). Ephemeral: the answer is
+  // returned and never persisted. Entirely separate from the AI enrichment
+  // credit system (server/aiCredits.ts) — this feature never reserves,
+  // spends, or refunds a credit.
+  app.post("/api/subscriptions/analyst", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const question = req.body?.question;
+      const validation = validateQuestion(question);
+      if (!validation.valid) {
+        return res.status(400).json({ message: validation.error });
+      }
+
+      if (!isClaudeConfigured()) {
+        return res.status(503).json({ message: "AI analyst temporarily unavailable." });
+      }
+
+      const userId = req.session.userId!;
+      if (!savingsAnalystRateLimiter.checkAndRecord(userId)) {
+        return res.status(429).json({ message: "Too many questions — try again in an hour." });
+      }
+
+      const [subs, dismissedSubscriptionIds] = await Promise.all([
+        storage.getShadowSubscriptionsForUser(userId),
+        storage.getDismissedSavingsOpportunityIds(userId),
+      ]);
+      const { subscriptions: subscriptionsWithCosts, summary: costSummary } = calculateSubscriptionCosts(userId, subs);
+      const { charges: upcomingCharges } = calculateUpcomingCharges(subs, 30);
+      const eventsBySubscriptionId = await storage.getCanonicalEventsForUserSubscriptions(userId, subs);
+
+      const priceChangesBySubscriptionId: Record<string, PriceChangeResult> = {};
+      for (const sub of subs) {
+        const events = eventsBySubscriptionId[sub.id] ?? [];
+        priceChangesBySubscriptionId[sub.id] = detectPriceChanges(buildPriceHistory(events));
+      }
+      const savingsAnalysis = analyzeSavingsOpportunities(subs, eventsBySubscriptionId, priceChangesBySubscriptionId, new Date(), dismissedSubscriptionIds);
+
+      const context = buildAnalystContext({
+        subscriptions: subscriptionsWithCosts,
+        savingsAnalysis,
+        priceChangesBySubscriptionId,
+        upcomingCharges,
+        costSummary,
+      });
+
+      const response = await askSavingsAnalyst(userId, question as string, context);
+      return res.json(response);
+    } catch (err) {
+      if (err instanceof AnalystUnavailableError) {
+        return res.status(503).json({ message: err.message });
+      }
+      console.error("Savings analyst error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

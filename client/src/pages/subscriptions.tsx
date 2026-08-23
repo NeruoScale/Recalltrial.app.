@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -1096,6 +1097,102 @@ function UpcomingChargesSection({ charges, summary }: { charges: UpcomingCharge[
   );
 }
 
+// ─── Phase 3C.3: AI Savings Analyst ──────────────────────────────────────────
+// Answers are ephemeral (never persisted) and rendered exactly as returned —
+// this page never rewrites or augments what the analyst said, matching
+// server/savingsAnalyst.ts's "pass the answer through unmodified" contract.
+
+type AnalystApiResponse = { answer: string; disclaimer: string };
+
+const SUGGESTED_QUESTIONS = [
+  "How much am I spending monthly?",
+  "Which subscriptions have price increases?",
+  "What renews this month?",
+  "Which subscriptions are worth reviewing?",
+  "How much could I potentially save?",
+];
+
+function AnalystSection() {
+  const [question, setQuestion] = useState("");
+
+  const askMutation = useMutation({
+    mutationFn: async (q: string) => {
+      const res = await apiRequest("POST", "/api/subscriptions/analyst", { question: q });
+      return (await res.json()) as AnalystApiResponse;
+    },
+  });
+
+  const handleAsk = (q: string) => {
+    const trimmed = q.trim();
+    if (!trimmed || askMutation.isPending) return;
+    setQuestion(trimmed);
+    askMutation.mutate(trimmed);
+  };
+
+  return (
+    <Card className="mb-6">
+      <CardContent className="py-4">
+        <h2 className="font-semibold mb-3" data-testid="text-analyst-heading">Ask about your subscriptions</h2>
+
+        <div className="flex gap-2 mb-3">
+          <Input
+            placeholder="What subscriptions am I paying for?"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleAsk(question); }}
+            maxLength={500}
+            data-testid="input-analyst-question"
+          />
+          <Button
+            onClick={() => handleAsk(question)}
+            disabled={askMutation.isPending || !question.trim()}
+            data-testid="button-analyst-ask"
+          >
+            Ask
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mb-4">
+          {SUGGESTED_QUESTIONS.map((q, idx) => (
+            <button
+              key={q}
+              type="button"
+              disabled={askMutation.isPending}
+              className="text-xs px-2 py-1 rounded-md border text-muted-foreground hover-elevate disabled:opacity-50"
+              onClick={() => handleAsk(q)}
+              data-testid={`button-suggested-question-${idx}`}
+            >
+              {q}
+            </button>
+          ))}
+        </div>
+
+        {askMutation.isPending && (
+          <div className="space-y-2" data-testid="text-analyst-loading">
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-4 w-1/2" />
+          </div>
+        )}
+
+        {!askMutation.isPending && askMutation.isError && (
+          <p className="text-sm text-destructive" data-testid="text-analyst-error">
+            AI analyst temporarily unavailable.
+          </p>
+        )}
+
+        {!askMutation.isPending && askMutation.data && (
+          <div data-testid="text-analyst-answer-wrapper">
+            <p className="text-sm whitespace-pre-wrap" data-testid="text-analyst-answer">{askMutation.data.answer}</p>
+            <p className="text-xs text-muted-foreground mt-2" data-testid="text-analyst-disclaimer">
+              Based on email-detected data · May be incomplete
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function SubscriptionsPage() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
@@ -1238,6 +1335,10 @@ export default function SubscriptionsPage() {
               {subs.map((sub) => (
                 <SubscriptionRow key={sub.id} sub={sub} onOpenDetail={setSelectedSubId} />
               ))}
+            </div>
+
+            <div className="mt-6">
+              <AnalystSection />
             </div>
           </>
         )}
