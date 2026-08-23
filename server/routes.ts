@@ -28,6 +28,7 @@ import {
   savingsAnalystRateLimiter,
   AnalystUnavailableError,
 } from "./savingsAnalyst";
+import { generateRecommendations } from "./savingsRecommendations";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -455,6 +456,35 @@ export async function registerRoutes(
       return res.json(analysis);
     } catch (err) {
       console.error("Get savings opportunities error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3C.4: Savings Recommendations — pure, deterministic (server/
+  // savingsRecommendations.ts), NOT an AI call. Reuses the exact same
+  // subscriptions/events/price-change/savings-opportunity computation the
+  // savings and analyst routes above already do, strictly scoped to the
+  // authenticated user via storage.getShadowSubscriptionsForUser(userId).
+  app.get("/api/subscriptions/recommendations", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = req.session.userId!;
+      const [subscriptions, dismissedSubscriptionIds] = await Promise.all([
+        storage.getShadowSubscriptionsForUser(userId),
+        storage.getDismissedSavingsOpportunityIds(userId),
+      ]);
+      const eventsBySubscriptionId = await storage.getCanonicalEventsForUserSubscriptions(userId, subscriptions);
+
+      const priceChanges: Record<string, PriceChangeResult> = {};
+      for (const sub of subscriptions) {
+        const events = eventsBySubscriptionId[sub.id] ?? [];
+        priceChanges[sub.id] = detectPriceChanges(buildPriceHistory(events));
+      }
+
+      const savingsAnalysis = analyzeSavingsOpportunities(subscriptions, eventsBySubscriptionId, priceChanges, new Date(), dismissedSubscriptionIds);
+      const result = generateRecommendations(subscriptions, savingsAnalysis.opportunities, priceChanges, eventsBySubscriptionId);
+      return res.json(result);
+    } catch (err) {
+      console.error("Get savings recommendations error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

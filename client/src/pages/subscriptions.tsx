@@ -147,6 +147,42 @@ type SavingsAnalysis = {
   summary: SavingsSummary;
 };
 
+// ─── Phase 3C.4: Savings recommendations ────────────────────────────────────
+// Mirrors server/savingsRecommendations.ts's RecommendationResult exactly —
+// this page only sorts (by priority) and displays what the deterministic
+// engine already produced, it never rewrites a title/description/evidence.
+
+type RecommendationType =
+  | "REVIEW_COST"
+  | "CONFIRM_AMOUNT"
+  | "REVIEW_RENEWAL"
+  | "REVIEW_PAYMENT_FAILURE"
+  | "REVIEW_PAST_DUE"
+  | "REVIEW_PRICE_INCREASE"
+  | "REVIEW_CURRENCY_CHANGE";
+
+type RecommendationPriority = "high" | "medium" | "low";
+
+type Recommendation = {
+  id: string;
+  subscriptionId: string;
+  merchant: string;
+  type: RecommendationType;
+  priority: RecommendationPriority;
+  title: string;
+  description: string;
+  evidence: string[];
+  potentialAnnualSavings: number | null;
+  currency: string | null;
+  actionLabel: string;
+  actionType: "view" | "track" | "confirm";
+};
+
+type RecommendationResult = {
+  recommendations: Recommendation[];
+  summary: { total: number; highPriority: number; mediumPriority: number; lowPriority: number };
+};
+
 // ─── Phase 3B.9.5: Subscription Vault detail view ───────────────────────────
 // Mirrors GET /api/subscriptions/:id's real response shape exactly
 // (server/subscriptionVault.ts's SubscriptionVaultResponse) — never a
@@ -715,6 +751,81 @@ function SavingsSummaryLine({ byCurrency }: { byCurrency: SavingsSummary["byCurr
         </div>
       ))}
     </>
+  );
+}
+
+const PRIORITY_ORDER: RecommendationPriority[] = ["high", "medium", "low"];
+
+function priorityIndicator(p: RecommendationPriority): string {
+  switch (p) {
+    case "high": return "🔴";
+    case "medium": return "🟡";
+    case "low": return "⚪";
+  }
+}
+
+function RecommendationCard({ rec, onOpenDetail }: { rec: Recommendation; onOpenDetail: (id: string) => void }) {
+  return (
+    <Card data-testid={`card-recommendation-${rec.id}`}>
+      <CardContent className="py-4">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <span className="text-xs font-bold tracking-wide" data-testid={`badge-priority-${rec.id}`}>
+            {priorityIndicator(rec.priority)} {rec.priority.toUpperCase()}
+          </span>
+          <span className="font-semibold" data-testid={`text-recommendation-merchant-${rec.id}`}>{rec.merchant}</span>
+        </div>
+        <div className="font-medium text-sm mb-1" data-testid={`text-recommendation-title-${rec.id}`}>{rec.title}</div>
+        <p className="text-sm text-muted-foreground mb-3" data-testid={`text-recommendation-description-${rec.id}`}>{rec.description}</p>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onOpenDetail(rec.subscriptionId)}
+          data-testid={`button-recommendation-action-${rec.id}`}
+        >
+          {rec.actionLabel}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RecommendationsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }) {
+  const { data, isLoading } = useQuery<RecommendationResult>({
+    queryKey: ["/api/subscriptions/recommendations"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+
+  if (isLoading || !data) {
+    return (
+      <Card className="mb-6">
+        <CardContent className="py-4">
+          <Skeleton className="h-16 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const sorted = [...data.recommendations].sort(
+    (a, b) => PRIORITY_ORDER.indexOf(a.priority) - PRIORITY_ORDER.indexOf(b.priority)
+  );
+
+  return (
+    <Card className="mb-6">
+      <CardContent className="py-4">
+        <h2 className="font-semibold mb-3" data-testid="text-recommendations-heading">What needs attention</h2>
+        {sorted.length === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="text-recommendations-empty">
+            No action needed — your subscriptions look good.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {sorted.map((rec) => (
+              <RecommendationCard key={rec.id} rec={rec} onOpenDetail={onOpenDetail} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1320,6 +1431,8 @@ export default function SubscriptionsPage() {
                 {incompleteTotal} subscription{incompleteTotal === 1 ? "" : "s"} {incompleteTotal === 1 ? "has" : "have"} incomplete billing information.
               </p>
             )}
+
+            <RecommendationsSection onOpenDetail={setSelectedSubId} />
 
             <SavingsSection onOpenDetail={setSelectedSubId} />
 
