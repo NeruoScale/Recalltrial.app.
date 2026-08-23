@@ -40,6 +40,10 @@ function makeSub(overrides: Partial<ShadowSubscription> = {}): ShadowSubscriptio
     promotedAt: new Date("2026-08-19T00:00:00.000Z"),
     promotionReason: "domain_match_controlled_activation",
     promotionEvidence: "resolutionMethod=domain_match, merchantConfidence=90",
+    userConfirmed: false,
+    userConfirmedAt: null,
+    userDismissed: false,
+    userDismissedAt: null,
     createdAt: new Date("2026-08-18T00:00:00.000Z"),
     updatedAt: new Date("2026-08-18T00:00:00.000Z"),
     ...overrides,
@@ -243,6 +247,17 @@ describe("Phase 3B.9.5: buildSubscriptionVaultResponse", () => {
     expect(response.subscription.subscriptionStatus).toBe("active");
     expect(response.subscription.amount).toBe("20.00");
     expect(response.renewal.nextBillingDate).toBe("2027-08-01");
+  });
+
+  it("Track UX follow-up: exposes userConfirmed/userConfirmedAt read-only from the row, never derived", () => {
+    const confirmedAt = new Date("2026-08-23T01:55:02.877Z");
+    const confirmed = buildSubscriptionVaultResponse(makeSub({ userConfirmed: true, userConfirmedAt: confirmedAt }), [], null);
+    expect(confirmed.subscription.userConfirmed).toBe(true);
+    expect(confirmed.subscription.userConfirmedAt).toBe(confirmedAt.toISOString());
+
+    const notConfirmed = buildSubscriptionVaultResponse(makeSub({ userConfirmed: false, userConfirmedAt: null }), [], null);
+    expect(notConfirmed.subscription.userConfirmed).toBe(false);
+    expect(notConfirmed.subscription.userConfirmedAt).toBeNull();
   });
 });
 

@@ -262,6 +262,8 @@ type SubscriptionVaultResponse = {
     promotedAt: string | null;
     createdAt: string;
     updatedAt: string;
+    userConfirmed: boolean;
+    userConfirmedAt: string | null;
   };
   cost: {
     monthlyCost: number | null;
@@ -339,6 +341,14 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                 >
                   {statusLabel(data.subscription.subscriptionStatus)}
                 </span>
+                {data.subscription.userConfirmed && (
+                  <span
+                    className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
+                    data-testid="badge-detail-confirmed"
+                  >
+                    ✓ Confirmed by you
+                  </span>
+                )}
               </SheetTitle>
             </SheetHeader>
 
@@ -351,6 +361,11 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                 {data.cost.annualEquivalent !== null && (
                   <div className="text-sm text-muted-foreground" data-testid="text-detail-annual-equivalent">
                     ${data.cost.annualEquivalent.toFixed(2)} {data.cost.currency}/year
+                  </div>
+                )}
+                {data.subscription.userConfirmed && data.subscription.userConfirmedAt && (
+                  <div className="text-xs text-muted-foreground mt-1" data-testid="text-detail-confirmed-at">
+                    Confirmed by you on {formatDate(data.subscription.userConfirmedAt)}
                   </div>
                 )}
               </div>
@@ -692,6 +707,11 @@ function SavingsOpportunityCard({
           </div>
         )}
 
+        {/* Track (userConfirmed) and Dismiss (dismissedSavingsOpportunities)
+            are independent actions on independent pieces of state — both are
+            always rendered together, regardless of the other's value. Track
+            only ever swaps its OWN slot between a button and a badge; it
+            never affects whether Dismiss renders. */}
         <div className="flex items-center gap-2 flex-wrap">
           <Button
             size="sm"
@@ -707,7 +727,7 @@ function SavingsOpportunityCard({
               className="inline-flex items-center text-xs px-2 py-1 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
               data-testid={`badge-tracked-${o.subscriptionId}`}
             >
-              ✓ Tracked
+              ✓ Confirmed by you
             </span>
           ) : (
             <Button
@@ -731,6 +751,12 @@ function SavingsOpportunityCard({
             Dismiss
           </Button>
         </div>
+
+        {!o.userConfirmed && (
+          <p className="text-xs text-muted-foreground mt-1.5" data-testid={`text-track-hint-${o.subscriptionId}`}>
+            Confirm this is your subscription to improve savings accuracy.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -913,8 +939,14 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
                     onOpenDetail={onOpenDetail}
                     onTrack={(id) => trackMutation.mutate(id)}
                     onDismiss={(id) => dismissMutation.mutate(id)}
-                    isTracking={trackMutation.isPending}
-                    isDismissing={dismissMutation.isPending}
+                    // Track and Dismiss are independent actions on independent
+                    // subscriptions — scoping "is this card's button busy" to
+                    // BOTH the in-flight mutation AND which subscriptionId it
+                    // was called with means clicking Track on one card can
+                    // never disable (or otherwise affect) Dismiss on that same
+                    // card, or either button on any OTHER card.
+                    isTracking={trackMutation.isPending && trackMutation.variables === o.subscriptionId}
+                    isDismissing={dismissMutation.isPending && dismissMutation.variables === o.subscriptionId}
                   />
                 ))}
             </div>
@@ -1001,7 +1033,7 @@ function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onO
                 className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
                 data-testid={`badge-tracked-${sub.id}`}
               >
-                ✓ Tracked
+                ✓ Confirmed by you
               </span>
             )}
           </div>

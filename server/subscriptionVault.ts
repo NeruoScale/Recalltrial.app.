@@ -134,6 +134,12 @@ export type SubscriptionVaultResponse = {
     promotedAt: string | null;
     createdAt: string;
     updatedAt: string;
+    // Phase 3C.4 UX follow-up: explicit user acknowledgement (server/
+    // storage.ts's confirmSubscription()) — read-only here, this module
+    // never sets it. userConfirmedAt is only non-null when userConfirmed is
+    // true.
+    userConfirmed: boolean;
+    userConfirmedAt: string | null;
   };
   cost: {
     monthlyCost: number | null;
@@ -211,6 +217,8 @@ export function buildSubscriptionVaultResponse(
       promotedAt: subscription.promotedAt ? subscription.promotedAt.toISOString() : null,
       createdAt: subscription.createdAt.toISOString(),
       updatedAt: subscription.updatedAt.toISOString(),
+      userConfirmed: subscription.userConfirmed,
+      userConfirmedAt: subscription.userConfirmedAt ? subscription.userConfirmedAt.toISOString() : null,
     },
     cost: {
       monthlyCost: costed.monthlyCost,
