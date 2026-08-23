@@ -124,7 +124,10 @@ export interface IStorage {
   // Phase 3B.6: admin shadow-subscription preview dashboard read path.
   getShadowSubscriptionsForDashboard(): Promise<(ShadowSubscription & { userEmail: string })[]>;
   // Phase 3B.7.3: end-user "detected subscriptions" dashboard read path.
-  getShadowSubscriptionsForUser(userId: string): Promise<ShadowSubscription[]>;
+  // Phase 3C.2: includeDismissed defaults to false — userDismissed rows are
+  // hidden from the main list unless the caller explicitly asks for them
+  // (GET /api/subscriptions?showDismissed=true).
+  getShadowSubscriptionsForUser(userId: string, includeDismissed?: boolean): Promise<ShadowSubscription[]>;
   // Phase 3B.9.5: subscription vault detail view.
   getShadowSubscriptionById(id: string, userId: string): Promise<ShadowSubscription | undefined>;
   getCanonicalEventsForSubscription(subscription: ShadowSubscription): Promise<SubscriptionEvent[]>;
@@ -216,6 +219,20 @@ export interface IStorage {
   getPasswordResetToken(token: string): Promise<PasswordResetToken | undefined>;
   consumePasswordResetToken(token: string, newPasswordHash: string): Promise<boolean>;
   updateUserPassword(userId: string, passwordHash: string): Promise<void>;
+
+  // Phase 3C.2: savings-opportunity dismissal — stored in users.preferences
+  // (jsonb), never a new table, since this is display-only per-user UI
+  // state. Scoped entirely by userId; a subscription id dismissed by one
+  // user has no effect on any other user's savings section.
+  getDismissedSavingsOpportunityIds(userId: string): Promise<string[]>;
+  dismissSavingsOpportunity(userId: string, subscriptionId: string): Promise<string[]>;
+
+  // Phase 3C.2: explicit user acknowledgement of a detected subscription.
+  // Both scoped by (id AND userId) together, matching getShadowSubscriptionById's
+  // exact cross-user-isolation pattern — a cross-user id update affects 0
+  // rows and returns undefined, never another user's row.
+  confirmSubscription(id: string, userId: string): Promise<ShadowSubscription | undefined>;
+  dismissSubscription(id: string, userId: string): Promise<ShadowSubscription | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -881,14 +898,18 @@ export class DatabaseStorage implements IStorage {
   // moment before promotion, and the end-user dashboard must keep showing
   // it (Step 6's explicit requirement) rather than having it silently
   // disappear the instant it's promoted.
-  async getShadowSubscriptionsForUser(userId: string): Promise<ShadowSubscription[]> {
+  async getShadowSubscriptionsForUser(userId: string, includeDismissed = false): Promise<ShadowSubscription[]> {
+    const conditions = [
+      eq(subscriptions.userId, userId),
+      eq(subscriptions.resolutionStatus, "resolved"),
+    ];
+    if (!includeDismissed) {
+      conditions.push(eq(subscriptions.userDismissed, false));
+    }
     return db
       .select()
       .from(subscriptions)
-      .where(and(
-        eq(subscriptions.userId, userId),
-        eq(subscriptions.resolutionStatus, "resolved")
-      ))
+      .where(and(...conditions))
       .orderBy(subscriptions.canonicalMerchantName);
   }
 
@@ -903,6 +924,51 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(subscriptions.id, id), eq(subscriptions.userId, userId)))
       .limit(1);
     return sub;
+  }
+
+  // Phase 3C.2: "Track Subscription" — an explicit user acknowledgement,
+  // deliberately independent of amount/billingInterval (works when
+  // amount=null). Scoped by (id AND userId) together, same pattern as
+  // getShadowSubscriptionById above: a cross-user id updates 0 rows and
+  // returns undefined.
+  async confirmSubscription(id: string, userId: string): Promise<ShadowSubscription | undefined> {
+    const [sub] = await db
+      .update(subscriptions)
+      .set({ userConfirmed: true, userConfirmedAt: new Date() })
+      .where(and(eq(subscriptions.id, id), eq(subscriptions.userId, userId)))
+      .returning();
+    return sub;
+  }
+
+  // Phase 3C.2: hides a subscription from the main list without deleting it
+  // (preserved for audit) — see getShadowSubscriptionsForUser's includeDismissed param.
+  async dismissSubscription(id: string, userId: string): Promise<ShadowSubscription | undefined> {
+    const [sub] = await db
+      .update(subscriptions)
+      .set({ userDismissed: true, userDismissedAt: new Date() })
+      .where(and(eq(subscriptions.id, id), eq(subscriptions.userId, userId)))
+      .returning();
+    return sub;
+  }
+
+  // Phase 3C.2: savings-opportunity dismissal lives in users.preferences
+  // (jsonb) rather than a new table — display-only per-user UI state, never
+  // read by lifecycle/billing/reminder logic.
+  async getDismissedSavingsOpportunityIds(userId: string): Promise<string[]> {
+    const user = await this.getUserById(userId);
+    return user?.preferences?.dismissedSavingsOpportunities ?? [];
+  }
+
+  async dismissSavingsOpportunity(userId: string, subscriptionId: string): Promise<string[]> {
+    const user = await this.getUserById(userId);
+    const current = user?.preferences?.dismissedSavingsOpportunities ?? [];
+    if (current.includes(subscriptionId)) return current;
+    const updated = [...current, subscriptionId];
+    await db
+      .update(users)
+      .set({ preferences: { ...(user?.preferences ?? {}), dismissedSavingsOpportunities: updated } })
+      .where(eq(users.id, userId));
+    return updated;
   }
 
   // Phase 3B.9.6A Step 4: PRIMARY lookup is now the real subscriptionId FK
@@ -1241,6 +1307,10 @@ export class DatabaseStorage implements IStorage {
       lastPriceChangeAbsolute: r.last_price_change_absolute,
       lastPriceChangePercentage: r.last_price_change_percentage,
       lastPriceChangeAnnualImpact: r.last_price_change_annual_impact,
+      userConfirmed: r.user_confirmed,
+      userConfirmedAt: r.user_confirmed_at,
+      userDismissed: r.user_dismissed,
+      userDismissedAt: r.user_dismissed_at,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };

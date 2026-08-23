@@ -392,8 +392,12 @@ export async function registerRoutes(
   // `subs` array, still no extra DB query.
   app.get("/api/subscriptions", requireAuth, async (req: Request, res: Response) => {
     try {
+      // Phase 3C.2: ?showDismissed=true opts into seeing userDismissed
+      // subscriptions too — the default (omitted or any other value) hides
+      // them, matching storage.getShadowSubscriptionsForUser()'s own default.
+      const showDismissed = req.query.showDismissed === "true";
       const [subs, user] = await Promise.all([
-        storage.getShadowSubscriptionsForUser(req.session.userId!),
+        storage.getShadowSubscriptionsForUser(req.session.userId!, showDismissed),
         storage.getUserById(req.session.userId!),
       ]);
       const { subscriptions: subscriptionsWithCosts, summary } = calculateSubscriptionCosts(req.session.userId!, subs);
@@ -427,7 +431,10 @@ export async function registerRoutes(
   app.get("/api/subscriptions/savings", requireAuth, async (req: Request, res: Response) => {
     try {
       const userId = req.session.userId!;
-      const subscriptions = await storage.getShadowSubscriptionsForUser(userId);
+      const [subscriptions, dismissedSubscriptionIds] = await Promise.all([
+        storage.getShadowSubscriptionsForUser(userId),
+        storage.getDismissedSavingsOpportunityIds(userId),
+      ]);
       const eventsBySubscriptionId = await storage.getCanonicalEventsForUserSubscriptions(userId, subscriptions);
 
       const priceChanges: Record<string, PriceChangeResult> = {};
@@ -436,10 +443,60 @@ export async function registerRoutes(
         priceChanges[sub.id] = detectPriceChanges(buildPriceHistory(events));
       }
 
-      const analysis = analyzeSavingsOpportunities(subscriptions, eventsBySubscriptionId, priceChanges);
+      const analysis = analyzeSavingsOpportunities(subscriptions, eventsBySubscriptionId, priceChanges, new Date(), dismissedSubscriptionIds);
       return res.json(analysis);
     } catch (err) {
       console.error("Get savings opportunities error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3C.2: dismisses a subscription from the SAVINGS section only
+  // (users.preferences.dismissedSavingsOpportunities) — the subscription
+  // itself still appears in the main list untouched. Distinct from
+  // POST /api/subscriptions/:id/dismiss below, which hides it from the main
+  // list instead. requireAuth + storage scoping the write to req.session.userId
+  // means one user can never dismiss another user's opportunity.
+  app.post("/api/subscriptions/:id/dismiss-savings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const dismissed = await storage.dismissSavingsOpportunity(req.session.userId!, id);
+      return res.json({ dismissedSavingsOpportunities: dismissed });
+    } catch (err) {
+      console.error("Dismiss savings opportunity error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3C.2: "Track Subscription" — explicit user acknowledgement,
+  // independent of billing data completeness (works even when amount=null).
+  // Scoped by (id AND userId) via storage.confirmSubscription; a cross-user
+  // id updates nothing and comes back undefined, reported as 404 (never
+  // 403), matching GET /api/subscriptions/:id's existing pattern.
+  app.post("/api/subscriptions/:id/confirm", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const sub = await storage.confirmSubscription(id, req.session.userId!);
+      if (!sub) return res.status(404).json({ message: "Subscription not found" });
+      return res.json(sub);
+    } catch (err) {
+      console.error("Confirm subscription error:", err);
+      return res.status(500).json({ message: "Internal error" });
+    }
+  });
+
+  // Phase 3C.2: hides a subscription from the main list (GET /api/subscriptions
+  // excludes it by default; ?showDismissed=true still shows it) without
+  // deleting it — preserved for audit, matching the STRICT BOUNDARIES
+  // requirement to never delete detected data.
+  app.post("/api/subscriptions/:id/dismiss", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const sub = await storage.dismissSubscription(id, req.session.userId!);
+      if (!sub) return res.status(404).json({ message: "Subscription not found" });
+      return res.json(sub);
+    } catch (err) {
+      console.error("Dismiss subscription error:", err);
       return res.status(500).json({ message: "Internal error" });
     }
   });

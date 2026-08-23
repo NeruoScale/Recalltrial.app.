@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
-import { getQueryFn } from "@/lib/queryClient";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { getQueryFn, apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -104,6 +105,45 @@ type SubscriptionsResponse = {
   upcomingSummary: UpcomingSummary;
   renewalCalendar: RenewalCalendar;
   messagesScanned: number | null;
+};
+
+// ─── Phase 3C.1/3C.2: Savings intelligence ──────────────────────────────────
+// Mirrors server/savingsIntelligence.ts's SavingsAnalysis exactly — this page
+// only formats/displays the already-computed, evidence-scored opportunities,
+// it never recomputes scoring or classification itself.
+
+type SavingsClassification = "essential" | "review" | "potential_savings" | "insufficient_data";
+type SavingsConfidence = "high" | "medium" | "low";
+
+type SavingsOpportunity = {
+  subscriptionId: string;
+  merchant: string;
+  score: number;
+  classification: SavingsClassification;
+  monthlyCost: number | null;
+  annualCost: number | null;
+  currency: string | null;
+  potentialMonthlySavings: number | null;
+  potentialAnnualSavings: number | null;
+  confidence: SavingsConfidence;
+  reasons: string[];
+  evidenceCount: number;
+  userConfirmed: boolean;
+  userDismissed: boolean;
+};
+
+type SavingsSummary = {
+  totalOpportunities: number;
+  potentialMonthlySavings: number | null;
+  potentialAnnualSavings: number | null;
+  byCurrency: Record<string, { monthly: number; annual: number }>;
+  incompleteCostCount: number;
+  confidence: SavingsConfidence;
+};
+
+type SavingsAnalysis = {
+  opportunities: SavingsOpportunity[];
+  summary: SavingsSummary;
 };
 
 // ─── Phase 3B.9.5: Subscription Vault detail view ───────────────────────────
@@ -521,6 +561,258 @@ function statusBadgeClasses(status: ShadowSubscription["subscriptionStatus"]): s
   }
 }
 
+// Phase 3C.2: savings-classification badge colors — potential_savings=amber
+// (the strongest signal to act on), review=blue (worth a look), essential=
+// green (healthy), insufficient_data=neutral grey (we genuinely don't know).
+function classificationBadgeClasses(c: SavingsClassification): string {
+  switch (c) {
+    case "potential_savings":
+      return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 border-amber-200 dark:border-amber-700";
+    case "review":
+      return "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200 dark:border-blue-700";
+    case "essential":
+      return "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700";
+    case "insufficient_data":
+    default:
+      return "bg-muted text-muted-foreground border-border";
+  }
+}
+
+function classificationLabel(c: SavingsClassification): string {
+  switch (c) {
+    case "potential_savings": return "potential savings";
+    case "review": return "review";
+    case "essential": return "essential";
+    case "insufficient_data": return "insufficient data";
+  }
+}
+
+function confidenceLabel(c: SavingsConfidence): string {
+  return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+// Phase 3C.2: the ONE place this page ever forms a savings cost line — a
+// missing amount always reads as "Cost unknown," NEVER as "$0" (see
+// STEP 2's explicit "NEVER show '$0' for unknown amounts" boundary).
+function formatSavingsCostLine(o: SavingsOpportunity): string {
+  if (o.monthlyCost === null || o.annualCost === null) return "Cost unknown";
+  return `$${o.monthlyCost.toFixed(2)}/month · $${o.annualCost.toFixed(2)}/year`;
+}
+
+function SavingsOpportunityCard({
+  opportunity,
+  onOpenDetail,
+  onTrack,
+  onDismiss,
+  isTracking,
+  isDismissing,
+}: {
+  opportunity: SavingsOpportunity;
+  onOpenDetail: (id: string) => void;
+  onTrack: (id: string) => void;
+  onDismiss: (id: string) => void;
+  isTracking: boolean;
+  isDismissing: boolean;
+}) {
+  const o = opportunity;
+  return (
+    <Card data-testid={`card-savings-${o.subscriptionId}`}>
+      <CardContent className="py-4">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+          <span className="font-semibold" data-testid={`text-savings-merchant-${o.subscriptionId}`}>{o.merchant}</span>
+          <span
+            className={`inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${classificationBadgeClasses(o.classification)}`}
+            data-testid={`badge-classification-${o.subscriptionId}`}
+          >
+            {classificationLabel(o.classification)}
+          </span>
+        </div>
+
+        <div className="text-sm text-muted-foreground mb-1" data-testid={`text-savings-cost-${o.subscriptionId}`}>
+          {formatSavingsCostLine(o)}
+        </div>
+
+        <div className="text-xs text-muted-foreground mb-3" data-testid={`text-savings-score-${o.subscriptionId}`}>
+          Score: {o.score}/100
+        </div>
+
+        {o.reasons.length > 0 && (
+          <ul className="text-sm space-y-1 mb-3 list-disc list-inside text-muted-foreground" data-testid={`list-savings-reasons-${o.subscriptionId}`}>
+            {o.reasons.map((reason, idx) => (
+              <li key={idx} data-testid={`text-savings-reason-${o.subscriptionId}-${idx}`}>{reason}</li>
+            ))}
+          </ul>
+        )}
+
+        {o.classification === "potential_savings" && o.potentialAnnualSavings !== null && (
+          <div className="text-sm mb-3">
+            <div className="font-medium" data-testid={`text-potential-savings-${o.subscriptionId}`}>
+              Potential savings: ${o.potentialAnnualSavings.toFixed(2)}/year
+            </div>
+            <div className="text-xs text-muted-foreground" data-testid={`text-savings-confidence-${o.subscriptionId}`}>
+              Confidence: {confidenceLabel(o.confidence)}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onOpenDetail(o.subscriptionId)}
+            data-testid={`button-view-savings-${o.subscriptionId}`}
+          >
+            View subscription
+          </Button>
+
+          {o.userConfirmed ? (
+            <span
+              className="inline-flex items-center text-xs px-2 py-1 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
+              data-testid={`badge-tracked-${o.subscriptionId}`}
+            >
+              ✓ Tracked
+            </span>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={isTracking}
+              onClick={() => onTrack(o.subscriptionId)}
+              data-testid={`button-track-${o.subscriptionId}`}
+            >
+              Track Subscription
+            </Button>
+          )}
+
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isDismissing}
+            onClick={() => onDismiss(o.subscriptionId)}
+            data-testid={`button-dismiss-savings-${o.subscriptionId}`}
+          >
+            Dismiss
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Phase 3C.2: renders the savings summary as one line per currency — never a
+// single blended figure across currencies, matching CostSummaryLines'
+// established convention elsewhere on this page.
+function SavingsSummaryLine({ byCurrency }: { byCurrency: SavingsSummary["byCurrency"] }) {
+  const entries = Object.entries(byCurrency);
+  if (entries.length === 0) return null;
+  return (
+    <>
+      {entries.map(([currency, v]) => (
+        <div key={currency} data-testid={`text-savings-summary-${currency}`}>
+          ${v.monthly.toFixed(2)}/month · ${v.annual.toFixed(2)}/year {currency}
+          <span className="text-xs text-muted-foreground font-normal"> (known amounts only, never invented)</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }) {
+  const { toast } = useToast();
+  const { data, isLoading } = useQuery<SavingsAnalysis>({
+    queryKey: ["/api/subscriptions/savings"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+
+  const trackMutation = useMutation({
+    mutationFn: async (subscriptionId: string) => {
+      await apiRequest("POST", `/api/subscriptions/${subscriptionId}/confirm`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions/savings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions"] });
+      toast({ title: "Subscription tracked" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to track subscription", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const dismissMutation = useMutation({
+    mutationFn: async (subscriptionId: string) => {
+      await apiRequest("POST", `/api/subscriptions/${subscriptionId}/dismiss-savings`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions/savings"] });
+      toast({ title: "Opportunity dismissed", description: "You can re-enable dismissed opportunities from settings." });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to dismiss", description: err.message, variant: "destructive" });
+    },
+  });
+
+  if (isLoading || !data) {
+    return (
+      <Card className="mb-6">
+        <CardContent className="py-4">
+          <Skeleton className="h-20 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const { opportunities, summary } = data;
+  const worthReviewing = opportunities.filter((o) => o.classification !== "essential").length;
+  const hasCurrencyTotals = Object.keys(summary.byCurrency).length > 0;
+
+  return (
+    <Card className="mb-6">
+      <CardContent className="py-4">
+        <h2 className="font-semibold mb-3 flex items-center gap-1.5" data-testid="text-savings-heading">
+          💰 Potential savings
+        </h2>
+
+        {worthReviewing === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="text-savings-empty">
+            No savings opportunities detected yet.
+          </p>
+        ) : (
+          <>
+            <div className="text-lg font-bold mb-1" data-testid="text-savings-summary-total">
+              {hasCurrencyTotals ? (
+                <SavingsSummaryLine byCurrency={summary.byCurrency} />
+              ) : (
+                <span className="text-sm font-medium text-muted-foreground">
+                  Subscriptions worth reviewing — costs not yet available
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-muted-foreground mb-4" data-testid="text-savings-worth-reviewing">
+              {worthReviewing} subscription{worthReviewing === 1 ? "" : "s"} worth reviewing
+            </p>
+
+            <div className="space-y-3">
+              {opportunities
+                .filter((o) => o.classification !== "essential")
+                .map((o) => (
+                  <SavingsOpportunityCard
+                    key={o.subscriptionId}
+                    opportunity={o}
+                    onOpenDetail={onOpenDetail}
+                    onTrack={(id) => trackMutation.mutate(id)}
+                    onDismiss={(id) => dismissMutation.mutate(id)}
+                    isTracking={trackMutation.isPending}
+                    isDismissing={dismissMutation.isPending}
+                  />
+                ))}
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // Phase 3B.9.1: the per-subscription cost line. Two genuinely distinct
 // "can't show a number" cases, given different messaging:
 //   - amount itself unknown -> "Amount unavailable · {interval}" (never $0)
@@ -592,6 +884,14 @@ function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onO
             >
               {statusLabel(sub.subscriptionStatus)}
             </span>
+            {sub.userConfirmed && (
+              <span
+                className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
+                data-testid={`badge-tracked-${sub.id}`}
+              >
+                ✓ Tracked
+              </span>
+            )}
           </div>
           <div className="text-sm text-muted-foreground" data-testid={`text-cost-${sub.id}`}>
             {formatCostLine(sub)}
@@ -923,6 +1223,8 @@ export default function SubscriptionsPage() {
                 {incompleteTotal} subscription{incompleteTotal === 1 ? "" : "s"} {incompleteTotal === 1 ? "has" : "have"} incomplete billing information.
               </p>
             )}
+
+            <SavingsSection onOpenDetail={setSelectedSubId} />
 
             {data?.renewalCalendar && (
               <RenewalCalendarSection calendar={data.renewalCalendar} />

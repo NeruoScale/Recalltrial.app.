@@ -29,6 +29,11 @@ export type SavingsOpportunity = {
   confidence: SavingsConfidence;
   reasons: string[];
   evidenceCount: number;
+  // Phase 3C.2: pass-through of the subscription's own tracking state, for
+  // the savings dashboard's "Track Subscription" button vs "✓ Tracked"
+  // badge — never derived/recomputed here.
+  userConfirmed: boolean;
+  userDismissed: boolean;
 };
 
 export type SavingsSummary = {
@@ -174,18 +179,24 @@ function buildReasons(input: ReasonInputs): string[] {
  * scoring. `priceChanges` is similarly caller-supplied (server/priceChangeDetector.ts's
  * detectPriceChanges() output per subscription) and is used ONLY for richer
  * reason text — the scoring boolean itself comes from the already-persisted
- * `lastPriceChangeType` field, never recomputed here.
+ * `lastPriceChangeType` field, never recomputed here. `dismissedSubscriptionIds`
+ * (Phase 3C.2) is the user's savings-opportunity dismiss list (server/storage.ts's
+ * getDismissedSavingsOpportunityIds()) — a dismissed subscription is
+ * excluded from `opportunities` entirely, same as a canceled/expired status.
  */
 export function analyzeSavingsOpportunities(
   subscriptions: ShadowSubscription[],
   eventsBySubscriptionId: Record<string, SubscriptionEvent[]>,
   priceChanges: Record<string, PriceChangeResult> = {},
-  now: Date = new Date()
+  now: Date = new Date(),
+  dismissedSubscriptionIds: string[] = []
 ): SavingsAnalysis {
   const opportunities: SavingsOpportunity[] = [];
+  const dismissedSet = new Set(dismissedSubscriptionIds);
 
   for (const sub of subscriptions) {
     if (!OPPORTUNITY_STATUSES.has(sub.subscriptionStatus)) continue;
+    if (dismissedSet.has(sub.id)) continue;
 
     const events = eventsBySubscriptionId[sub.id] ?? [];
     const eventCount = events.length;
@@ -242,6 +253,8 @@ export function analyzeSavingsOpportunities(
       confidence,
       reasons,
       evidenceCount: eventCount,
+      userConfirmed: sub.userConfirmed,
+      userDismissed: sub.userDismissed,
     });
   }
 

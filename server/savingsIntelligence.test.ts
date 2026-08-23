@@ -2,6 +2,17 @@ import { describe, it, expect } from "vitest";
 import { analyzeSavingsOpportunities } from "./savingsIntelligence";
 import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
 
+// Phase 3C.2: this file covers everything analyzeSavingsOpportunities()
+// itself is responsible for (dismissal filtering, userConfirmed/userDismissed
+// pass-through). The mutations that WRITE those fields — storage.confirmSubscription(),
+// dismissSubscription(), dismissSavingsOpportunity(), and GET /api/subscriptions'
+// showDismissed filtering — are DB-atomicity/cross-user-isolation guarantees
+// with no DB-integration test infrastructure in this codebase (every
+// existing *.test.ts file tests a pure function only, same as
+// server/aiCredits.test.ts's note on reserveCredit()/refundCredit()) —
+// verified live against production instead, see the Phase 3C.2 deployment
+// report for the live confirm/dismiss/cross-user results.
+
 let subIdCounter = 0;
 function makeSub(overrides: Partial<ShadowSubscription> = {}): ShadowSubscription {
   subIdCounter++;
@@ -35,6 +46,10 @@ function makeSub(overrides: Partial<ShadowSubscription> = {}): ShadowSubscriptio
     lastPriceChangeAbsolute: null,
     lastPriceChangePercentage: null,
     lastPriceChangeAnnualImpact: null,
+    userConfirmed: false,
+    userConfirmedAt: null,
+    userDismissed: false,
+    userDismissedAt: null,
     createdAt: new Date("2026-08-18T00:00:00.000Z"),
     updatedAt: new Date("2026-08-18T00:00:00.000Z"),
     ...overrides,
@@ -240,6 +255,35 @@ describe("Phase 3C.1: cross-user isolation and purity", () => {
     const first = analyzeSavingsOpportunities([sub], evs, {}, NOW);
     const second = analyzeSavingsOpportunities([sub], evs, {}, NOW);
     expect(second).toEqual(first);
+  });
+});
+
+describe("Phase 3C.2: dismissal and tracking pass-through", () => {
+  it("a dismissed subscription id is excluded from opportunities entirely", () => {
+    const kept = makeSub();
+    const dismissed = makeSub();
+    const { opportunities } = analyzeSavingsOpportunities(
+      [kept, dismissed],
+      { [kept.id]: [makeEvent(kept.id)], [dismissed.id]: [makeEvent(dismissed.id)] },
+      {},
+      NOW,
+      [dismissed.id]
+    );
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0].subscriptionId).toBe(kept.id);
+  });
+
+  it("userConfirmed and userDismissed pass through from the subscription row unchanged", () => {
+    const confirmed = makeSub({ userConfirmed: true, userConfirmedAt: new Date("2026-08-20T00:00:00.000Z") });
+    const untouched = makeSub();
+    const { opportunities } = analyzeSavingsOpportunities(
+      [confirmed, untouched],
+      { [confirmed.id]: [makeEvent(confirmed.id)], [untouched.id]: [makeEvent(untouched.id)] },
+      {},
+      NOW
+    );
+    expect(opportunities.find((o) => o.subscriptionId === confirmed.id)!.userConfirmed).toBe(true);
+    expect(opportunities.find((o) => o.subscriptionId === untouched.id)!.userConfirmed).toBe(false);
   });
 });
 

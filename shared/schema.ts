@@ -59,6 +59,11 @@ export const users = pgTable("users", {
   // ever changes.
   aiScanningConsentAt: timestamp("ai_scanning_consent_at"),
   aiScanningConsentVersion: text("ai_scanning_consent_version"),
+  // Phase 3C.2: freeform per-user UI preferences that don't warrant their
+  // own column — starting with dismissedSavingsOpportunities (subscription
+  // ids the user has dismissed from the savings section). Never read by any
+  // lifecycle/billing/reminder logic — display-only.
+  preferences: jsonb("preferences").$type<{ dismissedSavingsOpportunities?: string[] }>().notNull().default({}),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -462,6 +467,19 @@ export const subscriptions = pgTable("subscriptions", {
   lastPriceChangeAbsolute: decimal("last_price_change_absolute", { precision: 10, scale: 2 }),
   lastPriceChangePercentage: decimal("last_price_change_percentage", { precision: 6, scale: 2 }),
   lastPriceChangeAnnualImpact: decimal("last_price_change_annual_impact", { precision: 10, scale: 2 }),
+  // Phase 3C.2: explicit user acknowledgement, independent of isShadow/
+  // promotion. A subscription can be userConfirmed even with amount=null —
+  // "yes this is mine" is a statement about identity, not about billing
+  // data completeness. Never read by lifecycle/reminder/billing logic.
+  userConfirmed: boolean("user_confirmed").notNull().default(false),
+  userConfirmedAt: timestamp("user_confirmed_at"),
+  // userDismissed hides a subscription from the main list (GET /api/subscriptions
+  // filters it out by default) without deleting it — preserved for audit,
+  // recoverable via ?showDismissed=true. Distinct from savings-opportunity
+  // dismissal (users.preferences.dismissedSavingsOpportunities), which only
+  // hides a subscription from the SAVINGS section, not the main list.
+  userDismissed: boolean("user_dismissed").notNull().default(false),
+  userDismissedAt: timestamp("user_dismissed_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [

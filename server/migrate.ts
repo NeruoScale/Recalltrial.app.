@@ -630,5 +630,27 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] ai_credit_ledger table:", err.message);
   }
 
+  try {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences jsonb NOT NULL DEFAULT '{}'::jsonb;
+    `);
+    console.log("[migrate] users.preferences OK");
+  } catch (err: any) {
+    console.error("[migrate] users.preferences:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS user_confirmed boolean NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS user_confirmed_at timestamp,
+        ADD COLUMN IF NOT EXISTS user_dismissed boolean NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS user_dismissed_at timestamp;
+    `);
+    console.log("[migrate] subscriptions userConfirmed/userDismissed columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscriptions userConfirmed/userDismissed columns:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
