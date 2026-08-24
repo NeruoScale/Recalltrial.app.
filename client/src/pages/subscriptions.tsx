@@ -985,16 +985,17 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
   );
 }
 
-// Phase 3B.9.1 / UX polish: the per-subscription cost line, merged onto the
-// SAME line as the merchant name ("Anthropic · $20/month") — a deliberately
-// short, headline figure. A missing amount NEVER renders as "$0.00"; it
-// reads as "Cost not confirmed yet," matching the identical wording used in
-// the savings section for the same underlying condition. Technical
-// provenance (billingIntervalSource, costConfidence, resolutionMethod) is
+// Phase 3B.9.1 / UX polish: the per-subscription cost line — its own row,
+// showing both the monthly AND annual figure ("$20.00/month · $240.00/year")
+// so the card doesn't force a mental multiply. A missing amount NEVER
+// renders as "$0.00"; it reads as "Cost not confirmed yet," matching the
+// identical wording used in the savings section for the same underlying
+// condition. Technical provenance (billingIntervalSource, costConfidence,
+// resolutionMethod, "Detected from your email · X confidence") is
 // intentionally NOT shown here — it stays in the vault drawer only.
-function formatCostShort(sub: SubscriptionWithCost): string {
-  if (sub.monthlyCost !== null) {
-    return `$${sub.monthlyCost.toFixed(2)}/month`;
+function formatCostLine(sub: SubscriptionWithCost): string {
+  if (sub.monthlyCost !== null && sub.annualCost !== null) {
+    return `$${sub.monthlyCost.toFixed(2)}/month · $${sub.annualCost.toFixed(2)}/year`;
   }
   if (sub.amount) {
     return formatMoney(sub.amount, sub.currency);
@@ -1023,29 +1024,26 @@ function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onO
         </Avatar>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
-            <div className="min-w-0 flex items-baseline gap-1.5 flex-wrap">
-              <span className="text-lg font-bold truncate" data-testid={`text-merchant-${sub.id}`}>
-                {sub.canonicalMerchantName}
-              </span>
-              <span className="text-sm text-muted-foreground truncate" data-testid={`text-cost-${sub.id}`}>
-                · {formatCostShort(sub)}
-              </span>
-            </div>
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <span className="text-lg font-bold truncate" data-testid={`text-merchant-${sub.id}`}>
+              {sub.canonicalMerchantName}
+            </span>
             <span
               className={`shrink-0 inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${statusBadgeClasses(sub.subscriptionStatus)}`}
               data-testid={`badge-status-${sub.id}`}
             >
               {statusLabel(sub.subscriptionStatus)}
             </span>
+            {sub.userConfirmed && (
+              <span className="text-xs text-green-700 dark:text-green-400" data-testid={`badge-tracked-${sub.id}`}>
+                ✓ Confirmed by you
+              </span>
+            )}
           </div>
 
-          {sub.userConfirmed && (
-            <div className="text-xs text-green-700 dark:text-green-400 mb-1" data-testid={`badge-tracked-${sub.id}`}>
-              ✓ Confirmed by you
-            </div>
-          )}
-
+          <div className="text-sm text-muted-foreground" data-testid={`text-cost-${sub.id}`}>
+            {formatCostLine(sub)}
+          </div>
           <div className="text-sm text-muted-foreground" data-testid={`text-renewal-${sub.id}`}>
             {formatRenewalLine(sub)}
           </div>
