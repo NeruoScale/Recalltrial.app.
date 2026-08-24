@@ -315,10 +315,31 @@ function formatMonthYear(date: string): string {
 }
 
 function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: string | null; onClose: () => void }) {
+  const { toast } = useToast();
   const { data, isLoading } = useQuery<SubscriptionVaultResponse>({
     queryKey: ["/api/subscriptions", subscriptionId],
     queryFn: getQueryFn({ on401: "throw" }),
     enabled: !!subscriptionId,
+  });
+
+  // Confidence (data.detection.confidence) is still returned by the API and
+  // still drives internal scoring/promotion — it's just never rendered here
+  // anymore. "Is this your subscription?" + Yes, confirm is the user-facing
+  // replacement: an actionable question instead of an internal number.
+  const confirmMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", `/api/subscriptions/${subscriptionId}/confirm`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions", subscriptionId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions/savings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions/recommendations"] });
+      toast({ title: "Subscription confirmed" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to confirm subscription", description: err.message, variant: "destructive" });
+    },
   });
 
   return (
@@ -414,15 +435,38 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                     <dd>Detected from your email</dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Confidence</dt>
-                    <dd data-testid="text-detail-confidence">
-                      {data.detection.confidence >= 70 ? "High" : data.detection.confidence >= 40 ? "Medium" : "Low"}
+                    <dt className="text-muted-foreground">Evidence</dt>
+                    <dd data-testid="text-detail-event-count">{data.detection.eventCount} email{data.detection.eventCount === 1 ? "" : "s"} found</dd>
+                  </div>
+                  <div className="flex justify-between items-center gap-3">
+                    <dt className="text-muted-foreground">Status</dt>
+                    <dd>
+                      {data.subscription.userConfirmed ? (
+                        <span
+                          className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
+                          data-testid="text-detail-detection-status"
+                        >
+                          ✓ Confirmed by you
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground" data-testid="text-detail-detection-status">
+                          Is this your subscription?
+                        </span>
+                      )}
                     </dd>
                   </div>
-                  <div className="flex justify-between">
-                    <dt className="text-muted-foreground">Emails detected</dt>
-                    <dd data-testid="text-detail-event-count">{data.detection.eventCount}</dd>
-                  </div>
+                  {!data.subscription.userConfirmed && (
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        disabled={confirmMutation.isPending}
+                        onClick={() => confirmMutation.mutate()}
+                        data-testid="button-detail-confirm"
+                      >
+                        Yes, confirm
+                      </Button>
+                    </div>
+                  )}
                 </dl>
               </div>
 
@@ -639,10 +683,6 @@ function classificationLabel(c: SavingsClassification): string {
   }
 }
 
-function confidenceLabel(c: SavingsConfidence): string {
-  return c.charAt(0).toUpperCase() + c.slice(1);
-}
-
 // Phase 3C.2: the ONE place this page ever forms a savings cost line — a
 // missing amount always reads as "Cost not confirmed yet," NEVER as "$0"
 // (see STEP 2's explicit "NEVER show '$0' for unknown amounts" boundary).
@@ -701,13 +741,16 @@ function SavingsOpportunityCard({
           </ul>
         )}
 
+        {/* UX polish: internal `confidence` (o.confidence) is intentionally not
+            shown here — "Medium confidence" reads as doubt about a
+            subscription the user knows is theirs. The Track button + hint
+            below is the actionable, user-facing replacement (see the
+            confirmation prompt in the vault drawer's Detection section for
+            the same reasoning). */}
         {o.classification === "potential_savings" && o.potentialAnnualSavings !== null && (
           <div className="text-sm mb-3">
             <div className="font-medium" data-testid={`text-potential-savings-${o.subscriptionId}`}>
               Potential savings: ${o.potentialAnnualSavings.toFixed(2)}/year
-            </div>
-            <div className="text-xs text-muted-foreground" data-testid={`text-savings-confidence-${o.subscriptionId}`}>
-              Confidence: {confidenceLabel(o.confidence)}
             </div>
           </div>
         )}
