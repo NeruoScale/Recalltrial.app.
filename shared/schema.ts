@@ -64,6 +64,14 @@ export const users = pgTable("users", {
   // ids the user has dismissed from the savings section). Never read by any
   // lifecycle/billing/reminder logic — display-only.
   preferences: jsonb("preferences").$type<{ dismissedSavingsOpportunities?: string[] }>().notNull().default({}),
+  // Subscription Intelligence V1 controlled-beta gate (Phase 3C.1-3C.4:
+  // Savings, Recommendations, AI Analyst, Track/Confirm). Same shape as
+  // emailScanningEnabled/aiScanningEnabled — a per-user opt-in boolean,
+  // defaults false. Deliberately does NOT gate the underlying subscription
+  // detection/vault (Phase 3B, already fully launched) — only the
+  // intelligence layer built on top of it. No self-serve toggle route
+  // exists yet; enabled per-user by direct operator action during the beta.
+  subscriptionIntelligenceEnabled: boolean("subscription_intelligence_enabled").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

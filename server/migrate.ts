@@ -652,5 +652,14 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscriptions userConfirmed/userDismissed columns:", err.message);
   }
 
+  try {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_intelligence_enabled boolean NOT NULL DEFAULT false;
+    `);
+    console.log("[migrate] users.subscription_intelligence_enabled OK");
+  } catch (err: any) {
+    console.error("[migrate] users.subscription_intelligence_enabled:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

@@ -314,7 +314,15 @@ function formatMonthYear(date: string): string {
   return new Date(date).toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
-function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: string | null; onClose: () => void }) {
+function SubscriptionDetailSheet({
+  subscriptionId,
+  onClose,
+  intelligenceEnabled,
+}: {
+  subscriptionId: string | null;
+  onClose: () => void;
+  intelligenceEnabled: boolean;
+}) {
   const { toast } = useToast();
   const { data, isLoading } = useQuery<SubscriptionVaultResponse>({
     queryKey: ["/api/subscriptions", subscriptionId],
@@ -362,7 +370,7 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                 >
                   {statusLabel(data.subscription.subscriptionStatus)}
                 </span>
-                {data.subscription.userConfirmed && (
+                {intelligenceEnabled && data.subscription.userConfirmed && (
                   <span
                     className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
                     data-testid="badge-detail-confirmed"
@@ -384,7 +392,7 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                     ${data.cost.annualEquivalent.toFixed(2)} {data.cost.currency}/year
                   </div>
                 )}
-                {data.subscription.userConfirmed && data.subscription.userConfirmedAt && (
+                {intelligenceEnabled && data.subscription.userConfirmed && data.subscription.userConfirmedAt && (
                   <div className="text-xs text-muted-foreground mt-1" data-testid="text-detail-confirmed-at">
                     Confirmed by you on {formatDate(data.subscription.userConfirmedAt)}
                   </div>
@@ -438,24 +446,26 @@ function SubscriptionDetailSheet({ subscriptionId, onClose }: { subscriptionId: 
                     <dt className="text-muted-foreground">Evidence</dt>
                     <dd data-testid="text-detail-event-count">{data.detection.eventCount} email{data.detection.eventCount === 1 ? "" : "s"} found</dd>
                   </div>
-                  <div className="flex justify-between items-center gap-3">
-                    <dt className="text-muted-foreground">Status</dt>
-                    <dd>
-                      {data.subscription.userConfirmed ? (
-                        <span
-                          className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
-                          data-testid="text-detail-detection-status"
-                        >
-                          ✓ Confirmed by you
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground" data-testid="text-detail-detection-status">
-                          Is this your subscription?
-                        </span>
-                      )}
-                    </dd>
-                  </div>
-                  {!data.subscription.userConfirmed && (
+                  {intelligenceEnabled && (
+                    <div className="flex justify-between items-center gap-3">
+                      <dt className="text-muted-foreground">Status</dt>
+                      <dd>
+                        {data.subscription.userConfirmed ? (
+                          <span
+                            className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
+                            data-testid="text-detail-detection-status"
+                          >
+                            ✓ Confirmed by you
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground" data-testid="text-detail-detection-status">
+                            Is this your subscription?
+                          </span>
+                        )}
+                      </dd>
+                    </div>
+                  )}
+                  {intelligenceEnabled && !data.subscription.userConfirmed && (
                     <div className="flex justify-end">
                       <Button
                         size="sm"
@@ -1050,7 +1060,15 @@ function formatRenewalLine(sub: SubscriptionWithCost): string {
   return sub.nextBillingDate ? `Renews ${formatDate(sub.nextBillingDate)}` : "Renewal date not available";
 }
 
-function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onOpenDetail: (id: string) => void }) {
+function SubscriptionRow({
+  sub,
+  onOpenDetail,
+  intelligenceEnabled,
+}: {
+  sub: SubscriptionWithCost;
+  onOpenDetail: (id: string) => void;
+  intelligenceEnabled: boolean;
+}) {
   const initial = sub.canonicalMerchantName.charAt(0).toUpperCase();
 
   return (
@@ -1077,7 +1095,7 @@ function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onO
             >
               {statusLabel(sub.subscriptionStatus)}
             </span>
-            {sub.userConfirmed && (
+            {intelligenceEnabled && sub.userConfirmed && (
               <span className="text-xs text-green-700 dark:text-green-400" data-testid={`badge-tracked-${sub.id}`}>
                 ✓ Confirmed by you
               </span>
@@ -1504,9 +1522,16 @@ export default function SubscriptionsPage() {
               </p>
             )}
 
-            <RecommendationsSection onOpenDetail={setSelectedSubId} />
-
-            <SavingsSection onOpenDetail={setSelectedSubId} />
+            {/* Subscription Intelligence V1 controlled-beta gate — Savings,
+                Recommendations, and the AI analyst are the beta surface;
+                the base detected-subscriptions list/vault below is
+                unaffected and stays available to everyone. */}
+            {user?.subscriptionIntelligenceEnabled && (
+              <>
+                <RecommendationsSection onOpenDetail={setSelectedSubId} />
+                <SavingsSection onOpenDetail={setSelectedSubId} />
+              </>
+            )}
 
             {data?.renewalCalendar && (
               <RenewalCalendarSection calendar={data.renewalCalendar} />
@@ -1520,17 +1545,26 @@ export default function SubscriptionsPage() {
               <h2 className="text-base font-semibold mb-3" data-testid="text-subscriptions-list-heading">All subscriptions</h2>
               <div className="space-y-3">
                 {subs.map((sub) => (
-                  <SubscriptionRow key={sub.id} sub={sub} onOpenDetail={setSelectedSubId} />
+                  <SubscriptionRow
+                    key={sub.id}
+                    sub={sub}
+                    onOpenDetail={setSelectedSubId}
+                    intelligenceEnabled={!!user?.subscriptionIntelligenceEnabled}
+                  />
                 ))}
               </div>
             </div>
 
-            <AnalystSection />
+            {user?.subscriptionIntelligenceEnabled && <AnalystSection />}
           </>
         )}
       </main>
 
-      <SubscriptionDetailSheet subscriptionId={selectedSubId} onClose={() => setSelectedSubId(null)} />
+      <SubscriptionDetailSheet
+        subscriptionId={selectedSubId}
+        onClose={() => setSelectedSubId(null)}
+        intelligenceEnabled={!!user?.subscriptionIntelligenceEnabled}
+      />
     </div>
   );
 }

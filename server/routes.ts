@@ -29,6 +29,7 @@ import {
   AnalystUnavailableError,
 } from "./savingsAnalyst";
 import { generateRecommendations } from "./savingsRecommendations";
+import { determineSubscriptionIntelligenceAccess } from "./subscriptionIntelligenceGate";
 
 const FREE_TRIAL_LIMIT = 3;
 const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
@@ -77,6 +78,23 @@ async function requireEmailScanning(req: Request, res: Response, next: NextFunct
   if (!user.emailScanningEnabled) {
     return res.status(403).json({ code: "SCANNING_NOT_ENABLED", message: "Email scanning is not enabled." });
   }
+  (req as any).currentUser = user;
+  next();
+}
+
+// Subscription Intelligence V1 controlled-beta gate (Phase 3C.1-3C.4:
+// Savings, Recommendations, AI Analyst, Track/Confirm/Dismiss). Deliberately
+// does NOT gate GET /api/subscriptions or GET /api/subscriptions/:id — the
+// underlying detection/vault (Phase 3B) is already fully launched and stays
+// available to everyone regardless of this flag; only the intelligence
+// layer built on top of it is beta-gated. The actual decision logic is the
+// pure, unit-tested determineSubscriptionIntelligenceAccess() — this is just
+// the Express plumbing around it, same shape as requireEmailScanning above.
+async function requireSubscriptionIntelligence(req: Request, res: Response, next: NextFunction) {
+  const user = (req as any).currentUser || (req.session.userId ? await storage.getUserById(req.session.userId) : undefined);
+  const access = determineSubscriptionIntelligenceAccess(req.session.userId, user);
+  if (access.status === 401) return res.status(401).json({ message: "Not authenticated" });
+  if (access.status === 403) return res.status(403).json({ code: access.code, message: "Subscription Intelligence is not yet enabled for your account." });
   (req as any).currentUser = user;
   next();
 }
@@ -217,6 +235,7 @@ export async function registerRoutes(
       billingEnabled: BILLING_ENABLED,
       emailScanningEnabled: user.emailScanningEnabled,
       aiScanningEnabled: user.aiScanningEnabled,
+      subscriptionIntelligenceEnabled: user.subscriptionIntelligenceEnabled,
       aiCreditsIncluded: user.aiCreditsIncluded,
       aiCreditsPurchased: user.aiCreditsPurchased,
       aiCreditsTotal: user.aiCreditsIncluded + user.aiCreditsPurchased,
@@ -437,7 +456,7 @@ export async function registerRoutes(
   // MUST be registered before GET /api/subscriptions/:id below — Express
   // matches routes in registration order, so "/savings" would otherwise be
   // captured as an :id value and never reach this handler.
-  app.get("/api/subscriptions/savings", requireAuth, async (req: Request, res: Response) => {
+  app.get("/api/subscriptions/savings", requireAuth, requireSubscriptionIntelligence, async (req: Request, res: Response) => {
     try {
       const userId = req.session.userId!;
       const [subscriptions, dismissedSubscriptionIds] = await Promise.all([
@@ -465,7 +484,7 @@ export async function registerRoutes(
   // subscriptions/events/price-change/savings-opportunity computation the
   // savings and analyst routes above already do, strictly scoped to the
   // authenticated user via storage.getShadowSubscriptionsForUser(userId).
-  app.get("/api/subscriptions/recommendations", requireAuth, async (req: Request, res: Response) => {
+  app.get("/api/subscriptions/recommendations", requireAuth, requireSubscriptionIntelligence, async (req: Request, res: Response) => {
     try {
       const userId = req.session.userId!;
       const [subscriptions, dismissedSubscriptionIds] = await Promise.all([
@@ -497,7 +516,7 @@ export async function registerRoutes(
   // returned and never persisted. Entirely separate from the AI enrichment
   // credit system (server/aiCredits.ts) — this feature never reserves,
   // spends, or refunds a credit.
-  app.post("/api/subscriptions/analyst", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/analyst", requireAuth, requireSubscriptionIntelligence, async (req: Request, res: Response) => {
     try {
       const question = req.body?.question;
       const validation = validateQuestion(question);
@@ -554,7 +573,7 @@ export async function registerRoutes(
   // POST /api/subscriptions/:id/dismiss below, which hides it from the main
   // list instead. requireAuth + storage scoping the write to req.session.userId
   // means one user can never dismiss another user's opportunity.
-  app.post("/api/subscriptions/:id/dismiss-savings", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/dismiss-savings", requireAuth, requireSubscriptionIntelligence, async (req: Request, res: Response) => {
     try {
       const id = String(req.params.id);
       const dismissed = await storage.dismissSavingsOpportunity(req.session.userId!, id);
@@ -570,7 +589,7 @@ export async function registerRoutes(
   // Scoped by (id AND userId) via storage.confirmSubscription; a cross-user
   // id updates nothing and comes back undefined, reported as 404 (never
   // 403), matching GET /api/subscriptions/:id's existing pattern.
-  app.post("/api/subscriptions/:id/confirm", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/confirm", requireAuth, requireSubscriptionIntelligence, async (req: Request, res: Response) => {
     try {
       const id = String(req.params.id);
       const sub = await storage.confirmSubscription(id, req.session.userId!);
@@ -586,7 +605,7 @@ export async function registerRoutes(
   // excludes it by default; ?showDismissed=true still shows it) without
   // deleting it — preserved for audit, matching the STRICT BOUNDARIES
   // requirement to never delete detected data.
-  app.post("/api/subscriptions/:id/dismiss", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/subscriptions/:id/dismiss", requireAuth, requireSubscriptionIntelligence, async (req: Request, res: Response) => {
     try {
       const id = String(req.params.id);
       const sub = await storage.dismissSubscription(id, req.session.userId!);
