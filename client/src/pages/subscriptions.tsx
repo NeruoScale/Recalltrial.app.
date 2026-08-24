@@ -644,10 +644,10 @@ function confidenceLabel(c: SavingsConfidence): string {
 }
 
 // Phase 3C.2: the ONE place this page ever forms a savings cost line — a
-// missing amount always reads as "Cost unknown," NEVER as "$0" (see
-// STEP 2's explicit "NEVER show '$0' for unknown amounts" boundary).
+// missing amount always reads as "Cost not confirmed yet," NEVER as "$0"
+// (see STEP 2's explicit "NEVER show '$0' for unknown amounts" boundary).
 function formatSavingsCostLine(o: SavingsOpportunity): string {
-  if (o.monthlyCost === null || o.annualCost === null) return "Cost unknown";
+  if (o.monthlyCost === null || o.annualCost === null) return "Cost not confirmed yet";
   return `$${o.monthlyCost.toFixed(2)}/month · $${o.annualCost.toFixed(2)}/year`;
 }
 
@@ -658,6 +658,7 @@ function SavingsOpportunityCard({
   onDismiss,
   isTracking,
   isDismissing,
+  isLeaving,
 }: {
   opportunity: SavingsOpportunity;
   onOpenDetail: (id: string) => void;
@@ -665,10 +666,14 @@ function SavingsOpportunityCard({
   onDismiss: (id: string) => void;
   isTracking: boolean;
   isDismissing: boolean;
+  isLeaving: boolean;
 }) {
   const o = opportunity;
   return (
-    <Card data-testid={`card-savings-${o.subscriptionId}`}>
+    <Card
+      className={`transition-all duration-200 ease-in overflow-hidden ${isLeaving ? "opacity-0 max-h-0 scale-95 !py-0 !my-0" : "opacity-100 max-h-[600px]"}`}
+      data-testid={`card-savings-${o.subscriptionId}`}
+    >
       <CardContent className="py-4">
         <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
           <span className="font-semibold" data-testid={`text-savings-merchant-${o.subscriptionId}`}>{o.merchant}</span>
@@ -737,7 +742,7 @@ function SavingsOpportunityCard({
               onClick={() => onTrack(o.subscriptionId)}
               data-testid={`button-track-${o.subscriptionId}`}
             >
-              Track Subscription
+              {o.monthlyCost === null ? "Track anyway →" : "Track Subscription"}
             </Button>
           )}
 
@@ -790,9 +795,20 @@ function priorityIndicator(p: RecommendationPriority): string {
   }
 }
 
+// UX polish: a left-border accent gives priority a persistent visual anchor
+// down the whole card (not just the small badge at the top), so a list of
+// several recommendations still reads as sorted-by-urgency at a glance.
+function priorityBorderClass(p: RecommendationPriority): string {
+  switch (p) {
+    case "high": return "border-l-4 border-l-red-500";
+    case "medium": return "border-l-4 border-l-yellow-500";
+    case "low": return "border-l-4 border-l-gray-300 dark:border-l-gray-600";
+  }
+}
+
 function RecommendationCard({ rec, onOpenDetail }: { rec: Recommendation; onOpenDetail: (id: string) => void }) {
   return (
-    <Card data-testid={`card-recommendation-${rec.id}`}>
+    <Card className={priorityBorderClass(rec.priority)} data-testid={`card-recommendation-${rec.id}`}>
       <CardContent className="py-4">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
           <span className="text-xs font-bold tracking-wide" data-testid={`badge-priority-${rec.id}`}>
@@ -804,7 +820,6 @@ function RecommendationCard({ rec, onOpenDetail }: { rec: Recommendation; onOpen
         <p className="text-sm text-muted-foreground mb-3" data-testid={`text-recommendation-description-${rec.id}`}>{rec.description}</p>
         <Button
           size="sm"
-          variant="outline"
           onClick={() => onOpenDetail(rec.subscriptionId)}
           data-testid={`button-recommendation-action-${rec.id}`}
         >
@@ -838,10 +853,10 @@ function RecommendationsSection({ onOpenDetail }: { onOpenDetail: (id: string) =
   return (
     <Card className="mb-6">
       <CardContent className="py-4">
-        <h2 className="font-semibold mb-3" data-testid="text-recommendations-heading">What needs attention</h2>
+        <h2 className="text-base font-semibold mb-3" data-testid="text-recommendations-heading">What needs attention</h2>
         {sorted.length === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="text-recommendations-empty">
-            No action needed — your subscriptions look good.
+            No action needed — everything looks good ✓
           </p>
         ) : (
           <div className="space-y-3">
@@ -861,6 +876,13 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
     queryKey: ["/api/subscriptions/savings"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
+
+  // UX polish: dismissing a card plays a brief shrink-and-fade transition
+  // (SavingsOpportunityCard's isLeaving prop) before the actual API call
+  // fires, so the card doesn't just abruptly vanish once the list refetches
+  // without it.
+  const [leavingIds, setLeavingIds] = useState<Set<string>>(new Set());
+  const DISMISS_ANIMATION_MS = 200;
 
   const trackMutation = useMutation({
     mutationFn: async (subscriptionId: string) => {
@@ -889,6 +911,11 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
     },
   });
 
+  const handleDismiss = (id: string) => {
+    setLeavingIds((prev) => new Set(prev).add(id));
+    setTimeout(() => dismissMutation.mutate(id), DISMISS_ANIMATION_MS);
+  };
+
   if (isLoading || !data) {
     return (
       <Card className="mb-6">
@@ -906,26 +933,26 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
   return (
     <Card className="mb-6">
       <CardContent className="py-4">
-        <h2 className="font-semibold mb-3 flex items-center gap-1.5" data-testid="text-savings-heading">
+        <h2 className="text-base font-semibold mb-3 flex items-center gap-1.5" data-testid="text-savings-heading">
           💰 Potential savings
         </h2>
 
         {worthReviewing === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="text-savings-empty">
-            No savings opportunities detected yet.
+            No savings opportunities identified — your subscriptions look good ✓
           </p>
         ) : (
           <>
-            <div className="text-lg font-bold mb-1" data-testid="text-savings-summary-total">
+            <div className="text-2xl font-bold mb-1" data-testid="text-savings-summary-total">
               {hasCurrencyTotals ? (
                 <SavingsSummaryLine byCurrency={summary.byCurrency} />
               ) : (
-                <span className="text-sm font-medium text-muted-foreground">
+                <span className="text-base font-semibold text-muted-foreground">
                   Subscriptions worth reviewing — costs not yet available
                 </span>
               )}
             </div>
-            <p className="text-sm text-muted-foreground mb-4" data-testid="text-savings-worth-reviewing">
+            <p className="text-base font-medium text-muted-foreground mb-4" data-testid="text-savings-worth-reviewing">
               {worthReviewing} subscription{worthReviewing === 1 ? "" : "s"} worth reviewing
             </p>
 
@@ -938,7 +965,7 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
                     opportunity={o}
                     onOpenDetail={onOpenDetail}
                     onTrack={(id) => trackMutation.mutate(id)}
-                    onDismiss={(id) => dismissMutation.mutate(id)}
+                    onDismiss={handleDismiss}
                     // Track and Dismiss are independent actions on independent
                     // subscriptions — scoping "is this card's button busy" to
                     // BOTH the in-flight mutation AND which subscriptionId it
@@ -947,6 +974,7 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
                     // card, or either button on any OTHER card.
                     isTracking={trackMutation.isPending && trackMutation.variables === o.subscriptionId}
                     isDismissing={dismissMutation.isPending && dismissMutation.variables === o.subscriptionId}
+                    isLeaving={leavingIds.has(o.subscriptionId)}
                   />
                 ))}
             </div>
@@ -957,48 +985,25 @@ function SavingsSection({ onOpenDetail }: { onOpenDetail: (id: string) => void }
   );
 }
 
-// Phase 3B.9.1: the per-subscription cost line. Two genuinely distinct
-// "can't show a number" cases, given different messaging:
-//   - amount itself unknown -> "Amount unavailable · {interval}" (never $0)
-//   - amount known but billing interval unusable (null/unknown/one_time) ->
-//     show the known raw amount, but say plainly that the frequency isn't known
-// When both are known, the ≈ prefix marks whichever figure the cost engine
-// had to DERIVE by dividing (monthly, for any non-monthly billing interval)
-// — never the annual figure, and never for a literally-monthly subscription
-// (its monthlyCost is exact, not derived).
-function formatCostLine(sub: SubscriptionWithCost): string {
-  if (sub.monthlyCost !== null && sub.annualCost !== null) {
-    const interval = (sub.billingInterval || "").toLowerCase();
-    const monthly = `$${sub.monthlyCost.toFixed(2)}`;
-    const annual = `$${sub.annualCost.toFixed(2)}`;
-    if (interval === "monthly") {
-      return `${monthly}/month · ${annual}/year`;
-    }
-    return `${annual}/year · ≈${monthly}/month`;
+// Phase 3B.9.1 / UX polish: the per-subscription cost line, merged onto the
+// SAME line as the merchant name ("Anthropic · $20/month") — a deliberately
+// short, headline figure. A missing amount NEVER renders as "$0.00"; it
+// reads as "Cost not confirmed yet," matching the identical wording used in
+// the savings section for the same underlying condition. Technical
+// provenance (billingIntervalSource, costConfidence, resolutionMethod) is
+// intentionally NOT shown here — it stays in the vault drawer only.
+function formatCostShort(sub: SubscriptionWithCost): string {
+  if (sub.monthlyCost !== null) {
+    return `$${sub.monthlyCost.toFixed(2)}/month`;
   }
-  if (!sub.amount) {
-    return `Amount unavailable · ${formatInterval(sub.billingInterval)}`;
+  if (sub.amount) {
+    return formatMoney(sub.amount, sub.currency);
   }
-  return `${formatMoney(sub.amount, sub.currency)} · Unknown billing frequency`;
+  return "Cost not confirmed yet";
 }
 
-// Phase 3B.9.3 Step 7: provenance line — one fixed phrase per evidence tier,
-// exactly as specified. Only rendered when billingInterval itself is known;
-// "unknown" source (or a missing interval regardless of source) always
-// falls to the plain "Billing frequency: Unknown" line.
-function formatBillingProvenance(sub: SubscriptionWithCost): string {
-  if (!sub.billingInterval) return "Billing frequency: Unknown";
-  const label = formatInterval(sub.billingInterval);
-  switch (sub.billingIntervalSource) {
-    case "confirmed_email":
-      return `${label} · Confirmed from email`;
-    case "merchant_knowledge":
-      return `${label} · Based on plan details`;
-    case "inferred":
-      return `${label} · Based on recurring billing pattern`;
-    default:
-      return "Billing frequency: Unknown";
-  }
+function formatRenewalLine(sub: SubscriptionWithCost): string {
+  return sub.nextBillingDate ? `Renews ${formatDate(sub.nextBillingDate)}` : "Renewal date not available";
 }
 
 function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onOpenDetail: (id: string) => void }) {
@@ -1018,47 +1023,41 @@ function SubscriptionRow({ sub, onOpenDetail }: { sub: SubscriptionWithCost; onO
         </Avatar>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap mb-1">
-            <span className="font-semibold truncate" data-testid={`text-merchant-${sub.id}`}>
-              {sub.canonicalMerchantName}
-            </span>
+          <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+            <div className="min-w-0 flex items-baseline gap-1.5 flex-wrap">
+              <span className="text-lg font-bold truncate" data-testid={`text-merchant-${sub.id}`}>
+                {sub.canonicalMerchantName}
+              </span>
+              <span className="text-sm text-muted-foreground truncate" data-testid={`text-cost-${sub.id}`}>
+                · {formatCostShort(sub)}
+              </span>
+            </div>
             <span
-              className={`inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${statusBadgeClasses(sub.subscriptionStatus)}`}
+              className={`shrink-0 inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium ${statusBadgeClasses(sub.subscriptionStatus)}`}
               data-testid={`badge-status-${sub.id}`}
             >
               {statusLabel(sub.subscriptionStatus)}
             </span>
-            {sub.userConfirmed && (
-              <span
-                className="inline-flex items-center text-xs px-2 py-0.5 rounded-md border font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 border-green-200 dark:border-green-700"
-                data-testid={`badge-tracked-${sub.id}`}
-              >
-                ✓ Confirmed by you
-              </span>
-            )}
           </div>
-          <div className="text-sm text-muted-foreground" data-testid={`text-cost-${sub.id}`}>
-            {formatCostLine(sub)}
-          </div>
-          <div className="text-xs text-muted-foreground" data-testid={`text-billing-provenance-${sub.id}`}>
-            {formatBillingProvenance(sub)}
-          </div>
-          <div className="text-sm text-muted-foreground">
-            Next renewal: {formatDate(sub.nextBillingDate)}
-          </div>
-          <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
-            <Mail className="h-3 w-3" />
-            Detected from your email · {sub.costConfidence} confidence
+
+          {sub.userConfirmed && (
+            <div className="text-xs text-green-700 dark:text-green-400 mb-1" data-testid={`badge-tracked-${sub.id}`}>
+              ✓ Confirmed by you
+            </div>
+          )}
+
+          <div className="text-sm text-muted-foreground" data-testid={`text-renewal-${sub.id}`}>
+            {formatRenewalLine(sub)}
           </div>
         </div>
 
         <button
           type="button"
-          className="shrink-0 text-xs text-primary font-medium flex items-center gap-0.5 self-start"
+          className="shrink-0 text-sm text-primary font-semibold flex items-center gap-0.5 hover:underline"
           data-testid={`button-view-details-${sub.id}`}
           onClick={(e) => { e.stopPropagation(); onOpenDetail(sub.id); }}
         >
-          View details <ChevronRight className="h-3.5 w-3.5" />
+          View details <ChevronRight className="h-4 w-4" />
         </button>
       </CardContent>
     </Card>
@@ -1106,7 +1105,7 @@ function RenewalCalendarSection({ calendar }: { calendar: RenewalCalendar }) {
     <Card className="mb-6">
       <CardContent className="py-4">
         <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-          <h2 className="font-semibold" data-testid="text-renewal-calendar-heading">Renewal calendar</h2>
+          <h2 className="text-base font-semibold" data-testid="text-renewal-calendar-heading">Renewal calendar</h2>
           <div className="flex gap-1">
             <Button
               size="sm"
@@ -1205,12 +1204,12 @@ function UpcomingChargesSection({ charges, summary }: { charges: UpcomingCharge[
   return (
     <Card className="mb-6">
       <CardContent className="py-4">
-        <h2 className="font-semibold mb-3" data-testid="text-upcoming-heading">
+        <h2 className="text-base font-semibold mb-3" data-testid="text-upcoming-heading">
           Upcoming charges (next {summary.days} days)
         </h2>
         {charges.length === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="text-upcoming-empty">
-            No upcoming charges in the next {summary.days} days.
+            No upcoming charges in the next {summary.days} days
           </p>
         ) : (
           <>
@@ -1275,11 +1274,11 @@ function AnalystSection() {
   return (
     <Card className="mb-6">
       <CardContent className="py-4">
-        <h2 className="font-semibold mb-3" data-testid="text-analyst-heading">Ask about your subscriptions</h2>
+        <h2 className="text-base font-semibold mb-3" data-testid="text-analyst-heading">Ask about your subscriptions</h2>
 
         <div className="flex gap-2 mb-3">
           <Input
-            placeholder="What subscriptions am I paying for?"
+            placeholder="e.g. How much am I spending monthly?"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") handleAsk(question); }}
@@ -1301,7 +1300,7 @@ function AnalystSection() {
               key={q}
               type="button"
               disabled={askMutation.isPending}
-              className="text-xs px-2 py-1 rounded-md border text-muted-foreground hover-elevate disabled:opacity-50"
+              className="text-xs px-3 py-1 rounded-full border text-muted-foreground hover-elevate disabled:opacity-50"
               onClick={() => handleAsk(q)}
               data-testid={`button-suggested-question-${idx}`}
             >
@@ -1319,7 +1318,7 @@ function AnalystSection() {
 
         {!askMutation.isPending && askMutation.isError && (
           <p className="text-sm text-destructive" data-testid="text-analyst-error">
-            AI analyst temporarily unavailable.
+            AI assistant temporarily unavailable
           </p>
         )}
 
@@ -1327,7 +1326,7 @@ function AnalystSection() {
           <div data-testid="text-analyst-answer-wrapper">
             <p className="text-sm whitespace-pre-wrap" data-testid="text-analyst-answer">{askMutation.data.answer}</p>
             <p className="text-xs text-muted-foreground mt-2" data-testid="text-analyst-disclaimer">
-              Based on email-detected data · May be incomplete
+              Powered by AI · Based on your email data
             </p>
           </div>
         )}
@@ -1476,15 +1475,16 @@ export default function SubscriptionsPage() {
               <UpcomingChargesSection charges={data.upcomingCharges ?? []} summary={data.upcomingSummary} />
             )}
 
-            <div className="space-y-3">
-              {subs.map((sub) => (
-                <SubscriptionRow key={sub.id} sub={sub} onOpenDetail={setSelectedSubId} />
-              ))}
+            <div className="mb-6">
+              <h2 className="text-base font-semibold mb-3" data-testid="text-subscriptions-list-heading">All subscriptions</h2>
+              <div className="space-y-3">
+                {subs.map((sub) => (
+                  <SubscriptionRow key={sub.id} sub={sub} onOpenDetail={setSelectedSubId} />
+                ))}
+              </div>
             </div>
 
-            <div className="mt-6">
-              <AnalystSection />
-            </div>
+            <AnalystSection />
           </>
         )}
       </main>
