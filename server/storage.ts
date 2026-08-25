@@ -8,6 +8,7 @@ import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingInte
 import { lookupMerchantKnowledge } from "./merchantKnowledge";
 import { buildPriceHistory } from "./priceHistory";
 import { detectPriceChanges } from "./priceChangeDetector";
+import { buildGmailDisconnectUpdate } from "./gmail";
 
 // ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
 //
@@ -488,13 +489,12 @@ export class DatabaseStorage implements IStorage {
     }).where(eq(users.id, userId));
   }
 
+  // Account-switch isolation fix (Gmail Account Switching audit, TASK 1) —
+  // see server/gmail.ts's buildGmailDisconnectUpdate() for why
+  // lastEmailScanAt/lastScanMessagesProcessed are reset here too, not just
+  // the token fields.
   async clearUserGmailTokens(userId: string): Promise<void> {
-    await db.update(users).set({
-      gmailAccessToken: null,
-      gmailRefreshToken: null,
-      gmailTokenExpiry: null,
-      gmailConnected: false,
-    }).where(eq(users.id, userId));
+    await db.update(users).set(buildGmailDisconnectUpdate()).where(eq(users.id, userId));
   }
 
   async toggleEmailScanning(userId: string, enabled: boolean): Promise<User> {

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { applyEventToSubscription, type LifecycleRelevantEvent } from "./subscriptionLifecycle";
 import { decideCanonicalization } from "./canonicalEvents";
 import { deriveShadowSubscription, resolveEntity, type EntityResolutionResult } from "./entityResolver";
-import { buildScanTimeFilter, scanGmailForTrials } from "./gmail";
+import { buildScanTimeFilter, buildGmailDisconnectUpdate, scanGmailForTrials } from "./gmail";
 import { buildAnalystContext } from "./savingsAnalyst";
 import type { SavingsAnalysis } from "./savingsIntelligence";
 import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
@@ -449,12 +449,13 @@ describe("TEST 7 — Concurrency / stale-scan protection", () => {
 });
 
 describe("Scan time-window staleness after account switch (buildScanTimeFilter)", () => {
-  it("FINDING: lastEmailScanAt is not reset on disconnect, so reconnecting B reuses A's last-scan timestamp as the search lower-bound — B's older mail (received before A's last scan) is silently never fetched", () => {
+  it("mechanism the fix prevents: an UNCLEARED lastEmailScanAt would make B's scan reuse A's last-scan timestamp as the search lower-bound, silently skipping B's older mail", () => {
     const staleTimestampFromA = new Date("2026-08-20T00:00:00.000Z");
     const filter = buildScanTimeFilter(staleTimestampFromA);
     // Not "newer_than:90d" (the fresh-connection default) — it's an
     // after:<A's date> filter, exactly as if B were a continuation of A's
-    // scan history rather than a brand-new mailbox.
+    // scan history rather than a brand-new mailbox. This is exactly why
+    // buildGmailDisconnectUpdate() (tested below) must null this field out.
     expect(filter).not.toBe("newer_than:90d");
     expect(filter).toMatch(/^after:\d{4}\/\d{2}\/\d{2}$/);
   });
@@ -462,5 +463,44 @@ describe("Scan time-window staleness after account switch (buildScanTimeFilter)"
   it("a TRULY fresh connection (lastEmailScanAt never set) correctly scans the full default window", () => {
     expect(buildScanTimeFilter(null)).toBe("newer_than:90d");
     expect(buildScanTimeFilter(undefined)).toBe("newer_than:90d");
+  });
+});
+
+describe("REGRESSION TEST (TASK 1 safe fix): connect/scan A -> disconnect A -> connect B -> B scan does not reuse A's scan timestamp", () => {
+  it("buildGmailDisconnectUpdate() nulls out lastEmailScanAt and lastScanMessagesProcessed, not just the token fields", () => {
+    const update = buildGmailDisconnectUpdate();
+    expect(update.gmailAccessToken).toBeNull();
+    expect(update.gmailRefreshToken).toBeNull();
+    expect(update.gmailTokenExpiry).toBeNull();
+    expect(update.gmailConnected).toBe(false);
+    expect(update.lastEmailScanAt).toBeNull();
+    expect(update.lastScanMessagesProcessed).toBeNull();
+  });
+
+  it("full scenario: A scans (lastEmailScanAt set) -> disconnect -> the SAME field, once cleared, makes B's first scan use the fresh 90-day window instead of A's stale cursor", () => {
+    // Step 1: user connects and scans Gmail A — this is what user.lastEmailScanAt
+    // looks like immediately after (server/storage.ts's updateLastEmailScan()).
+    const userStateAfterScanningA = {
+      lastEmailScanAt: new Date("2026-08-20T12:00:00.000Z"),
+      lastScanMessagesProcessed: 42,
+    };
+    // Sanity check: BEFORE the fix's field, A's own stale value would have
+    // produced a narrow after:-filter — confirming this scenario actually
+    // exercises the bug path, not a no-op.
+    expect(buildScanTimeFilter(userStateAfterScanningA.lastEmailScanAt)).not.toBe("newer_than:90d");
+
+    // Step 2: user disconnects Gmail A. clearUserGmailTokens() (server/storage.ts)
+    // now applies buildGmailDisconnectUpdate() to the user row.
+    const userStateAfterDisconnect = { ...userStateAfterScanningA, ...buildGmailDisconnectUpdate() };
+    expect(userStateAfterDisconnect.lastEmailScanAt).toBeNull();
+    expect(userStateAfterDisconnect.lastScanMessagesProcessed).toBeNull();
+
+    // Step 3: user connects Gmail B and triggers its first scan. The scan
+    // route reads user.lastEmailScanAt fresh from the DB at request time
+    // (server/routes.ts's POST /api/gmail/scan) — which is now null, per
+    // step 2 — so buildScanTimeFilter() computes the full fresh window,
+    // never A's old cursor.
+    const bScanTimeFilter = buildScanTimeFilter(userStateAfterDisconnect.lastEmailScanAt);
+    expect(bScanTimeFilter).toBe("newer_than:90d");
   });
 });

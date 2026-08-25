@@ -1249,6 +1249,36 @@ export function buildScanTimeFilter(lastEmailScanAt: Date | null | undefined): s
   return `after:${y}/${m}/${d}`;
 }
 
+// ─── Gmail disconnect state reset (Account Switching audit, TASK 1) ────────────
+//
+// Pure mirror of the exact object server/storage.ts's clearUserGmailTokens()
+// passes to `db.update(users).set(...)` — same "pure function mirrors the
+// SQL write shape" pattern as server/aiCredits.ts's decideCreditBucket().
+// Nulling lastEmailScanAt/lastScanMessagesProcessed alongside the token
+// fields is the fix: without it, reconnecting a DIFFERENT Gmail account
+// would have buildScanTimeFilter() reuse the DISCONNECTED account's last
+// scan timestamp as the new account's search lower-bound, silently skipping
+// any of its mail older than that date. Resetting to null means the very
+// next scan — same account reconnected, or a genuinely different one —
+// always starts from buildScanTimeFilter(null)'s full 90-day default.
+export function buildGmailDisconnectUpdate(): {
+  gmailAccessToken: null;
+  gmailRefreshToken: null;
+  gmailTokenExpiry: null;
+  gmailConnected: false;
+  lastEmailScanAt: null;
+  lastScanMessagesProcessed: null;
+} {
+  return {
+    gmailAccessToken: null,
+    gmailRefreshToken: null,
+    gmailTokenExpiry: null,
+    gmailConnected: false,
+    lastEmailScanAt: null,
+    lastScanMessagesProcessed: null,
+  };
+}
+
 // ─── Main scan function ───────────────────────────────────────────────────────
 
 export type ScanResult = {
