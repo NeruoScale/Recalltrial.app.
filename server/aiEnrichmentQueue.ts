@@ -250,6 +250,7 @@ export async function processAIEnrichmentJob(jobId: string): Promise<ProcessJobO
           userId: event.userId,
           canonicalMerchantDomain: event.canonicalMerchantDomain,
           billingInterval: updates.billingInterval ?? event.billingInterval,
+          emailConnectionId: event.emailConnectionId,
         });
       } catch (err) {
         console.error("[AI] lifecycle re-application failed:", err);

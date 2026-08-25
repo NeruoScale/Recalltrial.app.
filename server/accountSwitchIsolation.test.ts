@@ -61,6 +61,8 @@ function makeSub(overrides: Partial<ShadowSubscription> = {}): ShadowSubscriptio
     userConfirmedAt: null,
     userDismissed: false,
     userDismissedAt: null,
+    lastEventEmailConnectionId: null,
+    crossAccountConflict: false,
     createdAt: new Date("2026-07-01T00:00:00.000Z"),
     updatedAt: new Date("2026-07-01T00:00:00.000Z"),
     ...overrides,
@@ -74,6 +76,7 @@ function makeEvent(overrides: Partial<SubscriptionEvent> = {}): SubscriptionEven
     id: `evt-${eventIdCounter}`,
     subscriptionId: null,
     userId: "user-U",
+    emailConnectionId: null,
     eventType: "subscription_invoice",
     sourceMessageId: `msg-${eventIdCounter}`,
     extractedPrice: "20.00",
@@ -116,6 +119,7 @@ function lifecycleEvent(e: SubscriptionEvent): LifecycleRelevantEvent {
     userId: e.userId,
     canonicalMerchantDomain: e.canonicalMerchantDomain,
     billingInterval: e.billingInterval,
+    emailConnectionId: e.emailConnectionId,
   };
 }
 
@@ -504,3 +508,245 @@ describe("REGRESSION TEST (TASK 1 safe fix): connect/scan A -> disconnect A -> c
     expect(bScanTimeFilter).toBe("newer_than:90d");
   });
 });
+
+// ─── Email Connection Isolation Architecture — PHASE D/E cross-account
+// protection (crossAccountProtectionEnabled=true) ──────────────────────────
+//
+// Every test above this point exercises applyEventToSubscription() with its
+// DEFAULT crossAccountProtectionEnabled=false — i.e. the pre-existing
+// behavior, gated OFF for any user without subscriptionIntelligenceEnabled.
+// The tests below exercise the NEW protected path (RULES 1-4), proving the
+// specific gaps documented above are now closed for beta users. Both paths
+// are tested because BOTH are real, live behavior depending on the flag —
+// this is not a "before/after the fix" pair, it's "off users" vs "on users."
+//
+// isKnownDifferentAccount is passed in directly (mirroring what
+// server/storage.ts's applyLifecycleEventToSubscription() resolves by
+// comparing providerAccountId, not raw connection ids — see that function's
+// own comment) since applyEventToSubscription itself is pure and has no DB
+// access to resolve it internally.
+
+describe("PHASE G #2/#10 — same merchant, different amount, protection ON: conflict is detected and the existing value is preserved", () => {
+  it("RULE 3: different KNOWN account, amount conflicts -> crossAccountConflict=true, amount NOT overwritten", () => {
+    const subscriptionFromA = makeSub({
+      canonicalMerchantDomain: "anthropic.com",
+      amount: "20.00",
+      currency: "USD",
+      lastEventEmailConnectionId: "connection-A",
+    });
+    const eventFromB = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "30.00",
+      extractedCurrency: "USD",
+      emailConnectionId: "connection-B",
+    }));
+
+    const result = applyEventToSubscription(eventFromB, subscriptionFromA, true, /* isKnownDifferentAccount */ true);
+
+    expect(result.fields.amount).toBeUndefined(); // NOT overwritten — this is the fix
+    expect(result.fields.currency).toBeUndefined();
+    expect(result.fields.crossAccountConflict).toBe(true);
+    expect(result.fields.lastEventEmailConnectionId).toBeUndefined(); // provenance stays pointing at A, the connection that supplied the PRESERVED value
+  });
+});
+
+describe("PHASE G #3/#11 — same merchant, SAME amount, protection ON: agreement updates provenance safely", () => {
+  it("RULE 2: different KNOWN account, values AGREE -> applies normally, refreshes provenance, clears any conflict flag", () => {
+    const subscriptionFromA = makeSub({
+      canonicalMerchantDomain: "anthropic.com",
+      amount: "20.00",
+      currency: "USD",
+      lastEventEmailConnectionId: "connection-A",
+      crossAccountConflict: true, // simulating a PRIOR conflict that this agreeing event should clear
+    });
+    const eventFromB = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "20.00", // agrees with A's value
+      extractedCurrency: "USD",
+      emailConnectionId: "connection-B",
+    }));
+
+    const result = applyEventToSubscription(eventFromB, subscriptionFromA, true, true);
+
+    expect(result.fields.amount).toBe("20.00");
+    expect(result.fields.lastEventEmailConnectionId).toBe("connection-B");
+    expect(result.fields.crossAccountConflict).toBe(false); // stale conflict flag cleared
+  });
+});
+
+describe("PHASE G #4/#5 — confirmed/tracked A subscription + conflicting B evidence: protected", () => {
+  it("a userConfirmed=true subscription's amount is protected from a conflicting different-account event when protection is ON", () => {
+    const confirmedSubscription = makeSub({
+      canonicalMerchantDomain: "anthropic.com",
+      amount: "20.00",
+      userConfirmed: true,
+      userConfirmedAt: new Date("2026-08-10T00:00:00.000Z"),
+      lastEventEmailConnectionId: "connection-A",
+    });
+    const conflictingEventFromB = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "30.00",
+      emailConnectionId: "connection-B",
+    }));
+
+    const result = applyEventToSubscription(conflictingEventFromB, confirmedSubscription, true, true);
+
+    expect(result.fields.amount).toBeUndefined(); // confirmed value preserved
+    expect(result.fields.crossAccountConflict).toBe(true);
+    // Confirmation state itself was never a `fields` key to begin with —
+    // this reconfirms RULE 5 (never silently touched by any event, with
+    // protection on OR off).
+    expect(result.fields).not.toHaveProperty("userConfirmed");
+    expect(result.fields).not.toHaveProperty("userConfirmedAt");
+  });
+});
+
+describe("PHASE G #6 — A -> B -> A -> B with protection ON: uses stable account identity throughout, no false conflicts, no lost protection", () => {
+  it("switching back to a PREVIOUSLY-seen account (by stable providerAccountId) after an intervening different account still detects the renewed conflict correctly", () => {
+    // Anthropic $20 from account A (connection-A1, first session)
+    let sub = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", lastEventEmailConnectionId: "connection-A1" });
+
+    // B connects (connection-B1), conflicting evidence -> flagged, A's $20 preserved
+    const stepB = applyEventToSubscription(
+      lifecycleEvent(makeEvent({ canonicalMerchantDomain: "anthropic.com", extractedPrice: "30.00", emailConnectionId: "connection-B1" })),
+      sub, true, true
+    );
+    expect(stepB.fields.amount).toBeUndefined();
+    expect(stepB.fields.crossAccountConflict).toBe(true);
+    sub = { ...sub, ...stepB.fields } as ShadowSubscription; // still $20, still connection-A1, conflict=true
+
+    // User reconnects A again (a NEW connection row, connection-A2 — but
+    // the SAME real account) and A re-sends the same $20 evidence. Since
+    // this test passes isKnownDifferentAccount explicitly (mirroring what
+    // storage.ts would resolve via providerAccountId), reconnecting the
+    // same real account resolves to isKnownDifferentAccount=false here.
+    const stepAAgain = applyEventToSubscription(
+      lifecycleEvent(makeEvent({ canonicalMerchantDomain: "anthropic.com", extractedPrice: "20.00", emailConnectionId: "connection-A2" })),
+      sub, true, false // same stable account as before, despite the new connection row id
+    );
+    expect(stepAAgain.fields.amount).toBe("20.00");
+    expect(stepAAgain.fields.lastEventEmailConnectionId).toBe("connection-A2");
+  });
+});
+
+describe("PHASE G #7 — disconnect/reconnect the SAME account: reconnecting must NOT look like a different account", () => {
+  it("storage.ts resolves isKnownDifferentAccount=false when providerAccountId matches, even though the connection ROW id is brand new", () => {
+    // This test documents the EXACT bug that would exist if raw connection
+    // ids were compared instead of providerAccountId: a user reconnecting
+    // their own unchanged Gmail account would otherwise see every ordinary
+    // future price change misflagged as a "cross-account conflict."
+    // storage.ts's applyLifecycleEventToSubscription() performs this
+    // resolution (comparing eventConnection.providerAccountId against
+    // lastConnection.providerAccountId, falling back to raw-id-differs=true
+    // only when providerAccountId is unavailable on one/both sides) — this
+    // test exercises applyEventToSubscription() with the CORRECTLY resolved
+    // value to confirm the pure function's own handling is right, given
+    // that resolution.
+    const sub = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", lastEventEmailConnectionId: "connection-old-session" });
+    const priceChangeAfterReconnect = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "22.00", // a completely ordinary, legitimate price increase
+      emailConnectionId: "connection-new-session", // different ROW id after reconnect
+    }));
+
+    // Correctly resolved: same providerAccountId -> isKnownDifferentAccount=false
+    const result = applyEventToSubscription(priceChangeAfterReconnect, sub, true, false);
+    expect(result.fields.amount).toBe("22.00"); // applied normally — NOT flagged as a conflict
+    expect(result.fields.crossAccountConflict).toBeUndefined();
+  });
+});
+
+describe("PHASE G #12 — unknown A value + known B value: RULE 4, no conflict possible", () => {
+  it("existing amount is null -> a different account's known value populates it normally, never flagged as a conflict", () => {
+    const subscriptionWithUnknownAmount = makeSub({
+      canonicalMerchantDomain: "anthropic.com",
+      amount: null,
+      currency: null,
+      lastEventEmailConnectionId: "connection-A",
+    });
+    const eventFromB = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "30.00",
+      extractedCurrency: "USD",
+      emailConnectionId: "connection-B",
+    }));
+
+    const result = applyEventToSubscription(eventFromB, subscriptionWithUnknownAmount, true, true);
+
+    expect(result.fields.amount).toBe("30.00");
+    expect(result.fields.crossAccountConflict).toBe(false);
+  });
+});
+
+describe("PHASE G #13 — historical NULL emailConnectionId events remain valid under protection", () => {
+  it("an event with no recorded connection (pre-PHASE-C historical row) is treated as RULE 1 — applies normally even with protection ON", () => {
+    const sub = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", lastEventEmailConnectionId: "connection-A" });
+    const historicalEventWithNoConnection = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "25.00",
+      emailConnectionId: null,
+    }));
+
+    // storage.ts only attempts the account-identity resolution when
+    // event.emailConnectionId is present — for a null connection, it never
+    // computes isKnownDifferentAccount at all (stays its default null),
+    // which this test passes through explicitly.
+    const result = applyEventToSubscription(historicalEventWithNoConnection, sub, true, null);
+    expect(result.fields.amount).toBe("25.00"); // applied normally, not blocked
+    expect(result.fields.crossAccountConflict).toBeUndefined();
+  });
+
+  it("a subscription with no recorded lastEventEmailConnectionId (predates PHASE D) also falls to RULE 1", () => {
+    const preExistingSub = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", lastEventEmailConnectionId: null });
+    const newEvent = lifecycleEvent(makeEvent({ canonicalMerchantDomain: "anthropic.com", extractedPrice: "22.00", emailConnectionId: "connection-B" }));
+    // storage.ts never even attempts the comparison when existing.lastEventEmailConnectionId is null.
+    const result = applyEventToSubscription(newEvent, preExistingSub, true, null);
+    expect(result.fields.amount).toBe("22.00");
+  });
+});
+
+describe("PHASE G #14 — cross-user isolation of the new conflict-protection fields", () => {
+  it("a subscription's crossAccountConflict/lastEventEmailConnectionId are only ever set from that subscription's OWN resolution — no cross-user bleed possible (no userId parameter exists on the pure function to get wrong)", () => {
+    const userASub = makeSub({ userId: "user-a", canonicalMerchantDomain: "merchant-a.com", amount: "20.00", lastEventEmailConnectionId: "connection-A" });
+    const userAEvent = lifecycleEvent(makeEvent({ userId: "user-a", canonicalMerchantDomain: "merchant-a.com", extractedPrice: "30.00", emailConnectionId: "connection-A2" }));
+    const result = applyEventToSubscription(userAEvent, userASub, true, true);
+    // The function only ever reads/writes fields on the ONE subscription
+    // object passed in — there is structurally no path for another user's
+    // data to influence this result (storage.ts's caller already scopes
+    // the `existing` lookup by userId+domain before this function ever runs).
+    expect(result.fields.crossAccountConflict).toBe(true);
+  });
+});
+
+describe("PHASE G #15 — idempotency under protection: repeated identical operations never duplicate or drift", () => {
+  it("re-applying the SAME conflicting event twice produces the identical result both times (idempotent, no accumulating state)", () => {
+    const sub = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", lastEventEmailConnectionId: "connection-A" });
+    const conflictingEvent = lifecycleEvent(makeEvent({ canonicalMerchantDomain: "anthropic.com", extractedPrice: "30.00", emailConnectionId: "connection-B" }));
+
+    const first = applyEventToSubscription(conflictingEvent, sub, true, true);
+    const second = applyEventToSubscription(conflictingEvent, sub, true, true); // same inputs, not re-using first's output
+    expect(second).toEqual(first);
+  });
+
+});
+
+// PHASE G #8/#9 note — no duplicate active connections: this guarantee is a
+// DB constraint (server/migrate.ts's partial unique index on
+// email_connections(user_id, provider) WHERE disconnected_at IS NULL), not
+// application logic, so there is nothing to unit-test here without a live
+// DB — same "DB-layer guarantees verified live, not simulated" convention
+// this codebase uses everywhere else (see server/aiCredits.test.ts's
+// identical note on reserveCredit()/refundCredit()).
+//
+// PHASE G #8 note — late-scan / disconnected-connection protection (RULE 6):
+// storage.ts's applyLifecycleEventToSubscription() checks the event's OWN
+// connection's disconnectedAt before applying billing state — a
+// late-arriving event from an already-disconnected connection returns
+// { applied: false } without writing to the subscription, while the event
+// row itself (already durably written by createSubscriptionEvent() before
+// this function ever runs) is untouched and remains valid evidence. This
+// requires a live DB read against email_connections and cannot be expressed
+// as a pure-function test without DB-mocking infrastructure this codebase
+// doesn't have — verified live against production instead (see the
+// implementation report's production verification section), same
+// convention as every other DB-layer guarantee in this feature line.

@@ -232,6 +232,7 @@ export async function backfillCanonicalEventBodies(userId?: string, dryRun = fal
           userId: ev.userId,
           canonicalMerchantDomain: ev.canonicalMerchantDomain,
           billingInterval: plan.updates.billingInterval ?? ev.billingInterval,
+          emailConnectionId: ev.emailConnectionId,
         });
       } catch (err) {
         console.error("[Backfill] lifecycle re-application failed:", err);

@@ -328,7 +328,36 @@ export async function registerRoutes(
         return res.redirect(`${appUrl}/settings?gmailError=missing_params`);
       }
       const tokens = await exchangeCodeForTokens(code);
+      // Existing compatibility path — unchanged, still the live source of
+      // truth for the current connect/disconnect/scan flow.
       await storage.updateUserGmailTokens(userId, tokens);
+
+      // PHASE B (Account Isolation): dual-write into email_connections
+      // alongside the call above, never instead of it. Any previously
+      // active connection for this user+provider is closed first (covers
+      // the "re-authorize without an explicit disconnect first" case —
+      // e.g. an expired token) so the partial unique index (at most one
+      // active row per user+provider) is never violated. A failure here
+      // must never break the underlying Gmail connection itself, which the
+      // line above already completed successfully.
+      try {
+        const previousActive = await storage.getActiveEmailConnection(userId, "google");
+        if (previousActive) {
+          await storage.disconnectEmailConnection(previousActive.id);
+        }
+        await storage.createEmailConnection({
+          userId,
+          provider: "google",
+          providerAccountId: tokens.providerAccountId,
+          emailAddress: tokens.emailAddress,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenExpiry: tokens.expiry,
+        });
+      } catch (connectionErr) {
+        console.error("[Account Isolation] email_connections dual-write failed (Gmail connection itself still succeeded):", connectionErr);
+      }
+
       return res.redirect(`${appUrl}/settings?gmailConnected=1`);
     } catch (err) {
       console.error("Gmail callback error:", err);
@@ -344,6 +373,18 @@ export async function registerRoutes(
         await revokeToken(user.gmailAccessToken);
       }
       await storage.clearUserGmailTokens(req.session.userId!);
+
+      // PHASE B dual-write: close the matching email_connections row too.
+      // Never blocks/fails the disconnect above, which already succeeded.
+      try {
+        const activeConnection = await storage.getActiveEmailConnection(req.session.userId!, "google");
+        if (activeConnection) {
+          await storage.disconnectEmailConnection(activeConnection.id);
+        }
+      } catch (connectionErr) {
+        console.error("[Account Isolation] email_connections disconnect dual-write failed (Gmail disconnect itself still succeeded):", connectionErr);
+      }
+
       return res.json({ success: true });
     } catch (err) {
       console.error("Gmail disconnect error:", err);
@@ -359,13 +400,22 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Gmail is not connected." });
       }
 
+      // PHASE C/E (Account Isolation): captured ONCE here, alongside the
+      // token snapshot above — never re-read mid-scan. May be undefined for
+      // a user who hasn't reconnected since PHASE B shipped (the dual-write
+      // only started populating email_connections going forward); every
+      // event this scan writes then just gets emailConnectionId=null,
+      // identical to pre-PHASE-C behavior.
+      const activeConnection = await storage.getActiveEmailConnection(user.id, "google");
+
       const scanResult = await scanGmailForTrials(
         user.gmailAccessToken,
         user.gmailRefreshToken,
         user.gmailTokenExpiry,
         user.id,
         user.lastEmailScanAt,
-        user.aiScanningEnabled
+        user.aiScanningEnabled,
+        activeConnection?.id ?? null
       );
       const { suggestions } = scanResult;
 

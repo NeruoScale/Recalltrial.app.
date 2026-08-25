@@ -40,27 +40,68 @@ export function buildGmailClient(
   return google.gmail({ version: "v1", auth: oauth2Client });
 }
 
+// PHASE B (Account Isolation): openid + email added alongside the existing
+// gmail.readonly scope — pure identity, grants ZERO additional data access
+// beyond what gmail.readonly already allowed. This is what makes
+// exchangeCodeForTokens() below able to return a real id_token to decode.
 export function generateAuthUrl(userId: string): string {
   const oauth2Client = getOAuthClient();
   return oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: ["https://www.googleapis.com/auth/gmail.readonly"],
+    scope: ["https://www.googleapis.com/auth/gmail.readonly", "openid", "email"],
     state: userId,
   });
 }
 
+/**
+ * exchangeCodeForTokens(): providerAccountId (Google's stable `sub` claim,
+ * PREFERRED over email as the durable identity per the approved design —
+ * email addresses can be reassigned/aliased on Workspace accounts, `sub`
+ * never changes) and emailAddress (display-only) come from decoding the
+ * id_token the NEW openid/email scopes now cause Google to return.
+ *
+ * Both are null, never thrown, if id_token verification fails for any
+ * reason (missing GOOGLE_CLIENT_ID, network hiccup, malformed token) — per
+ * PHASE B's explicit "do not silently break existing connections"
+ * requirement, identity is an ENHANCEMENT layered on top of the existing
+ * connect flow, never a new failure mode for it. A user connecting today
+ * still gets a fully working Gmail connection even if this lookup fails;
+ * they just won't have a provider identity recorded until a later
+ * reconnect succeeds.
+ */
 export async function exchangeCodeForTokens(code: string): Promise<{
   accessToken: string;
   refreshToken: string | null;
   expiry: Date | null;
+  providerAccountId: string | null;
+  emailAddress: string | null;
 }> {
   const oauth2Client = getOAuthClient();
   const { tokens } = await oauth2Client.getToken(code);
+
+  let providerAccountId: string | null = null;
+  let emailAddress: string | null = null;
+  if (tokens.id_token) {
+    try {
+      const ticket = await oauth2Client.verifyIdToken({
+        idToken: tokens.id_token,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      const payload = ticket.getPayload();
+      providerAccountId = payload?.sub ?? null;
+      emailAddress = payload?.email ?? null;
+    } catch (err) {
+      console.error("[Gmail OAuth] id_token verification failed — continuing without provider identity:", err);
+    }
+  }
+
   return {
     accessToken: tokens.access_token || "",
     refreshToken: tokens.refresh_token || null,
     expiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+    providerAccountId,
+    emailAddress,
   };
 }
 
@@ -1309,7 +1350,16 @@ export async function scanGmailForTrials(
   // callers already have the full user row in scope). Purely additive,
   // defaults to false (no AI queueing) when omitted — existing callers/tests
   // that don't pass it keep behaving exactly as before.
-  aiScanningEnabled?: boolean
+  aiScanningEnabled?: boolean,
+  // PHASE C (Account Isolation): the email_connections row id captured
+  // ONCE at scan start, alongside the token snapshot above — same "capture
+  // now, never re-read live state mid-scan" discipline the token params
+  // already follow. Stamped onto every subscription_events row this scan
+  // writes. Purely additive/optional: omitted (or the connection lookup
+  // came back empty, e.g. a user who hasn't reconnected since PHASE B
+  // shipped) means every event this scan writes gets emailConnectionId=null,
+  // identical to pre-PHASE-C behavior.
+  emailConnectionId?: string | null
 ): Promise<ScanResult> {
   const scanStartedAt = new Date();
   const gmail = buildGmailClient(accessToken, refreshToken, tokenExpiry);
@@ -1504,6 +1554,7 @@ export async function scanGmailForTrials(
             const { storage } = await import("./storage");
             const writtenRow = await storage.createSubscriptionEvent({
               userId,
+              emailConnectionId: emailConnectionId ?? null,
               sourceMessageId: msgId,
               eventType: candidate.eventType,
               extractedPrice: candidate.extractedPrice,

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, isNull, lte, sql, count, desc, inArray, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, emailConnections, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder, type EmailConnection, type InsertEmailConnection } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
 import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
@@ -203,6 +203,17 @@ export interface IStorage {
 
   updateUserGmailTokens(userId: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<void>;
   clearUserGmailTokens(userId: string): Promise<void>;
+
+  // Account Isolation architecture, PHASE A: email_connections storage layer.
+  // Dual-write alongside (never instead of) the users Gmail columns above —
+  // see server/migrate.ts's table comment for why. Unwired from the actual
+  // connect/disconnect/scan routes until PHASE B/C actually have identity
+  // data worth writing.
+  createEmailConnection(data: InsertEmailConnection): Promise<EmailConnection>;
+  getActiveEmailConnection(userId: string, provider?: string): Promise<EmailConnection | undefined>;
+  getEmailConnectionById(id: string): Promise<EmailConnection | undefined>;
+  disconnectEmailConnection(id: string): Promise<EmailConnection | undefined>;
+  updateEmailConnectionTokens(id: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<EmailConnection | undefined>;
   toggleEmailScanning(userId: string, enabled: boolean): Promise<User>;
   toggleAiScanning(userId: string, enabled: boolean): Promise<User>;
   recordAiScanningConsent(userId: string, version: string): Promise<void>;
@@ -497,6 +508,59 @@ export class DatabaseStorage implements IStorage {
     await db.update(users).set(buildGmailDisconnectUpdate()).where(eq(users.id, userId));
   }
 
+  // ── Account Isolation architecture, PHASE A: email_connections storage ──
+
+  async createEmailConnection(data: InsertEmailConnection): Promise<EmailConnection> {
+    const [row] = await db.insert(emailConnections).values(data).returning();
+    return row;
+  }
+
+  // The partial unique index (user_id, provider WHERE disconnected_at IS NULL)
+  // guarantees at most one row could ever match this query — .limit(1) here
+  // is defensive redundancy, not reliance on it being the only source of
+  // that guarantee.
+  async getActiveEmailConnection(userId: string, provider: string = "google"): Promise<EmailConnection | undefined> {
+    const [row] = await db
+      .select()
+      .from(emailConnections)
+      .where(and(
+        eq(emailConnections.userId, userId),
+        eq(emailConnections.provider, provider),
+        isNull(emailConnections.disconnectedAt)
+      ))
+      .limit(1);
+    return row;
+  }
+
+  async getEmailConnectionById(id: string): Promise<EmailConnection | undefined> {
+    const [row] = await db.select().from(emailConnections).where(eq(emailConnections.id, id)).limit(1);
+    return row;
+  }
+
+  // Sets disconnectedAt, never deletes the row — the whole point of this
+  // table is to preserve connection HISTORY (server/migrate.ts's table
+  // comment), so a disconnect is a state transition, not a deletion.
+  async disconnectEmailConnection(id: string): Promise<EmailConnection | undefined> {
+    const [row] = await db
+      .update(emailConnections)
+      .set({ disconnectedAt: new Date() })
+      .where(and(eq(emailConnections.id, id), isNull(emailConnections.disconnectedAt)))
+      .returning();
+    return row;
+  }
+
+  async updateEmailConnectionTokens(
+    id: string,
+    tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }
+  ): Promise<EmailConnection | undefined> {
+    const [row] = await db
+      .update(emailConnections)
+      .set({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken, tokenExpiry: tokens.expiry })
+      .where(eq(emailConnections.id, id))
+      .returning();
+    return row;
+  }
+
   async toggleEmailScanning(userId: string, enabled: boolean): Promise<User> {
     const [user] = await db.update(users).set({ emailScanningEnabled: enabled }).where(eq(users.id, userId)).returning();
     return user;
@@ -669,6 +733,7 @@ export class DatabaseStorage implements IStorage {
           userId: writtenRow.userId,
           canonicalMerchantDomain: writtenRow.canonicalMerchantDomain,
           billingInterval: writtenRow.billingInterval,
+          emailConnectionId: writtenRow.emailConnectionId,
         });
       } catch (err) {
         console.error("[Lifecycle] failed to apply event to subscription:", err);
@@ -1311,6 +1376,8 @@ export class DatabaseStorage implements IStorage {
       userConfirmedAt: r.user_confirmed_at,
       userDismissed: r.user_dismissed,
       userDismissedAt: r.user_dismissed_at,
+      lastEventEmailConnectionId: r.last_event_email_connection_id,
+      crossAccountConflict: r.cross_account_conflict,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
@@ -1358,7 +1425,67 @@ export class DatabaseStorage implements IStorage {
       .set({ subscriptionId: existing.id })
       .where(eq(subscriptionEvents.id, event.id));
 
-    const { transition, fields, billingIntervalChange } = applyEventToSubscription(event, existing);
+    // Account Isolation architecture, PHASES D/E/F: both the cross-account
+    // conflict protection (RULE 1-4, in applyEventToSubscription itself) and
+    // the late-scan protection below (RULE 6) are gated behind the SAME
+    // controlled-beta flag as the rest of Subscription Intelligence V1 — a
+    // non-beta user's lifecycle updates behave EXACTLY as they did before
+    // this architecture existed. See shared/schema.ts's
+    // subscriptionIntelligenceEnabled comment for why this flag is the
+    // right reuse rather than a new one.
+    const user = await this.getUserById(event.userId);
+    const crossAccountProtectionEnabled = !!user?.subscriptionIntelligenceEnabled;
+
+    let isKnownDifferentAccount: boolean | null = null;
+
+    if (crossAccountProtectionEnabled && event.emailConnectionId) {
+      const [eventConnection] = await db
+        .select()
+        .from(emailConnections)
+        .where(eq(emailConnections.id, event.emailConnectionId))
+        .limit(1);
+
+      // RULE 6: a late-committing scan writing AFTER its own connection was
+      // disconnected must not mutate the live subscription. The event row
+      // itself is already durably stored (createSubscriptionEvent() already
+      // ran, before this function is ever called) — evidence is never
+      // lost, only the billing-state APPLICATION is skipped.
+      if (eventConnection && eventConnection.disconnectedAt !== null) {
+        console.log(`[Lifecycle] event ${event.id} came from a now-disconnected connection (${eventConnection.id}) — evidence retained, billing state NOT applied`);
+        return { applied: false };
+      }
+
+      if (existing.lastEventEmailConnectionId) {
+        if (event.emailConnectionId === existing.lastEventEmailConnectionId) {
+          isKnownDifferentAccount = false; // literally the same connection row
+        } else {
+          const [lastConnection] = await db
+            .select()
+            .from(emailConnections)
+            .where(eq(emailConnections.id, existing.lastEventEmailConnectionId))
+            .limit(1);
+          if (eventConnection?.providerAccountId && lastConnection?.providerAccountId) {
+            // Compare STABLE account identity, not the session row id —
+            // reconnecting the SAME Gmail account must never look like a
+            // switch just because it's a new connection row.
+            isKnownDifferentAccount = eventConnection.providerAccountId !== lastConnection.providerAccountId;
+          } else {
+            // providerAccountId unavailable on one/both sides (a
+            // pre-PHASE-B connection whose identity was never captured) —
+            // the raw connection ids are the only signal available, and
+            // they're already known to differ.
+            isKnownDifferentAccount = true;
+          }
+        }
+      }
+    }
+
+    const { transition, fields, billingIntervalChange } = applyEventToSubscription(
+      event,
+      existing,
+      crossAccountProtectionEnabled,
+      isKnownDifferentAccount
+    );
 
     if (Object.keys(fields).length === 0) {
       // no_op, or a data_update whose event carried no actual new data —
@@ -1388,6 +1515,9 @@ export class DatabaseStorage implements IStorage {
     }
     if (billingIntervalChange) {
       console.log(`[Lifecycle] billingInterval updated: ${billingIntervalChange.from ?? "null"} -> ${billingIntervalChange.to}`);
+    }
+    if (fields.crossAccountConflict === true) {
+      console.log(`[Lifecycle] ${existing.canonicalMerchantName}: cross-account conflict detected — existing billing facts preserved, new evidence retained but not applied`);
     }
 
     const withBillingIntel = await this.runBillingIntelligence(updated);

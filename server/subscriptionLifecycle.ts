@@ -124,7 +124,7 @@ export function computeLifecycleTransition(
 
 export type LifecycleRelevantEvent = Pick<
   SubscriptionEvent,
-  "id" | "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval"
+  "id" | "eventType" | "extractedPrice" | "extractedCurrency" | "extractedDate" | "userId" | "canonicalMerchantDomain" | "billingInterval" | "emailConnectionId"
 >;
 
 export type SubscriptionLifecycleUpdate = {
@@ -135,6 +135,8 @@ export type SubscriptionLifecycleUpdate = {
     currency?: string | null;
     nextBillingDate?: string | null;
     billingInterval?: string;
+    lastEventEmailConnectionId?: string | null;
+    crossAccountConflict?: boolean;
   };
   // Populated only when billingInterval is actually changing (null -> value,
   // or value -> a DIFFERENT value) — lets the caller log the specific
@@ -158,10 +160,43 @@ const BILLING_DATA_EVENT_TYPES = new Set(["subscription_invoice", "subscription_
  * test coverage. Never auto-creates a subscription; the caller is
  * responsible for "no existing subscription found -> do nothing" (entity
  * resolution owns creation, not this engine).
+ *
+ * crossAccountProtectionEnabled (Account Isolation architecture, PHASE D):
+ * defaults false, so any caller that doesn't pass it — and every existing
+ * caller before this phase — keeps the EXACT pre-existing behavior
+ * (unconditional overwrite). When true (gated by the caller to the
+ * Subscription Intelligence controlled-beta flag, see storage.ts), applies
+ * RULES 1-4 below instead, driven by `isKnownDifferentAccount`:
+ *   RULE 1 — isKnownDifferentAccount is false or null (same account as last
+ *            time, OR provenance unknown on either side — a historical row,
+ *            an event with no connection recorded, or a connection whose
+ *            provider identity hasn't been captured yet): apply normally,
+ *            exactly like the flag-off behavior.
+ *   RULE 2 — isKnownDifferentAccount is true, new value AGREES with the
+ *            existing one: apply normally, refresh provenance, clear any
+ *            prior conflict flag.
+ *   RULE 3 — isKnownDifferentAccount is true, new value CONFLICTS: do NOT
+ *            overwrite amount/currency/nextBillingDate; set
+ *            crossAccountConflict=true; leave provenance pointing at
+ *            whichever connection supplied the PRESERVED value.
+ *   RULE 4 — existing value is unknown/null: never counts as a conflict
+ *            (there's nothing to disagree with) — falls under RULE 2's
+ *            "apply normally" path automatically.
+ *
+ * isKnownDifferentAccount is deliberately NOT "are the two emailConnectionId
+ * values different" — it must be resolved by the caller (storage.ts) by
+ * comparing the STABLE Google account identity (providerAccountId) of the
+ * two connections, never the raw email_connections row id. Reconnecting the
+ * SAME Gmail account creates a brand new connection ROW (a new session) but
+ * is still the same ACCOUNT — comparing raw ids would misclassify an
+ * ordinary reconnect-and-rescan as a cross-account switch and start
+ * flagging perfectly normal price changes as conflicts.
  */
 export function applyEventToSubscription(
   event: LifecycleRelevantEvent,
-  subscription: ShadowSubscription
+  subscription: ShadowSubscription,
+  crossAccountProtectionEnabled: boolean = false,
+  isKnownDifferentAccount: boolean | null = null
 ): SubscriptionLifecycleUpdate {
   const transition = computeLifecycleTransition(subscription.subscriptionStatus as LifecycleState, event.eventType);
 
@@ -172,9 +207,40 @@ export function applyEventToSubscription(
   }
 
   if (transition.kind !== "no_op" && BILLING_DATA_EVENT_TYPES.has(event.eventType)) {
-    if (event.extractedPrice) fields.amount = event.extractedPrice;
-    if (event.extractedCurrency) fields.currency = event.extractedCurrency;
-    if (event.extractedDate) fields.nextBillingDate = event.extractedDate;
+    const applyBillingFields = () => {
+      if (event.extractedPrice) fields.amount = event.extractedPrice;
+      if (event.extractedCurrency) fields.currency = event.extractedCurrency;
+      if (event.extractedDate) fields.nextBillingDate = event.extractedDate;
+    };
+
+    if (!crossAccountProtectionEnabled || isKnownDifferentAccount !== true) {
+      // RULE 1: protection off, same account, or provenance unknown —
+      // behave exactly as the flag-off path always has.
+      applyBillingFields();
+      if (crossAccountProtectionEnabled && event.emailConnectionId) {
+        fields.lastEventEmailConnectionId = event.emailConnectionId;
+      }
+    } else {
+      // A KNOWN different account than last time — check agreement per
+      // field. RULE 4 falls out naturally: a null existing value can never
+      // "conflict," so it always takes the RULE 2 branch.
+      const amountConflict = event.extractedPrice !== null && subscription.amount !== null && event.extractedPrice !== subscription.amount;
+      const currencyConflict = event.extractedCurrency !== null && subscription.currency !== null && event.extractedCurrency !== subscription.currency;
+
+      if (amountConflict || currencyConflict) {
+        // RULE 3: preserve the existing known value; do not touch
+        // amount/currency/nextBillingDate/provenance at all — the
+        // preserved value's provenance is still whichever connection
+        // supplied it.
+        fields.crossAccountConflict = true;
+      } else {
+        // RULE 2: different account, but agrees (or fills a gap) — apply
+        // normally, refresh provenance, clear any stale conflict flag.
+        applyBillingFields();
+        fields.lastEventEmailConnectionId = event.emailConnectionId;
+        fields.crossAccountConflict = false;
+      }
+    }
   }
 
   // Phase 3B.9.2A Step 3: billingInterval propagation is UNCONDITIONAL —
@@ -184,6 +250,11 @@ export function applyEventToSubscription(
   // interval is never overwritten with null (event.billingInterval === null
   // means "this particular email didn't mention it," not "there is no
   // interval" — the subscription's existing value, once known, stays put).
+  // Deliberately NOT part of the cross-account conflict check above — a
+  // billing frequency (monthly/annual) either matches or it's a genuinely
+  // new fact about the SAME real subscription, and the existing "never
+  // downgrade a known interval" rule already protects it independently of
+  // which connection supplied it.
   let billingIntervalChange: SubscriptionLifecycleUpdate["billingIntervalChange"] = null;
   if (event.billingInterval && event.billingInterval !== subscription.billingInterval) {
     fields.billingInterval = event.billingInterval;

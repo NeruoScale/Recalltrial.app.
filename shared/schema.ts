@@ -75,6 +75,45 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// ─── Email connection isolation architecture (Gmail Account Switching audit,
+// PHASE A) ────────────────────────────────────────────────────────────────
+//
+// COMPATIBILITY LAYER, not a replacement: users.gmailAccessToken/
+// RefreshToken/Expiry/Connected/lastEmailScanAt remain the live source of
+// truth for the existing connect/disconnect/scan flow (unchanged, still
+// single-slot) — this table is written ALONGSIDE them (dual-write), never
+// instead of them, per the explicit approved-design constraint. It exists
+// so evidence (subscription_events, eventually) can be scoped to WHICH
+// connection produced it, and so a user's connection HISTORY survives
+// across disconnect/reconnect, neither of which the single-slot users
+// columns can represent.
+//
+// providerAccountId (Google's stable `sub` claim) and emailAddress are
+// nullable because Phase A ships before Phase B's OAuth scope change
+// actually supplies them — a row can exist with only tokens+timestamps
+// until the identity fields are backfilled by a subsequent reconnect.
+export const emailConnections = pgTable("email_connections", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  provider: text("provider").notNull().default("google"),
+  providerAccountId: text("provider_account_id"),
+  emailAddress: text("email_address"),
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token"),
+  tokenExpiry: timestamp("token_expiry"),
+  connectedAt: timestamp("connected_at").defaultNow().notNull(),
+  // NULL = currently active. A partial unique index enforcing "at most one
+  // active connection per (userId, provider)" is added via raw SQL in
+  // migrate.ts (Drizzle's table-builder unique() can't express a WHERE
+  // clause) — historical (disconnected) rows for the same provider are
+  // expected and unrestricted.
+  disconnectedAt: timestamp("disconnected_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type EmailConnection = typeof emailConnections.$inferSelect;
+export type InsertEmailConnection = typeof emailConnections.$inferInsert;
+
 export const trials = pgTable("trials", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull().references(() => users.id),
@@ -230,6 +269,13 @@ export const subscriptionEvents = pgTable("subscription_events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   subscriptionId: varchar("subscription_id"),
   userId: varchar("user_id").notNull().references(() => users.id),
+  // PHASE C (Account Isolation): which email_connections row produced this
+  // event — captured once at scan start (same moment the token snapshot is
+  // captured) and stamped on every event that scan writes. NULL for every
+  // historical row written before this phase, and deliberately left NULL
+  // forever for them — there is no reliable way to reconstruct which Gmail
+  // account a pre-existing row came from, so this is never backfilled/guessed.
+  emailConnectionId: varchar("email_connection_id"),
   eventType: subscriptionEventTypeEnum("event_type").notNull(),
   sourceMessageId: text("source_message_id").notNull(),
   extractedPrice: decimal("extracted_price", { precision: 10, scale: 2 }),
@@ -488,6 +534,20 @@ export const subscriptions = pgTable("subscriptions", {
   // hides a subscription from the SAVINGS section, not the main list.
   userDismissed: boolean("user_dismissed").notNull().default(false),
   userDismissedAt: timestamp("user_dismissed_at"),
+  // PHASE D (Account Isolation): which email_connections row most recently
+  // supplied this subscription's billing facts (amount/currency/
+  // nextBillingDate) — NOT the same as sourceCanonicalEventId (that's fixed
+  // at row creation and never refreshed; this one IS refreshed on every
+  // applied billing update). NULL for rows predating this phase, or
+  // whenever the supplying event itself had no known connection.
+  lastEventEmailConnectionId: varchar("last_event_email_connection_id"),
+  // Set true when a DIFFERENT connection's evidence conflicted with the
+  // current known billing facts and was deliberately NOT applied (RULE 3) —
+  // never cleared automatically except by a later non-conflicting update
+  // from a different connection (RULE 2). Purely observational: never read
+  // by lifecycle/reminder/billing logic, matches lastPriceChange*'s own
+  // "observational only" precedent above.
+  crossAccountConflict: boolean("cross_account_conflict").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [

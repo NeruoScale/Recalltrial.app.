@@ -661,5 +661,78 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] users.subscription_intelligence_enabled:", err.message);
   }
 
+  // ── Gmail Account Switching / Fresh-Data Isolation Architecture ───────────
+  // PHASE A: email_connections foundation. Compatibility layer — the
+  // existing users Gmail columns are NOT touched or removed by any of this.
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS email_connections (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id varchar NOT NULL REFERENCES users(id),
+        provider text NOT NULL DEFAULT 'google',
+        provider_account_id text,
+        email_address text,
+        access_token text NOT NULL,
+        refresh_token text,
+        token_expiry timestamp,
+        connected_at timestamp DEFAULT now() NOT NULL,
+        disconnected_at timestamp,
+        created_at timestamp DEFAULT now() NOT NULL
+      );
+    `);
+    console.log("[migrate] email_connections table OK");
+  } catch (err: any) {
+    console.error("[migrate] email_connections table:", err.message);
+  }
+
+  try {
+    // Partial unique index: at most one ACTIVE (disconnected_at IS NULL)
+    // connection per (user, provider) — historical disconnected rows for
+    // the same provider are unrestricted. Drizzle's table-builder unique()
+    // can't express a WHERE clause, hence raw SQL here, same as every other
+    // non-trivial constraint in this file.
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS email_connections_one_active_per_provider
+        ON email_connections (user_id, provider)
+        WHERE disconnected_at IS NULL;
+    `);
+    console.log("[migrate] email_connections active-connection uniqueness index OK");
+  } catch (err: any) {
+    console.error("[migrate] email_connections active-connection uniqueness index:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS email_connections_user_id_idx ON email_connections (user_id);
+    `);
+    console.log("[migrate] email_connections.user_id index OK");
+  } catch (err: any) {
+    console.error("[migrate] email_connections.user_id index:", err.message);
+  }
+
+  // PHASE C: event provenance. Nullable — historical rows stay NULL forever
+  // (their originating Gmail account cannot be reliably reconstructed).
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_events ADD COLUMN IF NOT EXISTS email_connection_id varchar;
+    `);
+    console.log("[migrate] subscription_events.email_connection_id OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_events.email_connection_id:", err.message);
+  }
+
+  // PHASE D: safe lifecycle protection fields.
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscriptions
+        ADD COLUMN IF NOT EXISTS last_event_email_connection_id varchar,
+        ADD COLUMN IF NOT EXISTS cross_account_conflict boolean NOT NULL DEFAULT false;
+    `);
+    console.log("[migrate] subscriptions lastEventEmailConnectionId/crossAccountConflict columns OK");
+  } catch (err: any) {
+    console.error("[migrate] subscriptions lastEventEmailConnectionId/crossAccountConflict columns:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }
