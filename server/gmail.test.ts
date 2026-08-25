@@ -4,9 +4,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // path (not a refactor/extraction) — mock googleapis so no network call
 // happens, and mock the dynamically-imported ./storage so the subscription
 // detector's write can be forced to throw on demand.
+// generateAuthUrl is a vi.fn() that echoes its own input back inside the
+// "url" it returns (encoded as JSON) — every OAuth2 instance the mock
+// constructs gets its OWN generateAuthUrl mock (matching the real
+// per-call `new google.auth.OAuth2(...)` pattern gmail.ts uses), so tests
+// that need to inspect what was actually requested (Account Isolation
+// architecture, PHASE B's scope verification) can decode the returned
+// string directly rather than needing a shared mock-call-history reference.
 vi.mock("googleapis", () => ({
   google: {
-    auth: { OAuth2: vi.fn().mockImplementation(() => ({ setCredentials: vi.fn() })) },
+    auth: {
+      OAuth2: vi.fn().mockImplementation(() => ({
+        setCredentials: vi.fn(),
+        generateAuthUrl: vi.fn((opts: any) => `https://accounts.google.com/mock-auth?data=${encodeURIComponent(JSON.stringify(opts))}`),
+      })),
+    },
     gmail: vi.fn(),
   },
 }));
@@ -41,11 +53,43 @@ import {
   extractCancellationUrl,
   extractNextBillingDate,
   extractSubscriptionId,
+  generateAuthUrl,
 } from "./gmail";
 
 function b64url(s: string): string {
   return Buffer.from(s, "utf-8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
 }
+
+// Account Isolation architecture, PHASE B — Gmail Connection Identity
+// Verification: generateAuthUrl() must request openid+email ALONGSIDE the
+// existing gmail.readonly scope (never instead of it), so exchangeCodeForTokens()
+// can decode a real id_token. state must still carry the RecallTrial userId
+// (CSRF binding for the callback), unchanged from before this phase.
+describe("Account Isolation PHASE B: generateAuthUrl() requests openid+email alongside gmail.readonly", () => {
+  it("scope includes gmail.readonly, openid, and email — all three, none removed", () => {
+    const url = generateAuthUrl("user-123");
+    const encoded = new URL(url).searchParams.get("data")!;
+    const opts = JSON.parse(decodeURIComponent(encoded));
+    expect(opts.scope).toContain("https://www.googleapis.com/auth/gmail.readonly");
+    expect(opts.scope).toContain("openid");
+    expect(opts.scope).toContain("email");
+  });
+
+  it("state still carries the RecallTrial userId (CSRF binding for the callback), unchanged", () => {
+    const url = generateAuthUrl("user-123");
+    const encoded = new URL(url).searchParams.get("data")!;
+    const opts = JSON.parse(decodeURIComponent(encoded));
+    expect(opts.state).toBe("user-123");
+  });
+
+  it("still requests offline access + forced consent, unchanged — needed for a real refresh_token every time", () => {
+    const url = generateAuthUrl("user-123");
+    const encoded = new URL(url).searchParams.get("data")!;
+    const opts = JSON.parse(decodeURIComponent(encoded));
+    expect(opts.access_type).toBe("offline");
+    expect(opts.prompt).toBe("consent");
+  });
+});
 
 // Given email input -> detector -> expected structured output.
 // These are the pure, side-effect-free functions scanGmailForTrials() composes;
@@ -1034,6 +1078,38 @@ describe("Phase 3B.7.2: Gmail scan reliability (pagination, completeness, increm
       // (Phase 3B.5) is what actually turns that into "no duplicate row" —
       // this test locks in the scan layer's half of that guarantee.
       expect(secondCallArgs).toEqual(firstCallArgs);
+    });
+
+    // Account Isolation architecture, PHASE C — Gmail Connection Identity
+    // Verification: the emailConnectionId captured at scan start (routes.ts's
+    // POST /api/gmail/scan) must be stamped onto every event this scan writes.
+    it("emailConnectionId (7th param) is threaded through into every subscription_events write", async () => {
+      mockGmailClient({
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      });
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id", null, false, "connection-abc-123");
+
+      expect(storage.createSubscriptionEvent).toHaveBeenCalledTimes(1);
+      const writeArg = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+      expect(writeArg.emailConnectionId).toBe("connection-abc-123");
+    });
+
+    it("omitting emailConnectionId (a user who hasn't reconnected since PHASE C shipped) writes emailConnectionId=null, never undefined or a fabricated value", async () => {
+      mockGmailClient({
+        from: "billing@service.com",
+        subject: "Your trial ends in 3 days",
+        date: new Date().toUTCString(),
+        snippet: "your trial ends in 3 days, you will be charged $9.99",
+      });
+
+      await scanGmailForTrials("fake-access-token", null, null, "fake-user-id");
+
+      const writeArg = (storage.createSubscriptionEvent as any).mock.calls[0][0];
+      expect(writeArg.emailConnectionId).toBeNull();
     });
 
     it("reports scan-completeness fields on the returned ScanResult", async () => {
