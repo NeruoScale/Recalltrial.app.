@@ -9,6 +9,17 @@ import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Bell, ArrowLeft, Loader2, Save, Star, CreditCard, Sparkles, Mail, Link, Unlink, ScanLine, Lock, Bot } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -157,6 +168,13 @@ export default function SettingsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      // Active Connection Isolation: the vault/savings/recommendations views
+      // are now scoped to the active email connection — a disconnect empties
+      // them, so all three must be refetched immediately, not left showing
+      // stale data from the connection that just closed.
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions/savings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions/recommendations"] });
       toast({ title: "Gmail disconnected" });
     },
     onError: (err: any) => {
@@ -360,20 +378,40 @@ export default function SettingsPage() {
                     )}
                     Scan Now
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => disconnectMutation.mutate()}
-                    disabled={disconnectMutation.isPending}
-                    data-testid="button-disconnect-gmail"
-                  >
-                    {disconnectMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                    ) : (
-                      <Unlink className="h-4 w-4 mr-1" />
-                    )}
-                    Disconnect
-                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={disconnectMutation.isPending}
+                        data-testid="button-disconnect-gmail"
+                      >
+                        {disconnectMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                        ) : (
+                          <Unlink className="h-4 w-4 mr-1" />
+                        )}
+                        Disconnect
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Disconnect Gmail?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Your subscription data is linked to this Gmail account. Disconnecting it will remove these subscriptions from your active Subscription Intelligence view. If you connect another Gmail account later, your subscription data will start fresh from that account.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel data-testid="button-keep-gmail-connected">Keep Gmail connected</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => disconnectMutation.mutate()}
+                          data-testid="button-confirm-disconnect-gmail"
+                        >
+                          Disconnect Gmail
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </div>
               </div>
             )}

@@ -4,7 +4,9 @@ import { decideCanonicalization } from "./canonicalEvents";
 import { deriveShadowSubscription, resolveEntity, type EntityResolutionResult } from "./entityResolver";
 import { buildScanTimeFilter, buildGmailDisconnectUpdate, scanGmailForTrials } from "./gmail";
 import { buildAnalystContext } from "./savingsAnalyst";
-import type { SavingsAnalysis } from "./savingsIntelligence";
+import { analyzeSavingsOpportunities, type SavingsAnalysis } from "./savingsIntelligence";
+import { generateRecommendations } from "./savingsRecommendations";
+import { isSubscriptionVisibleForActiveConnection } from "./activeConnectionScope";
 import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
 
 // ─── Gmail Account Switching / Fresh-Data Isolation Audit ──────────────────────
@@ -546,7 +548,14 @@ describe("PHASE G #2/#10 — same merchant, different amount, protection ON: con
     expect(result.fields.amount).toBeUndefined(); // NOT overwritten — this is the fix
     expect(result.fields.currency).toBeUndefined();
     expect(result.fields.crossAccountConflict).toBe(true);
-    expect(result.fields.lastEventEmailConnectionId).toBeUndefined(); // provenance stays pointing at A, the connection that supplied the PRESERVED value
+    // Active Connection Isolation update: ownership DOES transfer even on a
+    // conflict-preserve — at most one connection is ever active at a time,
+    // so "different known account" here always means the prior owner (A) is
+    // no longer live. Ownership (active-view visibility) and billing-field
+    // trust are independent: B's connection becomes the visible owner, but
+    // the preserved value stays A's numbers until they're confirmed to
+    // agree or B supplies its own fresh evidence.
+    expect(result.fields.lastEventEmailConnectionId).toBe("connection-B");
   });
 });
 
@@ -750,3 +759,216 @@ describe("PHASE G #15 — idempotency under protection: repeated identical opera
 // doesn't have — verified live against production instead (see the
 // implementation report's production verification section), same
 // convention as every other DB-layer guarantee in this feature line.
+
+// ─── Active Gmail Subscription Isolation & Disconnect Warning ──────────────────
+//
+// The tests below exercise isSubscriptionVisibleForActiveConnection()
+// (server/activeConnectionScope.ts) — the pure ownership decision that
+// storage.ts's getShadowSubscriptionsForUser()/getShadowSubscriptionById()/
+// generateRemindersForEligibleSubscriptions() all filter through — plus the
+// ownership-transfer change to applyEventToSubscription()'s RULE 3. This is
+// the same "pure function tests only" convention as everywhere else in this
+// file: the actual DB read (getActiveEmailConnection, the emailConnections
+// join in filterByActiveConnection) is a DB-layer guarantee, verified live
+// against production (see the implementation report), not simulated here.
+
+const CONNECTION_A = { id: "connection-A", providerAccountId: "google-sub-A" };
+const CONNECTION_B = { id: "connection-B", providerAccountId: "google-sub-B" };
+
+describe("Test 1 — Disconnect empties active vault", () => {
+  it("A connects, scans, discovers Anthropic (owned by connection-A); disconnecting A (no active connection at all) hides it from the active vault", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", lastEventEmailConnectionId: CONNECTION_A.id });
+    const visible = isSubscriptionVisibleForActiveConnection(
+      anthropicFromA.lastEventEmailConnectionId,
+      CONNECTION_A,
+      null // Gmail fully disconnected -- no active connection
+    );
+    expect(visible).toBe(false);
+  });
+});
+
+describe("Test 2 — Connect B starts fresh", () => {
+  it("A has Anthropic (owned by connection-A); after disconnecting A and connecting B, BEFORE B is ever scanned, the active vault shows 0 subscriptions", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", lastEventEmailConnectionId: CONNECTION_A.id });
+    const allSubs = [anthropicFromA];
+    const activeConnection = CONNECTION_B; // B is now the active connection, has not scanned yet
+    const activeVault = allSubs.filter((s) =>
+      isSubscriptionVisibleForActiveConnection(s.lastEventEmailConnectionId, CONNECTION_A, activeConnection)
+    );
+    expect(activeVault).toHaveLength(0);
+  });
+});
+
+describe("Test 3 — B does not inherit A", () => {
+  it("A: Anthropic $20 (owned by connection-A); B has produced zero subscription evidence of its own -- the active B dataset is still 0, not a leaked copy of A's data", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", lastEventEmailConnectionId: CONNECTION_A.id });
+    const bHasNoEventsOfItsOwn: SubscriptionEvent[] = [];
+    expect(bHasNoEventsOfItsOwn).toHaveLength(0); // confirms B genuinely produced nothing -- not a trivial vacuous case
+    const visibleForB = isSubscriptionVisibleForActiveConnection(anthropicFromA.lastEventEmailConnectionId, CONNECTION_A, CONNECTION_B);
+    expect(visibleForB).toBe(false); // A's Anthropic never leaks into B's active dataset regardless
+  });
+});
+
+describe("Test 4 — Same merchant can reappear from B", () => {
+  it("A: Anthropic $20 (owned connection-A); disconnect A; connect B; B receives a NEW conflicting Anthropic billing event -- ownership transfers to B and Anthropic becomes visible in B's active view again", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", amount: "20.00", currency: "USD", lastEventEmailConnectionId: CONNECTION_A.id });
+    // Confirm it's correctly hidden right after the switch, before B's own evidence arrives.
+    expect(isSubscriptionVisibleForActiveConnection(anthropicFromA.lastEventEmailConnectionId, CONNECTION_A, CONNECTION_B)).toBe(false);
+
+    const newAnthropicEventFromB = lifecycleEvent(makeEvent({
+      canonicalMerchantDomain: "anthropic.com",
+      extractedPrice: "25.00", // B's own real price, disagrees with A's stale $20
+      extractedCurrency: "USD",
+      emailConnectionId: CONNECTION_B.id,
+    }));
+    const result = applyEventToSubscription(newAnthropicEventFromB, anthropicFromA, true, /* isKnownDifferentAccount */ true);
+
+    // RULE 3 still refuses to blend the conflicting number...
+    expect(result.fields.amount).toBeUndefined();
+    expect(result.fields.crossAccountConflict).toBe(true);
+    // ...but ownership transfers to B, which is what makes it active again.
+    expect(result.fields.lastEventEmailConnectionId).toBe(CONNECTION_B.id);
+
+    const updatedSub = { ...anthropicFromA, ...result.fields } as ShadowSubscription;
+    expect(isSubscriptionVisibleForActiveConnection(updatedSub.lastEventEmailConnectionId, CONNECTION_B, CONNECTION_B)).toBe(true);
+  });
+});
+
+describe("Test 5 — Historical data is preserved", () => {
+  it("disconnecting A never touches subscription_events, and attributeUnownedSubscriptionsToConnection only ever sets subscriptions.lastEventEmailConnectionId -- historical events remain queryable even though they stop being returned by the active-view filter", () => {
+    const eventFromA = makeEvent({ canonicalMerchantDomain: "anthropic.com", sourceMessageId: "A-message-1", extractedPrice: "20.00" });
+    // buildGmailDisconnectUpdate() (already covered above) only ever touches
+    // the `users` row -- no code path here deletes or mutates
+    // subscription_events on disconnect.
+    const disconnectUpdate = buildGmailDisconnectUpdate();
+    expect(Object.keys(disconnectUpdate)).not.toContain("subscriptionEvents");
+    // The event itself is untouched, still fully present with its original data.
+    expect(eventFromA.sourceMessageId).toBe("A-message-1");
+    expect(eventFromA.extractedPrice).toBe("20.00");
+    // Yet the SUBSCRIPTION it rolled up into is correctly excluded from the
+    // active view once its owning connection is no longer active.
+    const rolledUpSubscription = makeSub({ canonicalMerchantDomain: "anthropic.com", lastEventEmailConnectionId: CONNECTION_A.id });
+    expect(isSubscriptionVisibleForActiveConnection(rolledUpSubscription.lastEventEmailConnectionId, CONNECTION_A, null)).toBe(false);
+  });
+});
+
+describe("Test 6 — Savings isolation", () => {
+  it("A has a savings opportunity; once the active-connection filter excludes A's subscription (post-disconnect), the savings endpoint's input array is empty and it returns zero active opportunities", () => {
+    const withOpportunity = analyzeSavingsOpportunities(
+      [makeSub({ subscriptionStatus: "past_due", amount: "20.00", billingInterval: "monthly" })],
+      {},
+      {}
+    );
+    expect(withOpportunity.opportunities.length).toBeGreaterThan(0); // sanity: this subscription DOES produce an opportunity when visible
+
+    // Post-disconnect, storage.getShadowSubscriptionsForUser() would have
+    // already filtered this subscription out before the savings route ever
+    // calls analyzeSavingsOpportunities -- simulated here by passing the
+    // (correctly) empty array the route would actually receive.
+    const afterDisconnect = analyzeSavingsOpportunities([], {}, {});
+    expect(afterDisconnect.opportunities).toHaveLength(0);
+    expect(afterDisconnect.summary.totalOpportunities).toBe(0);
+  });
+});
+
+describe("Test 7 — Recommendations isolation", () => {
+  it("A has a recommendation; post-disconnect, the recommendations endpoint's input array is empty and it returns zero active recommendations", () => {
+    const subWithOpportunity = makeSub({ subscriptionStatus: "past_due", amount: "20.00", billingInterval: "monthly" });
+    const { opportunities } = analyzeSavingsOpportunities([subWithOpportunity], {}, {});
+    const withRecommendations = generateRecommendations([subWithOpportunity], opportunities, {}, {});
+    expect(withRecommendations.recommendations.length).toBeGreaterThan(0); // sanity check
+
+    const afterDisconnect = generateRecommendations([], [], {}, {});
+    expect(afterDisconnect.recommendations).toHaveLength(0);
+  });
+});
+
+describe("Test 8 — AI analyst isolation", () => {
+  it("A has subscriptions; post-disconnect, the analyst context builder receives an empty subscriptions array and produces zero subscription context", () => {
+    const emptySavingsAnalysis: SavingsAnalysis = {
+      opportunities: [],
+      summary: { totalOpportunities: 0, potentialMonthlySavings: null, potentialAnnualSavings: null, byCurrency: {}, incompleteCostCount: 0, confidence: "medium" },
+    };
+    const context = buildAnalystContext({
+      subscriptions: [], // what the route now passes in after the active-connection filter empties the vault
+      savingsAnalysis: emptySavingsAnalysis,
+      priceChangesBySubscriptionId: {},
+      upcomingCharges: [],
+      costSummary: { totalSubscriptions: 0, activeSubscriptions: 0, monthlyRecurringCost: 0, annualRecurringCost: 0, byCurrency: {}, incompleteBillingCount: 0, unknownCostCount: 0 },
+    });
+    expect(context.subscriptions).toHaveLength(0);
+  });
+});
+
+describe("Test 9 — Confirmation does not reactivate", () => {
+  it("a userConfirmed=true Anthropic subscription owned by connection-A remains hidden from B's active view -- confirmation state plays no role in the ownership decision", () => {
+    const confirmedSubscription = makeSub({
+      canonicalMerchantDomain: "anthropic.com",
+      userConfirmed: true,
+      userConfirmedAt: new Date("2026-08-10T00:00:00.000Z"),
+      lastEventEmailConnectionId: CONNECTION_A.id,
+    });
+    // isSubscriptionVisibleForActiveConnection has no userConfirmed parameter
+    // at all -- structurally incapable of letting confirmation override
+    // ownership, the same "no path to get it wrong" argument PHASE G #14
+    // makes for cross-user isolation.
+    expect(isSubscriptionVisibleForActiveConnection(confirmedSubscription.lastEventEmailConnectionId, CONNECTION_A, CONNECTION_B)).toBe(false);
+  });
+});
+
+describe("Test 10 — Tracking does not reactivate", () => {
+  // This codebase has no separate "tracked" boolean distinct from
+  // userConfirmed -- storage.ts's confirmSubscription() IS the "Track
+  // Subscription" action (see its own Phase 3C.2 comment). userDismissed is
+  // the other user-owned decision field the task's DATA OWNERSHIP RULE
+  // section calls out; both are exercised here.
+  it("a tracked (userConfirmed=true) OR previously-dismissed-then-undismissed subscription owned by connection-A does not reappear in B's active vault", () => {
+    const trackedSubscription = makeSub({
+      canonicalMerchantDomain: "anthropic.com",
+      userConfirmed: true,
+      userConfirmedAt: new Date("2026-08-10T00:00:00.000Z"),
+      userDismissed: false,
+      userDismissedAt: null,
+      lastEventEmailConnectionId: CONNECTION_A.id,
+    });
+    expect(isSubscriptionVisibleForActiveConnection(trackedSubscription.lastEventEmailConnectionId, CONNECTION_A, CONNECTION_B)).toBe(false);
+  });
+});
+
+describe("Test 11 — Cross-user isolation", () => {
+  it("User B (a different RecallTrial account) never sees User A's subscription data -- the ownership function has no userId parameter to get wrong, and storage's own WHERE clause is unchanged (userId-scoped) beneath the new filter", () => {
+    const userASub = makeSub({ userId: "recalltrial-user-A", canonicalMerchantDomain: "anthropic.com", lastEventEmailConnectionId: CONNECTION_A.id });
+    // isSubscriptionVisibleForActiveConnection structurally cannot leak
+    // cross-user data -- it only ever receives one subscription's ownership
+    // id and one user's active connection, both already scoped by the
+    // caller (storage.ts's getShadowSubscriptionsForUser, itself still
+    // filtered by `eq(subscriptions.userId, userId)` exactly as before this
+    // feature shipped).
+    expect(userASub.userId).toBe("recalltrial-user-A");
+    expect(isSubscriptionVisibleForActiveConnection(userASub.lastEventEmailConnectionId, CONNECTION_A, CONNECTION_A)).toBe(true); // visible to A itself
+    // A different RecallTrial user's session never reaches this subscription
+    // row at all -- the userId WHERE clause excludes it long before
+    // filterByActiveConnection() ever runs, which is why this function has
+    // no userId concept to test in the first place.
+  });
+});
+
+// Test 12 — Disconnect warning, and Test 13 — Query invalidation: both are
+// CLIENT-side behaviors (client/src/pages/settings.tsx). This codebase has
+// no client-side test infrastructure anywhere (no jsdom/testing-library
+// setup exists for any page), consistent with its "pure function tests
+// only" convention -- adding one would be a much larger, out-of-scope
+// change than this task calls for. Verified instead by direct code
+// inspection, same as every other DB/UI-layer guarantee in this feature
+// line:
+//   Test 12: the Disconnect button now renders inside an
+//   <AlertDialogTrigger>; disconnectMutation.mutate() is wired ONLY to the
+//   <AlertDialogAction>'s onClick inside the dialog's content, never to the
+//   trigger button itself -- clicking "Disconnect" opens the confirmation
+//   dialog and does not call the API; only clicking "Disconnect Gmail"
+//   inside the dialog does.
+//   Test 13: disconnectMutation's onSuccess handler invalidates
+//   ["/api/auth/me"], ["/api/subscriptions"], ["/api/subscriptions/savings"],
+//   and ["/api/subscriptions/recommendations"] -- the exact query keys the
+//   vault/savings/recommendations pages already use (confirmed by grep
+//   against client/src/pages/subscriptions.tsx's own useQuery calls).

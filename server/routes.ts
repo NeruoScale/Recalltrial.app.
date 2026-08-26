@@ -376,9 +376,21 @@ export async function registerRoutes(
 
       // PHASE B dual-write: close the matching email_connections row too.
       // Never blocks/fails the disconnect above, which already succeeded.
+      //
+      // Active Connection Isolation: BEFORE closing the row, attribute any
+      // of this user's never-explicitly-owned subscriptions to it — this is
+      // what lets the active-view filter correctly hide them the moment a
+      // DIFFERENT connection later becomes active, without retroactively
+      // hiding anything for a user who has never switched accounts. Gated
+      // behind subscriptionIntelligenceEnabled, same as every other new
+      // behavior in this feature line — a non-beta user's data is never
+      // touched by this.
       try {
         const activeConnection = await storage.getActiveEmailConnection(req.session.userId!, "google");
         if (activeConnection) {
+          if (user.subscriptionIntelligenceEnabled) {
+            await storage.attributeUnownedSubscriptionsToConnection(req.session.userId!, activeConnection.id);
+          }
           await storage.disconnectEmailConnection(activeConnection.id);
         }
       } catch (connectionErr) {

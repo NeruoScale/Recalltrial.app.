@@ -177,11 +177,24 @@ const BILLING_DATA_EVENT_TYPES = new Set(["subscription_invoice", "subscription_
  *            prior conflict flag.
  *   RULE 3 — isKnownDifferentAccount is true, new value CONFLICTS: do NOT
  *            overwrite amount/currency/nextBillingDate; set
- *            crossAccountConflict=true; leave provenance pointing at
- *            whichever connection supplied the PRESERVED value.
+ *            crossAccountConflict=true.
  *   RULE 4 — existing value is unknown/null: never counts as a conflict
  *            (there's nothing to disagree with) — falls under RULE 2's
  *            "apply normally" path automatically.
+ *
+ * Active Connection Isolation update: lastEventEmailConnectionId now
+ * transfers to the incoming event's connection in EVERY branch above,
+ * including RULE 3 — ownership (which connection's ACTIVE view this
+ * subscription belongs to) and billing-field trust (whether this event's
+ * numbers are reliable enough to overwrite) are independent questions. At
+ * most one connection is ever active per user at a time (email_connections'
+ * partial unique index), so "isKnownDifferentAccount" here always means the
+ * PRIOR owner is a connection that is no longer the live one — never two
+ * simultaneously-trusted sources. RULE 3 still refuses to blend possibly-
+ * unrelated numbers into amount/currency/nextBillingDate (that protection is
+ * unchanged), but the subscription correctly becomes visible again under
+ * whichever account is now actually connected, using whatever data is
+ * currently trusted for it.
  *
  * isKnownDifferentAccount is deliberately NOT "are the two emailConnectionId
  * values different" — it must be resolved by the caller (storage.ts) by
@@ -229,10 +242,13 @@ export function applyEventToSubscription(
 
       if (amountConflict || currencyConflict) {
         // RULE 3: preserve the existing known value; do not touch
-        // amount/currency/nextBillingDate/provenance at all — the
-        // preserved value's provenance is still whichever connection
-        // supplied it.
+        // amount/currency/nextBillingDate. Ownership still transfers (see
+        // the Active Connection Isolation note above) so the subscription
+        // remains correctly visible under whichever account is now active.
         fields.crossAccountConflict = true;
+        if (event.emailConnectionId) {
+          fields.lastEventEmailConnectionId = event.emailConnectionId;
+        }
       } else {
         // RULE 2: different account, but agrees (or fills a gap) — apply
         // normally, refresh provenance, clear any stale conflict flag.

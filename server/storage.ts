@@ -9,6 +9,7 @@ import { lookupMerchantKnowledge } from "./merchantKnowledge";
 import { buildPriceHistory } from "./priceHistory";
 import { detectPriceChanges } from "./priceChangeDetector";
 import { buildGmailDisconnectUpdate } from "./gmail";
+import { isSubscriptionVisibleForActiveConnection } from "./activeConnectionScope";
 
 // ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
 //
@@ -214,6 +215,10 @@ export interface IStorage {
   getEmailConnectionById(id: string): Promise<EmailConnection | undefined>;
   disconnectEmailConnection(id: string): Promise<EmailConnection | undefined>;
   updateEmailConnectionTokens(id: string, tokens: { accessToken: string; refreshToken: string | null; expiry: Date | null }): Promise<EmailConnection | undefined>;
+  // Active Connection Isolation: called at disconnect time to retroactively
+  // attribute any of this user's never-explicitly-owned subscriptions to the
+  // connection that's closing — see storage.ts's implementation comment.
+  attributeUnownedSubscriptionsToConnection(userId: string, connectionId: string): Promise<number>;
   toggleEmailScanning(userId: string, enabled: boolean): Promise<User>;
   toggleAiScanning(userId: string, enabled: boolean): Promise<User>;
   recordAiScanningConsent(userId: string, version: string): Promise<void>;
@@ -559,6 +564,63 @@ export class DatabaseStorage implements IStorage {
       .where(eq(emailConnections.id, id))
       .returning();
     return row;
+  }
+
+  // Active Connection Isolation: a subscription with lastEventEmailConnectionId
+  // still null has never been explicitly attributed to a connection — either
+  // it predates this architecture, or its user has never disconnected since.
+  // Called right as a connection is closing (POST /api/gmail/disconnect),
+  // this retroactively records "this connection was the only source of this
+  // user's evidence up to now," which is simply true, not fabricated — it's
+  // what lets getShadowSubscriptionsForUser() correctly hide these rows the
+  // moment a genuinely DIFFERENT connection later becomes active, without
+  // incorrectly hiding them for a user who has never switched accounts at
+  // all (see isSubscriptionVisibleForActiveConnection's null-owner rule).
+  // Never touches a subscription that already has an owner.
+  async attributeUnownedSubscriptionsToConnection(userId: string, connectionId: string): Promise<number> {
+    const result = await db
+      .update(subscriptions)
+      .set({ lastEventEmailConnectionId: connectionId, updatedAt: new Date() })
+      .where(and(eq(subscriptions.userId, userId), isNull(subscriptions.lastEventEmailConnectionId)))
+      .returning({ id: subscriptions.id });
+    return result.length;
+  }
+
+  // Active Connection Isolation: the single chokepoint every active-view
+  // consumer (vault, savings, recommendations, analyst, subscription detail)
+  // filters through. Gated behind subscriptionIntelligenceEnabled — the same
+  // controlled-beta flag every prior Account Isolation phase used — so a
+  // non-beta user's behavior is completely unchanged. Two more passthrough
+  // cases exist deliberately: a user with Gmail fully disconnected via the
+  // legacy columns (gmailConnected=false) sees zero active subscriptions
+  // regardless of ownership data; a beta user who is CONNECTED but has never
+  // been through a Phase B/C connect (no email_connections row at all yet)
+  // is left completely unfiltered — this is what keeps sikeayoub4@gmail.com
+  // (connected, never reconnected since this architecture shipped) from
+  // losing visibility into their own still-valid data the moment this ships.
+  private async filterByActiveConnection(userId: string, rows: ShadowSubscription[]): Promise<ShadowSubscription[]> {
+    if (rows.length === 0) return rows;
+
+    const user = await this.getUserById(userId);
+    if (!user?.subscriptionIntelligenceEnabled) return rows;
+    if (!user.gmailConnected) return [];
+
+    const activeConnection = await this.getActiveEmailConnection(userId, "google");
+    if (!activeConnection) return rows;
+
+    const ownerIds = Array.from(new Set(
+      rows.map((r) => r.lastEventEmailConnectionId).filter((id): id is string => id !== null)
+    ));
+    const ownerConnections = ownerIds.length
+      ? await db.select().from(emailConnections).where(inArray(emailConnections.id, ownerIds))
+      : [];
+    const ownerById = new Map(ownerConnections.map((c) => [c.id, c]));
+
+    return rows.filter((r) => isSubscriptionVisibleForActiveConnection(
+      r.lastEventEmailConnectionId,
+      r.lastEventEmailConnectionId ? ownerById.get(r.lastEventEmailConnectionId) : undefined,
+      activeConnection
+    ));
   }
 
   async toggleEmailScanning(userId: string, enabled: boolean): Promise<User> {
@@ -971,11 +1033,12 @@ export class DatabaseStorage implements IStorage {
     if (!includeDismissed) {
       conditions.push(eq(subscriptions.userDismissed, false));
     }
-    return db
+    const rows = await db
       .select()
       .from(subscriptions)
       .where(and(...conditions))
       .orderBy(subscriptions.canonicalMerchantName);
+    return this.filterByActiveConnection(userId, rows);
   }
 
   // Phase 3B.9.5: subscription vault detail view. Scoped by id AND userId in
@@ -988,7 +1051,14 @@ export class DatabaseStorage implements IStorage {
       .from(subscriptions)
       .where(and(eq(subscriptions.id, id), eq(subscriptions.userId, userId)))
       .limit(1);
-    return sub;
+    if (!sub) return undefined;
+    // Active Connection Isolation: a direct-by-id lookup must not bypass the
+    // same active-connection visibility the list view applies — otherwise a
+    // deep link would leak a disconnected account's subscription. Filtered
+    // out here comes back undefined, which the route already turns into a
+    // 404 (never 403), matching this route's existing cross-user-id pattern.
+    const [visible] = await this.filterByActiveConnection(userId, [sub]);
+    return visible;
   }
 
   // Phase 3C.2: "Track Subscription" — an explicit user acknowledgement,
@@ -1656,6 +1726,19 @@ export class DatabaseStorage implements IStorage {
 
     for (const sub of candidates) {
       if (!isEligibleForReminder(sub)) {
+        skipped++;
+        continue;
+      }
+
+      // Active Connection Isolation safety fix: Phase 4 (actually SENDING
+      // subscription reminders) has not started — this method only ever
+      // creates dormant subscription_reminders rows, never emailed today —
+      // but a subscription no longer visible in the user's active
+      // Subscription Intelligence view (its owning connection isn't the
+      // currently active one) must not accumulate reminder rows for
+      // whenever Phase 4 does start reading from this table.
+      const [visible] = await this.filterByActiveConnection(sub.userId, [sub]);
+      if (!visible) {
         skipped++;
         continue;
       }
