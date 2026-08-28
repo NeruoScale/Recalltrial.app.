@@ -11,11 +11,12 @@
 // live in storage.ts, matching where every other query in this codebase
 // lives; this module only shapes already-fetched data into the API response.
 
-import type { ShadowSubscription, SubscriptionEvent } from "@shared/schema";
+import type { ShadowSubscription, SubscriptionEvent, SubscriptionReminder } from "@shared/schema";
 import { calculateSubscriptionCosts, type SubscriptionWithCost } from "./subscriptionCostEngine";
 import type { BillingIntervalSource } from "./billingIntelligence";
 import { buildPriceHistory, type PriceHistoryResult } from "./priceHistory";
 import { detectPriceChanges, type PriceChangeResult } from "./priceChangeDetector";
+import { buildReminderPresentation, type ReminderPresentation } from "./reminderPresentation";
 
 // ─── Event type labels ──────────────────────────────────────────────────────
 //
@@ -172,6 +173,9 @@ export type SubscriptionVaultResponse = {
   // SAME priceHistory computed just above — no separate event fetch, no
   // separate DB query.
   priceChanges: PriceChangeResult;
+  // Phase 4.3 (Reminder UX): server/reminderPresentation.ts's output —
+  // user-facing reminder state only, never raw statuses/ids/lastError.
+  reminders: ReminderPresentation;
 };
 
 /**
@@ -185,10 +189,14 @@ export type SubscriptionVaultResponse = {
 export function buildSubscriptionVaultResponse(
   subscription: ShadowSubscription,
   events: SubscriptionEvent[],
-  paymentProcessor: string | null
+  paymentProcessor: string | null,
+  reminderRows: SubscriptionReminder[] = [],
+  now: Date = new Date(),
+  timezone: string = "UTC"
 ): SubscriptionVaultResponse {
   const { subscriptions: withCosts } = calculateSubscriptionCosts(subscription.userId, [subscription]);
   const costed: SubscriptionWithCost = withCosts[0];
+  const reminders = buildReminderPresentation(subscription, now, timezone, reminderRows);
 
   const history = buildHistory(events);
   const priceHistory = buildPriceHistory(events);
@@ -251,6 +259,7 @@ export function buildSubscriptionVaultResponse(
     },
     priceHistory,
     priceChanges,
+    reminders,
   };
 }
 

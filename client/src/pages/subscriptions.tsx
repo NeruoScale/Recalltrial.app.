@@ -245,6 +245,21 @@ type PriceChangeResult = {
   totalAnnualImpact: number | null;
 };
 
+// Phase 4.3 (Reminder UX): mirrors server/reminderPresentation.ts's
+// ReminderPresentation exactly. Only user-facing statuses — never PENDING/
+// SENDING/FAILED/SKIPPED, never a database id.
+type ReminderDisplayItem = {
+  type: "THREE_DAYS" | "TWO_DAYS" | "ONE_DAY";
+  label: string;
+  status: "scheduled" | "sent" | "unavailable" | "not_scheduled";
+  remindAt: string | null;
+  sentAt: string | null;
+};
+
+type ReminderPresentation =
+  | { eligible: false; reason: string; items: [] }
+  | { eligible: true; items: ReminderDisplayItem[] };
+
 type SubscriptionVaultResponse = {
   subscription: {
     id: string;
@@ -290,6 +305,7 @@ type SubscriptionVaultResponse = {
   };
   priceHistory: PriceHistoryResult;
   priceChanges: PriceChangeResult;
+  reminders: ReminderPresentation;
 };
 
 /** UI copy is deliberately factual ("Price decreased"), never attributive ("Anthropic lowered your price") — the evidence only proves the observed amount changed, not why. */
@@ -431,6 +447,28 @@ function SubscriptionDetailSheet({
                     </dd>
                   </div>
                 </dl>
+              </div>
+
+              <div>
+                <h3 className="text-sm font-semibold mb-2 flex items-center gap-1.5">
+                  <Bell className="h-3.5 w-3.5" /> Reminders
+                </h3>
+                {!data.reminders.eligible ? (
+                  <p className="text-sm text-muted-foreground" data-testid="text-detail-reminders-unavailable">
+                    {data.reminders.reason}
+                  </p>
+                ) : (
+                  <dl className="text-sm space-y-1.5">
+                    {data.reminders.items.map((item) => (
+                      <div key={item.type} className="flex justify-between">
+                        <dt className="text-muted-foreground">{item.label}</dt>
+                        <dd data-testid={`text-detail-reminder-${item.type.toLowerCase().replace(/_/g, "-")}`}>
+                          {formatReminderItemLine(item)}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
               </div>
 
               <div>
@@ -1058,6 +1096,25 @@ function formatCostLine(sub: SubscriptionWithCost): string {
 
 function formatRenewalLine(sub: SubscriptionWithCost): string {
   return sub.nextBillingDate ? `Renews ${formatDate(sub.nextBillingDate)}` : "Renewal date not available";
+}
+
+// Phase 4.3 (Reminder UX): translates server/reminderPresentation.ts's
+// user-facing statuses into display copy. Never shows the raw status word
+// (scheduled/sent/unavailable/not_scheduled) or any internal id — only this
+// sentence. "unavailable" (a delivery failure) always reads as the exact
+// task-mandated wording, never a raw provider error.
+function formatReminderItemLine(item: ReminderDisplayItem): string {
+  switch (item.status) {
+    case "sent":
+      return item.sentAt ? `Sent ${formatDate(item.sentAt)}` : "Sent";
+    case "scheduled":
+      return item.remindAt ? `Scheduled for ${formatDate(item.remindAt)}` : "Scheduled";
+    case "unavailable":
+      return "We couldn't send this reminder.";
+    case "not_scheduled":
+    default:
+      return "Not yet scheduled";
+  }
 }
 
 function SubscriptionRow({

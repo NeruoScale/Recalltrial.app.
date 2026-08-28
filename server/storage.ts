@@ -183,6 +183,7 @@ export interface IStorage {
   markSubscriptionReminderFailed(reminderId: string, error: string): Promise<void>;
   markSubscriptionReminderSkipped(reminderId: string, reason: string): Promise<void>;
   isSubscriptionCurrentlyActive(subscription: ShadowSubscription): Promise<boolean>;
+  getRemindersForSubscription(subscriptionId: string, userId: string): Promise<SubscriptionReminder[]>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -1894,6 +1895,19 @@ export class DatabaseStorage implements IStorage {
   // still observable for manual follow-up. A smarter policy (attempt caps,
   // backoff, permanent-vs-transient classification) is explicitly out of
   // scope for this phase.
+  // Phase 4.3 (Reminder UX): read-only fetch of one subscription's OWN
+  // reminder rows, scoped by BOTH subscriptionId and userId together (same
+  // ownership pattern as getShadowSubscriptionById) — a cross-user
+  // subscriptionId returns an empty array, never another user's rows. Used
+  // only to DISPLAY real reminder state (server/reminderPresentation.ts);
+  // never touches status, never claims/sends anything.
+  async getRemindersForSubscription(subscriptionId: string, userId: string): Promise<SubscriptionReminder[]> {
+    return db
+      .select()
+      .from(subscriptionReminders)
+      .where(and(eq(subscriptionReminders.subscriptionId, subscriptionId), eq(subscriptionReminders.userId, userId)));
+  }
+
   async getDueSubscriptionReminders(now: Date): Promise<(SubscriptionReminder & { subscription: ShadowSubscription; user: User })[]> {
     const results = await db
       .select({ reminder: subscriptionReminders, subscription: subscriptions, user: users })

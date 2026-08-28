@@ -695,10 +695,15 @@ export async function registerRoutes(
       if (access.status === 401) return res.status(401).json({ message: "Not authenticated" });
       if (access.status === 404) return res.status(404).json({ message: "Subscription not found" });
 
-      const events = await storage.getCanonicalEventsForSubscription(access.subscription);
+      const [events, reminderRows, user] = await Promise.all([
+        storage.getCanonicalEventsForSubscription(access.subscription),
+        storage.getRemindersForSubscription(access.subscription.id, req.session.userId!),
+        storage.getUserById(req.session.userId!),
+      ]);
       const paymentProcessor = events.find((e) => e.paymentProcessor)?.paymentProcessor ?? null;
+      const timezone = user?.timezone || "UTC";
 
-      return res.json(buildSubscriptionVaultResponse(access.subscription, events, paymentProcessor));
+      return res.json(buildSubscriptionVaultResponse(access.subscription, events, paymentProcessor, reminderRows, new Date(), timezone));
     } catch (err) {
       console.error("Get subscription detail error:", err);
       return res.status(500).json({ message: "Internal error" });
