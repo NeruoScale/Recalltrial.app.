@@ -10,6 +10,7 @@ import { buildPriceHistory } from "./priceHistory";
 import { detectPriceChanges } from "./priceChangeDetector";
 import { buildGmailDisconnectUpdate } from "./gmail";
 import { isSubscriptionVisibleForActiveConnection } from "./activeConnectionScope";
+import { resolveEntity, isEligibleForShadowSubscription, deriveShadowSubscription } from "./entityResolver";
 
 // ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
 //
@@ -1460,6 +1461,62 @@ export class DatabaseStorage implements IStorage {
   // no matching subscriptions row exists, this is a deliberate no-op: entity
   // resolution owns creation, this engine only ever updates something that
   // already exists (STEP 2's explicit rule).
+  // Phase 3D: live wiring for the entity-resolution -> Vault creation step.
+  // resolveEntity()/isEligibleForShadowSubscription()/deriveShadowSubscription()
+  // (server/entityResolver.ts) and upsertShadowSubscription() (above in this
+  // file) have existed since Phase 3B.4/3B.5 but were never actually invoked
+  // from the live scan path — audit confirmed upsertShadowSubscription() had
+  // zero callers anywhere in the codebase, so every `subscriptions` row in
+  // production was created by a one-time manual run, not an ongoing
+  // pipeline. This is the ONLY live trigger, called from
+  // applyLifecycleEventToSubscription() exactly once, the moment a
+  // genuinely new merchant (no existing subscriptions row for this
+  // userId+domain) is seen. Reuses the exact same pure resolver functions
+  // and the exact same upsertShadowSubscription() write path the shadow-mode
+  // dashboard already relied on — no parallel resolver, no new eligibility
+  // rule, no bypass of canonical merchant identity, no change to the
+  // (userId, entityKey) ownership model.
+  //
+  // Deliberately re-resolves against ALL of this user's canonical events for
+  // this domain (not just the one new event) — resolveEntity() groups by
+  // evidence across the whole history, so a merchant that only becomes
+  // eligible once a SECOND corroborating event arrives (e.g. name_match,
+  // which requires events.length >= 2) is correctly picked up the moment
+  // that second event lands, not just on a domain_match's very first event.
+  private async attemptShadowSubscriptionCreation(event: LifecycleRelevantEvent): Promise<ShadowSubscription | undefined> {
+    const domainEvents = await db
+      .select()
+      .from(subscriptionEvents)
+      .where(and(
+        eq(subscriptionEvents.userId, event.userId),
+        // Safe: the only caller (applyLifecycleEventToSubscription) already
+        // returns early when canonicalMerchantDomain is null, before this
+        // method is ever reached.
+        eq(subscriptionEvents.canonicalMerchantDomain, event.canonicalMerchantDomain!),
+        eq(subscriptionEvents.isCanonical, true)
+      ));
+
+    const groups = resolveEntity(domainEvents);
+    const group = groups.find((g) => g.events.some((e) => e.id === event.id));
+    if (!group || !isEligibleForShadowSubscription(group)) {
+      return undefined;
+    }
+
+    const candidate = deriveShadowSubscription(group);
+    if (!candidate) return undefined;
+
+    // Never fabricate provenance: this is exactly the connection this event
+    // itself already carried (resolved by the caller before
+    // createSubscriptionEvent() ran), or null if none was available —
+    // never guessed, never backfilled from unrelated history.
+    const created = await this.upsertShadowSubscription({
+      ...candidate,
+      lastEventEmailConnectionId: event.emailConnectionId ?? null,
+    });
+    console.log(`[Lifecycle] created new Vault subscription for ${created.canonicalMerchantName} (${created.resolutionMethod}, entityKey=${created.entityKey})`);
+    return created;
+  }
+
   async applyLifecycleEventToSubscription(event: LifecycleRelevantEvent): Promise<{
     applied: boolean;
     transition?: LifecycleTransitionResult;
@@ -1469,7 +1526,7 @@ export class DatabaseStorage implements IStorage {
       return { applied: false };
     }
 
-    const [existing] = await db
+    const [existingRow] = await db
       .select()
       .from(subscriptions)
       .where(and(
@@ -1477,6 +1534,23 @@ export class DatabaseStorage implements IStorage {
         eq(subscriptions.canonicalMerchantDomain, event.canonicalMerchantDomain)
       ))
       .limit(1);
+
+    let existing: ShadowSubscription | undefined = existingRow;
+
+    // Phase 3D: no subscriptions/Vault row exists yet for this user+domain —
+    // attempt to create one via the SAME entity-resolution pipeline the
+    // shadow-mode dashboard has always used (resolveEntity() ->
+    // isEligibleForShadowSubscription() -> deriveShadowSubscription() ->
+    // upsertShadowSubscription(), all in ./entityResolver and above in this
+    // file). This is the ONLY live trigger for that pipeline — see
+    // attemptShadowSubscriptionCreation()'s own comment for why it was
+    // previously never invoked. If the evidence isn't eligible yet (e.g. a
+    // single low-confidence event, an ambiguous platform name), this
+    // correctly creates nothing — the exact same conservative bar the
+    // shadow-mode dashboard always enforced, unchanged.
+    if (!existing) {
+      existing = await this.attemptShadowSubscriptionCreation(event);
+    }
 
     if (!existing) {
       return { applied: false };
