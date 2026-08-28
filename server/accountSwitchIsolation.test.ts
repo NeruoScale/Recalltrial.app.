@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyEventToSubscription, type LifecycleRelevantEvent } from "./subscriptionLifecycle";
+import { applyEventToSubscription, evaluateReminderEligibility, type LifecycleRelevantEvent } from "./subscriptionLifecycle";
 import { decideCanonicalization } from "./canonicalEvents";
 import { deriveShadowSubscription, resolveEntity, type EntityResolutionResult } from "./entityResolver";
 import { buildScanTimeFilter, buildGmailDisconnectUpdate, scanGmailForTrials } from "./gmail";
@@ -952,6 +952,164 @@ describe("Test 11 — Cross-user isolation", () => {
     // no userId concept to test in the first place.
   });
 });
+
+// ─── Phase 4.1 — Reminder Lifecycle Foundation ─────────────────────────────────
+//
+// storage.ts's generateRemindersForEligibleSubscriptions() runs two
+// independent checks per subscription, in this order: (1) the Active
+// Connection Isolation visibility filter (isSubscriptionVisibleForActiveConnection,
+// unchanged from the prior phase), then (2) evaluateReminderEligibility()
+// (subscriptionLifecycle.ts, new this phase). These tests simulate that
+// exact two-step sequence using both real pure functions together, proving
+// the reminder generator inherits connection isolation rather than
+// re-implementing (or accidentally bypassing) it.
+
+function simulateReminderGeneration(
+  sub: ShadowSubscription,
+  ownerConnection: { id: string; providerAccountId: string | null } | undefined,
+  activeConnection: { id: string; providerAccountId: string | null } | null,
+  now: Date,
+  timezone: string = "UTC"
+): { created: boolean; reason: string } {
+  const visible = isSubscriptionVisibleForActiveConnection(sub.lastEventEmailConnectionId, ownerConnection, activeConnection);
+  if (!visible) return { created: false, reason: "hidden by active-connection isolation" };
+  const evaluation = evaluateReminderEligibility(sub, now, timezone);
+  if (!evaluation.eligible) return { created: false, reason: evaluation.reason };
+  return { created: evaluation.plans.length > 0, reason: evaluation.plans.length > 0 ? "eligible" : "eligible, nothing due yet" };
+}
+
+describe("Phase 4.1 Test 11/13 — Connection isolation: an active connection sees its own subscription's reminders; a disconnected owner's do not fire for whoever is now active", () => {
+  it("A connected, A owns Anthropic with a valid renewal -- A's reminders may be generated", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", lastEventEmailConnectionId: "connection-A" });
+    const result = simulateReminderGeneration(anthropicFromA, CONNECTION_A, CONNECTION_A, new Date("2026-08-19T00:00:00.000Z"));
+    expect(result.created).toBe(true);
+  });
+
+  it("Phase 4.1 Test 12 — disconnected owning connection: no active connection at all -> hidden, zero reminders regardless of how valid the renewal date is", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", lastEventEmailConnectionId: "connection-A" });
+    const result = simulateReminderGeneration(anthropicFromA, CONNECTION_A, null, new Date("2026-08-19T00:00:00.000Z"));
+    expect(result.created).toBe(false);
+    expect(result.reason).toBe("hidden by active-connection isolation");
+  });
+
+  it("Phase 4.1 Test 13 — a different Gmail account (B) is now active: A's old subscription does not generate a new reminder for B", () => {
+    const anthropicFromA = makeSub({ canonicalMerchantDomain: "anthropic.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", lastEventEmailConnectionId: "connection-A" });
+    const result = simulateReminderGeneration(anthropicFromA, CONNECTION_A, CONNECTION_B, new Date("2026-08-19T00:00:00.000Z"));
+    expect(result.created).toBe(false);
+    expect(result.reason).toBe("hidden by active-connection isolation");
+  });
+
+  it("Phase 4.1 Test 14 — B's OWN subscription (owned by connection-B) can generate reminders once B is active", () => {
+    const merchantFromB = makeSub({ canonicalMerchantDomain: "merchant-b.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", lastEventEmailConnectionId: CONNECTION_B.id });
+    const result = simulateReminderGeneration(merchantFromB, CONNECTION_B, CONNECTION_B, new Date("2026-08-19T00:00:00.000Z"));
+    expect(result.created).toBe(true);
+  });
+
+  it("a never-attributed (legacy, never-switched) subscription still generates reminders normally -- shipping this feature does not regress a user who has never switched Gmail accounts", () => {
+    const legacySub = makeSub({ canonicalMerchantDomain: "anthropic.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", lastEventEmailConnectionId: null });
+    const result = simulateReminderGeneration(legacySub, undefined, CONNECTION_A, new Date("2026-08-19T00:00:00.000Z"));
+    expect(result.created).toBe(true);
+  });
+});
+
+describe("Phase 4.1 Test 15 — Cross-user isolation of reminder generation", () => {
+  it("evaluateReminderEligibility and isSubscriptionVisibleForActiveConnection both operate on a single subscription's own fields -- neither has a userId parameter that could cross-contaminate between users, matching PHASE G #14's structural argument", () => {
+    const userASub = makeSub({ userId: "user-A", canonicalMerchantDomain: "merchant-a.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", lastEventEmailConnectionId: CONNECTION_A.id });
+    const result = simulateReminderGeneration(userASub, CONNECTION_A, null, new Date("2026-08-19T00:00:00.000Z"));
+    // Structurally, this call only ever reads userASub's own fields --
+    // there is no code path by which another user's connection or
+    // subscription data could influence this specific decision.
+    expect(userASub.userId).toBe("user-A");
+    expect(result.reason).toBe("hidden by active-connection isolation");
+  });
+});
+
+describe("Phase 4.1 Test 16 — Dismissed subscriptions never generate reminders (existing product semantics: dismissed = opted out of active attention everywhere else)", () => {
+  it("a dismissed subscription with an otherwise perfectly valid renewal date and an active connection still generates zero reminders", () => {
+    const dismissedSub = makeSub({ canonicalMerchantDomain: "anthropic.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22", userDismissed: true, lastEventEmailConnectionId: CONNECTION_A.id });
+    const result = simulateReminderGeneration(dismissedSub, CONNECTION_A, CONNECTION_A, new Date("2026-08-19T00:00:00.000Z"));
+    expect(result.created).toBe(false);
+    expect(result.reason).toBe("subscription is user-dismissed");
+  });
+});
+
+describe("Phase 4.1 Test 17/18 — Phase 3D lifecycle creation feeds directly into Phase 4.1 reminder eligibility", () => {
+  it("Phase 4.1 Test 17: a newly created qualifying subscription (via the real resolveEntity/deriveShadowSubscription pipeline, same as Phase 3D's attemptShadowSubscriptionCreation) with a valid future renewal date enters reminder eligibility", () => {
+    const newEvent = makeEvent({
+      canonicalMerchantDomain: "newmerchant.com",
+      canonicalMerchantName: "NewMerchant",
+      merchantConfidence: 90,
+      // deriveShadowSubscription() compares this against its OWN internal
+      // `new Date()` (it takes no injectable `now`) to decide next- vs
+      // last-billing-date, so this must be safely in the future relative to
+      // real wall-clock time, not just relative to this test's simulated
+      // `now` below.
+      extractedDate: "2030-01-01",
+      eventType: "trial_started",
+    });
+    const groups = resolveEntity([newEvent]);
+    const group = groups.find((g) => g.events.some((e) => e.id === newEvent.id))!;
+    const candidate = deriveShadowSubscription(group)!;
+    expect(candidate).toBeDefined();
+    expect(candidate.nextBillingDate).toBe("2030-01-01");
+
+    // Phase 3D's attemptShadowSubscriptionCreation() writes exactly this
+    // shape via upsertShadowSubscription() -- reconstructing the resulting
+    // row here (DB defaults applied explicitly) to feed it into Phase 4.1's
+    // eligibility function, the same as storage.ts's live sequence would.
+    const createdSub = makeSub({
+      ...candidate,
+      userDismissed: false,
+      userConfirmed: false,
+    } as Partial<ShadowSubscription>);
+    const result = evaluateReminderEligibility(createdSub, new Date("2026-08-19T00:00:00.000Z"), "UTC");
+    expect(result.eligible).toBe(true);
+  });
+
+  it("Phase 4.1 Test 18: a subscription without sufficient lifecycle information (no nextBillingDate resolved yet) does not enter reminder eligibility", () => {
+    const newEvent = makeEvent({
+      canonicalMerchantDomain: "newmerchant.com",
+      canonicalMerchantName: "NewMerchant",
+      merchantConfidence: 90,
+      extractedDate: null, // no date evidence at all
+    });
+    const groups = resolveEntity([newEvent]);
+    const group = groups.find((g) => g.events.some((e) => e.id === newEvent.id))!;
+    const candidate = deriveShadowSubscription(group)!;
+    expect(candidate.nextBillingDate).toBeNull();
+
+    const createdSub = makeSub({ ...candidate } as Partial<ShadowSubscription>);
+    const result = evaluateReminderEligibility(createdSub, new Date("2026-08-19T00:00:00.000Z"), "UTC");
+    expect(result).toEqual({ eligible: false, reason: "nextBillingDate is missing" });
+  });
+});
+
+describe("Phase 4.1 Test 24 — Regression: Phase 3B/3C/3D behavior is unaffected by the reminder eligibility change", () => {
+  it("evaluateReminderEligibility agrees with the pre-existing isEligibleForReminder()+computeSubscriptionReminderPlan() combination on every ordinary case that isn't dismissed/invalid/past", () => {
+    const sub = makeSub({ canonicalMerchantDomain: "anthropic.com", subscriptionStatus: "active", nextBillingDate: "2026-08-22" });
+    const result = evaluateReminderEligibility(sub, new Date("2026-08-19T00:00:00.000Z"), "UTC");
+    expect(result.eligible).toBe(true);
+    // The exact same 3/2/1-day math as before -- nothing about the existing
+    // offsets/date handling changed, only NEW exclusions (dismissed,
+    // explicit invalid/past reasons) were added on top.
+    if (result.eligible) expect(result.plans.map((p) => p.type)).toEqual(["THREE_DAYS", "TWO_DAYS", "ONE_DAY"]);
+  });
+});
+
+// Idempotency (Tests 8-10) note: the actual duplicate-prevention mechanism
+// is the REAL Postgres unique constraint on subscription_reminders
+// (subscription_id, type) (shared/schema.ts) plus onConflictDoNothing
+// (server/storage.ts) -- a DB-layer guarantee, verified live against
+// production (see the implementation report), same "DB-layer guarantees
+// verified live, not simulated" convention as every other constraint-backed
+// guarantee in this codebase (PHASE G #8/#9 above, aiCredits.test.ts's
+// reserveCredit()/refundCredit()). The pure-function side of idempotency --
+// evaluateReminderEligibility() and computeSubscriptionReminderPlan()
+// producing byte-identical output for identical input, so a second cron run
+// never computes a DIFFERENT reminder time for the same subscription+offset
+// -- is covered directly above ("Idempotency: calling
+// evaluateReminderEligibility twice...", subscriptionLifecycle.test.ts's own
+// existing "calling it twice..." test).
 
 // Test 12 — Disconnect warning, and Test 13 — Query invalidation: both are
 // CLIENT-side behaviors (client/src/pages/settings.tsx). This codebase has

@@ -4,6 +4,7 @@ import {
   applyEventToSubscription,
   isEligibleForReminder,
   computeSubscriptionReminderPlan,
+  evaluateReminderEligibility,
   type LifecycleState,
   type LifecycleRelevantEvent,
 } from "./subscriptionLifecycle";
@@ -252,6 +253,115 @@ describe("Phase 3B.8 Step 5: computeSubscriptionReminderPlan — 3/2/1-day math"
     expect(a.map((p) => ({ type: p.type, at: p.remindAt.getTime() }))).toEqual(
       b.map((p) => ({ type: p.type, at: p.remindAt.getTime() }))
     );
+  });
+});
+
+describe("Phase 4.1: evaluateReminderEligibility — explicit eligibility + reason", () => {
+  const now = new Date("2026-08-19T00:00:00.000Z");
+
+  it("Eligibility 1: a valid future renewal date is eligible and returns the real plans", () => {
+    const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2027-08-01" });
+    const result = evaluateReminderEligibility(sub, now, "UTC");
+    expect(result.eligible).toBe(true);
+    if (result.eligible) {
+      expect(result.targetDate).toBe("2027-08-01");
+      expect(result.plans.map((p) => p.type)).toEqual(["THREE_DAYS", "TWO_DAYS", "ONE_DAY"]);
+    }
+  });
+
+  it("Eligibility 2: a missing nextBillingDate is ineligible with an explicit reason", () => {
+    const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: null });
+    const result = evaluateReminderEligibility(sub, now, "UTC");
+    expect(result).toEqual({ eligible: false, reason: "nextBillingDate is missing" });
+  });
+
+  it("Eligibility 3: an unparseable nextBillingDate is ineligible with an explicit reason, never silently treated as 'not due yet'", () => {
+    const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "not-a-real-date" });
+    const result = evaluateReminderEligibility(sub, now, "UTC");
+    expect(result.eligible).toBe(false);
+    if (!result.eligible) {
+      expect(result.reason).toContain("could not be parsed");
+    }
+  });
+
+  it("Eligibility 4: a renewal date that has already fully elapsed produces no ordinary reminder, with an explicit reason", () => {
+    const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-01-01" });
+    const result = evaluateReminderEligibility(sub, now, "UTC");
+    expect(result.eligible).toBe(false);
+    if (!result.eligible) {
+      expect(result.reason).toContain("already passed");
+    }
+  });
+
+  it("past_due/cancelled/expired remain ineligible via the same lifecycle-state check isEligibleForReminder already enforced", () => {
+    for (const status of ["past_due", "canceled", "expired"] as const) {
+      const sub = makeSubscription({ subscriptionStatus: status, nextBillingDate: "2027-08-01" });
+      const result = evaluateReminderEligibility(sub, now, "UTC");
+      expect(result.eligible).toBe(false);
+    }
+  });
+
+  it("User state 16: a user-dismissed subscription is ineligible even with an otherwise perfectly valid future date", () => {
+    const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2027-08-01", userDismissed: true });
+    const result = evaluateReminderEligibility(sub, now, "UTC");
+    expect(result).toEqual({ eligible: false, reason: "subscription is user-dismissed" });
+  });
+
+  it("User state 15: userConfirmed has no bearing on eligibility either way -- both an unconfirmed and a confirmed subscription with the same valid date are equally eligible", () => {
+    const unconfirmed = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2027-08-01", userConfirmed: false });
+    const confirmed = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2027-08-01", userConfirmed: true });
+    const a = evaluateReminderEligibility(unconfirmed, now, "UTC");
+    const b = evaluateReminderEligibility(confirmed, now, "UTC");
+    expect(a.eligible).toBe(true);
+    expect(b.eligible).toBe(true);
+  });
+
+  describe("Time boundaries 19-23: exact offset windows", () => {
+    it("Boundary 19: renewal exactly 3 days away produces all three offsets", () => {
+      const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-08-22" });
+      const result = evaluateReminderEligibility(sub, now, "UTC");
+      expect(result.eligible).toBe(true);
+      if (result.eligible) expect(result.plans.map((p) => p.type)).toEqual(["THREE_DAYS", "TWO_DAYS", "ONE_DAY"]);
+    });
+
+    it("Boundary 20: renewal exactly 2 days away produces TWO_DAYS and ONE_DAY only (THREE_DAYS would already be in the past)", () => {
+      const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-08-21" });
+      const result = evaluateReminderEligibility(sub, now, "UTC");
+      expect(result.eligible).toBe(true);
+      if (result.eligible) expect(result.plans.map((p) => p.type)).toEqual(["TWO_DAYS", "ONE_DAY"]);
+    });
+
+    it("Boundary 21: renewal exactly 1 day away produces ONE_DAY only", () => {
+      const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-08-20" });
+      const result = evaluateReminderEligibility(sub, now, "UTC");
+      expect(result.eligible).toBe(true);
+      if (result.eligible) expect(result.plans.map((p) => p.type)).toEqual(["ONE_DAY"]);
+    });
+
+    it("Boundary 22: renewal less than 1 day away produces zero offsets but is still 'eligible' (not yet due, not passed)", () => {
+      const almostNow = new Date("2026-08-19T23:58:00.000Z"); // renewal end-of-day is 2026-08-19T23:59:59Z, ~2 min away
+      const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-08-19" });
+      const result = evaluateReminderEligibility(sub, almostNow, "UTC");
+      // minFutureMs (2 minutes) guard means even ONE_DAY has already elapsed
+      // its own remindAt point -- but the renewal itself is still technically
+      // in the future by 1-2 minutes, so this is "no plans yet", not "passed".
+      expect(result.eligible).toBe(true);
+      if (result.eligible) expect(result.plans).toHaveLength(0);
+    });
+
+    it("Boundary 23: a renewal far beyond the 3-day window is still eligible with all three offsets scheduled ahead of time -- this system pre-schedules reminders, it does not wait until the window opens to create the rows", () => {
+      const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-09-30" });
+      const result = evaluateReminderEligibility(sub, now, "UTC");
+      expect(result.eligible).toBe(true);
+      if (result.eligible) expect(result.plans.map((p) => p.type)).toEqual(["THREE_DAYS", "TWO_DAYS", "ONE_DAY"]);
+    });
+  });
+
+  it("Idempotency: calling evaluateReminderEligibility twice with identical inputs is fully deterministic", () => {
+    const sub = makeSubscription({ subscriptionStatus: "active", nextBillingDate: "2026-08-22" });
+    const a = evaluateReminderEligibility(sub, now, "UTC");
+    const b = evaluateReminderEligibility(sub, now, "UTC");
+    expect(a).toEqual(b);
   });
 });
 

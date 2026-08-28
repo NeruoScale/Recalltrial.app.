@@ -300,6 +300,72 @@ export function isEligibleForReminder(subscription: ShadowSubscription): boolean
   return true;
 }
 
+// ─── Reminder eligibility, Phase 4.1 ────────────────────────────────────────
+//
+// evaluateReminderEligibility() is the single decision point Phase 4.1 asked
+// for: "is this subscription eligible, which date is used, which offsets
+// apply, and why/why not" — all in one explicit, traceable result, instead
+// of a bare boolean plus a separately-called date-math function whose empty
+// output is indistinguishable from "not due yet" and "date is broken."
+//
+// Composes the existing isEligibleForReminder() checks with two additions:
+//
+//   - userDismissed exclusion: every OTHER Subscription Intelligence
+//     consumer (the vault's own default, savings, recommendations, analyst
+//     — see storage.ts's getShadowSubscriptionsForUser) already treats a
+//     dismissed subscription as opted out of active attention. Reminder
+//     generation calling raw db.select().from(subscriptions) never applied
+//     that exclusion — this closes that gap rather than inventing a new
+//     product rule from nothing.
+//   - an explicit "already passed" reason, computed by asking
+//     computeSubscriptionReminderPlan() for the real, timezone-aware answer
+//     first (the single source of truth for the offsets), and only
+//     reporting "passed" when it ALSO agrees no plan resulted — never a
+//     second, competing date calculation.
+//
+// Deliberately NOT decided here: connection-isolation visibility (a
+// DB-dependent concern already owned by storage.ts's filterByActiveConnection,
+// applied by the caller before this function ever runs — same layering as
+// every other Subscription Intelligence consumer) and userConfirmed (no
+// other part of the product gates functionality on it today — it's a UX
+// trust signal, "Detected" vs "Tracked," not a functional switch — so
+// requiring it here would be a new invented rule this phase has no basis to
+// add).
+export type ReminderEligibilityResult =
+  | { eligible: false; reason: string }
+  | { eligible: true; targetDate: string; plans: SubscriptionReminderPlan[] };
+
+export function evaluateReminderEligibility(
+  subscription: ShadowSubscription,
+  now: Date,
+  timezone: string
+): ReminderEligibilityResult {
+  if (subscription.subscriptionStatus !== "active" && subscription.subscriptionStatus !== "trial") {
+    return { eligible: false, reason: `subscriptionStatus '${subscription.subscriptionStatus}' is not active/trial` };
+  }
+  if (subscription.resolutionStatus !== "resolved") {
+    return { eligible: false, reason: `resolutionStatus '${subscription.resolutionStatus}' is not resolved` };
+  }
+  if (subscription.userDismissed) {
+    return { eligible: false, reason: "subscription is user-dismissed" };
+  }
+  if (!subscription.nextBillingDate) {
+    return { eligible: false, reason: "nextBillingDate is missing" };
+  }
+
+  const endOfDayUtc = new Date(subscription.nextBillingDate + "T23:59:59.000Z");
+  if (Number.isNaN(endOfDayUtc.getTime())) {
+    return { eligible: false, reason: `nextBillingDate '${subscription.nextBillingDate}' could not be parsed` };
+  }
+
+  const plans = computeSubscriptionReminderPlan(subscription.nextBillingDate, now, timezone);
+  if (plans.length === 0 && endOfDayUtc.getTime() <= now.getTime()) {
+    return { eligible: false, reason: `nextBillingDate '${subscription.nextBillingDate}' has already passed` };
+  }
+
+  return { eligible: true, targetDate: subscription.nextBillingDate, plans };
+}
+
 export type SubscriptionReminderPlan = { remindAt: Date; type: "THREE_DAYS" | "TWO_DAYS" | "ONE_DAY" };
 
 // getTimezoneOffsetMs() now lives in ./reminderScheduling.ts (extracted from

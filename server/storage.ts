@@ -3,7 +3,7 @@ import { eq, and, isNull, lte, sql, count, desc, inArray, type SQLWrapper } from
 import { db } from "./db";
 import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, emailConnections, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder, type EmailConnection, type InsertEmailConnection } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
-import { applyEventToSubscription, isEligibleForReminder, computeSubscriptionReminderPlan, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
+import { applyEventToSubscription, evaluateReminderEligibility, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
 import { lookupMerchantKnowledge } from "./merchantKnowledge";
 import { buildPriceHistory } from "./priceHistory";
@@ -1790,6 +1790,15 @@ export class DatabaseStorage implements IStorage {
   // onConflictDoNothing — idempotent under concurrent/repeated calls, not
   // just sequential ones. Scoped to one subscription when subscriptionId is
   // given, otherwise runs across every eligible subscription.
+  //
+  // Phase 4.1: eligibility is now decided by evaluateReminderEligibility()
+  // (subscriptionLifecycle.ts) instead of the separate
+  // isEligibleForReminder()/computeSubscriptionReminderPlan() calls this
+  // used before — same underlying date math and lifecycle-state checks
+  // (nothing here got stricter or looser on those), plus the userDismissed
+  // exclusion and explicit ineligibility reasons that function documents.
+  // Active Connection Isolation filtering (unchanged, added in the prior
+  // phase) still runs first, since it's the DB-dependent check.
   async generateRemindersForEligibleSubscriptions(subscriptionId?: string): Promise<{ created: number; skipped: number }> {
     const candidates = subscriptionId
       ? await db.select().from(subscriptions).where(eq(subscriptions.id, subscriptionId))
@@ -1799,11 +1808,6 @@ export class DatabaseStorage implements IStorage {
     let skipped = 0;
 
     for (const sub of candidates) {
-      if (!isEligibleForReminder(sub)) {
-        skipped++;
-        continue;
-      }
-
       // Active Connection Isolation safety fix: Phase 4 (actually SENDING
       // subscription reminders) has not started — this method only ever
       // creates dormant subscription_reminders rows, never emailed today —
@@ -1819,9 +1823,13 @@ export class DatabaseStorage implements IStorage {
 
       const user = await db.select().from(users).where(eq(users.id, sub.userId)).limit(1);
       const timezone = user[0]?.timezone || "UTC";
-      const plans = computeSubscriptionReminderPlan(sub.nextBillingDate!, new Date(), timezone);
+      const evaluation = evaluateReminderEligibility(sub, new Date(), timezone);
+      if (!evaluation.eligible) {
+        skipped++;
+        continue;
+      }
 
-      for (const plan of plans) {
+      for (const plan of evaluation.plans) {
         const inserted = await db.insert(subscriptionReminders).values({
           subscriptionId: sub.id,
           userId: sub.userId,
