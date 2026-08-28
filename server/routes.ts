@@ -237,6 +237,7 @@ export async function registerRoutes(
       emailScanningEnabled: user.emailScanningEnabled,
       aiScanningEnabled: user.aiScanningEnabled,
       subscriptionIntelligenceEnabled: user.subscriptionIntelligenceEnabled,
+      subscriptionRemindersEnabled: user.subscriptionRemindersEnabled,
       aiCreditsIncluded: user.aiCreditsIncluded,
       aiCreditsPurchased: user.aiCreditsPurchased,
       aiCreditsTotal: user.aiCreditsIncluded + user.aiCreditsPurchased,
@@ -285,7 +286,7 @@ export async function registerRoutes(
     try {
       const user = await storage.getUserById(req.session.userId!);
       if (!user) return res.status(401).json({ message: "User not found" });
-      return res.json({ aiScanningEnabled: user.aiScanningEnabled });
+      return res.json({ aiScanningEnabled: user.aiScanningEnabled, subscriptionRemindersEnabled: user.subscriptionRemindersEnabled });
     } catch (err) {
       console.error("Get user settings error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -294,15 +295,42 @@ export async function registerRoutes(
 
   app.patch("/api/user/settings", requireAuth, async (req: Request, res: Response) => {
     try {
-      const { aiScanningEnabled } = req.body;
+      const userId = req.session.userId!;
+      const { aiScanningEnabled, subscriptionRemindersEnabled } = req.body;
+
+      // Phase 4.4: a separate concept from aiScanningEnabled and from
+      // subscriptionIntelligenceEnabled (the controlled-beta gate) — never
+      // gated behind either. userId is always the AUTHENTICATED session's
+      // own id (requireAuth above), never anything the client supplies, so
+      // a user can only ever change their own preference.
+      if (subscriptionRemindersEnabled !== undefined) {
+        if (typeof subscriptionRemindersEnabled !== "boolean") {
+          return res.status(400).json({ message: "subscriptionRemindersEnabled must be a boolean" });
+        }
+        const updated = await storage.toggleSubscriptionReminders(userId, subscriptionRemindersEnabled);
+        if (subscriptionRemindersEnabled) {
+          // Turning back ON: only ever revives rows THIS mechanism itself
+          // skipped (exact-reason-matched) — never touches SENT/SENDING or
+          // anything skipped for an unrelated cause.
+          await storage.reviveSkippedRemindersForUser(userId, new Date());
+        } else {
+          // Turning OFF: immediate, non-destructive — existing PENDING/
+          // FAILED rows become SKIPPED (never deleted); SENT history is
+          // untouched. The delivery pipeline's own re-check is still the
+          // authoritative enforcement regardless of this step succeeding.
+          await storage.skipPendingRemindersForDisabledUser(userId);
+        }
+        return res.json({ subscriptionRemindersEnabled: updated.subscriptionRemindersEnabled });
+      }
+
       if (typeof aiScanningEnabled !== "boolean") {
         return res.status(400).json({ message: "aiScanningEnabled must be a boolean" });
       }
-      const updated = await storage.toggleAiScanning(req.session.userId!, aiScanningEnabled);
+      const updated = await storage.toggleAiScanning(userId, aiScanningEnabled);
       // Phase 3B.9.10 STEP 7: consent is recorded only on the transition TO
       // enabled — disabling never clears the historical consent record.
       if (aiScanningEnabled) {
-        await storage.recordAiScanningConsent(req.session.userId!, "1.0");
+        await storage.recordAiScanningConsent(userId, "1.0");
       }
       return res.json({ aiScanningEnabled: updated.aiScanningEnabled });
     } catch (err) {
@@ -703,7 +731,7 @@ export async function registerRoutes(
       const paymentProcessor = events.find((e) => e.paymentProcessor)?.paymentProcessor ?? null;
       const timezone = user?.timezone || "UTC";
 
-      return res.json(buildSubscriptionVaultResponse(access.subscription, events, paymentProcessor, reminderRows, new Date(), timezone));
+      return res.json(buildSubscriptionVaultResponse(access.subscription, events, paymentProcessor, reminderRows, new Date(), timezone, user?.subscriptionRemindersEnabled ?? true));
     } catch (err) {
       console.error("Get subscription detail error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -1422,7 +1450,7 @@ export async function registerRoutes(
     for (const reminder of dueReminders) {
       const timezone = reminder.user.timezone || "UTC";
       const stillActive = await storage.isSubscriptionCurrentlyActive(reminder.subscription);
-      const decision = decideReminderDeliveryAction(reminder.subscription, stillActive, now, timezone);
+      const decision = decideReminderDeliveryAction(reminder.subscription, stillActive, now, timezone, reminder.user.subscriptionRemindersEnabled);
       if (decision.action === "skip") {
         await storage.markSubscriptionReminderSkipped(reminder.id, decision.reason);
         skipped++;
@@ -1613,6 +1641,25 @@ export async function registerRoutes(
       subscriptionReminders = { error: err.message || "Internal error" };
     }
 
+    // Step 2.4 (Phase 4.4): stale-SENDING recovery — runs BEFORE delivery so
+    // any row recovered this tick is immediately eligible for the delivery
+    // pass right below, rather than waiting for tomorrow's cron (this cron
+    // runs once daily per railway.cron-reminders.json's "0 9 * * *"
+    // schedule). Configurable via SUBSCRIPTION_REMINDER_SENDING_TIMEOUT_MINUTES;
+    // 30 minutes is the conservative default when unset — comfortably
+    // longer than a real in-flight Resend call, comfortably shorter than
+    // the ~24h until the next legitimate cron run.
+    let staleSendingRecovery: { recoveredCount: number } | { error: string };
+    try {
+      const timeoutMinutes = Number(process.env.SUBSCRIPTION_REMINDER_SENDING_TIMEOUT_MINUTES) || 30;
+      const recoveredCount = await storage.recoverStaleSendingReminders(timeoutMinutes, new Date());
+      staleSendingRecovery = { recoveredCount };
+      console.log(`[Cron] stale SENDING recovery (timeout=${timeoutMinutes}min): recovered ${recoveredCount}`);
+    } catch (err: any) {
+      console.error("[Cron] stale SENDING recovery failed:", err);
+      staleSendingRecovery = { error: err.message || "Internal error" };
+    }
+
     // Step 2.5 (Phase 4.2): subscription-reminder DELIVERY — runs in the
     // same cron tick, immediately after generation, matching this task's
     // "generate missing reminder rows -> load due PENDING reminders" flow.
@@ -1645,7 +1692,7 @@ export async function registerRoutes(
       aiCreditGrants = { granted: 0, error: err.message || "Internal error" };
     }
 
-    return res.json({ trialReminders, subscriptionReminders, subscriptionReminderDelivery, aiCreditGrants });
+    return res.json({ trialReminders, subscriptionReminders, staleSendingRecovery, subscriptionReminderDelivery, aiCreditGrants });
   });
 
   app.post("/api/cron/email-scan", async (req: Request, res: Response) => {

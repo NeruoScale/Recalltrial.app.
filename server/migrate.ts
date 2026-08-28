@@ -748,5 +748,26 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] reminder_status.SENDING:", err.message);
   }
 
+  // Phase 4.4: reminder preference (default true — preserves existing
+  // behavior for every current user) and the stale-SENDING claim timestamp.
+  // Both additive; no existing row is touched or deleted.
+  try {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_reminders_enabled boolean NOT NULL DEFAULT true;
+    `);
+    console.log("[migrate] users.subscription_reminders_enabled OK");
+  } catch (err: any) {
+    console.error("[migrate] users.subscription_reminders_enabled:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE subscription_reminders ADD COLUMN IF NOT EXISTS claimed_at timestamp;
+    `);
+    console.log("[migrate] subscription_reminders.claimed_at OK");
+  } catch (err: any) {
+    console.error("[migrate] subscription_reminders.claimed_at:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

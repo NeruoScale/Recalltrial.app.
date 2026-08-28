@@ -78,6 +78,14 @@ export const users = pgTable("users", {
   // intelligence layer built on top of it. No self-serve toggle route
   // exists yet; enabled per-user by direct operator action during the beta.
   subscriptionIntelligenceEnabled: boolean("subscription_intelligence_enabled").notNull().default(false),
+  // Phase 4.4: separate from subscriptionIntelligenceEnabled by design — a
+  // reminder preference and controlled-beta access are different concepts
+  // (the task's own explicit instruction). Defaults TRUE, unlike every other
+  // opt-in boolean on this table, because reminder generation/delivery
+  // already runs unconditionally for every eligible subscription (Phase
+  // 4.1/4.2 predate this column) — defaulting false would silently take
+  // reminders away from existing users the moment this column exists.
+  subscriptionRemindersEnabled: boolean("subscription_reminders_enabled").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -587,6 +595,12 @@ export const subscriptionReminders = pgTable("subscription_reminders", {
   provider: text("provider").default("resend"),
   providerMessageId: text("provider_message_id"),
   lastError: text("last_error"),
+  // Phase 4.4: set exactly when a row transitions PENDING/FAILED -> SENDING
+  // (the atomic claim) — the only way to distinguish a claim made seconds
+  // ago (still in-flight, must not be touched) from one that's been stuck
+  // for hours (the process that claimed it almost certainly crashed).
+  // Cleared back to null whenever a row leaves SENDING for any reason.
+  claimedAt: timestamp("claimed_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   unique("subscription_reminders_sub_type_unique").on(table.subscriptionId, table.type),

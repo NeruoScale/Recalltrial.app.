@@ -90,13 +90,24 @@ function deriveItemStatus(
  * evaluateReminderEligibility()'s plans would predict (e.g. a row for an
  * eligible offset simply hasn't been generated yet by the next cron tick) —
  * that's correct, not a bug: this module describes reality, not a forecast.
+ *
+ * `remindersEnabledForUser` (Phase 4.4) is checked FIRST, before
+ * subscription-level eligibility — if the user has turned subscription
+ * reminders off, nothing can be "scheduled" regardless of how valid the
+ * renewal date is. Reuses the existing eligible:false presentation state
+ * rather than inventing a new one (the task's own explicit preference).
  */
 export function buildReminderPresentation(
   subscription: ShadowSubscription,
   now: Date,
   timezone: string,
-  existingReminders: Pick<SubscriptionReminder, "type" | "status" | "remindAt" | "sentAt">[]
+  existingReminders: Pick<SubscriptionReminder, "type" | "status" | "remindAt" | "sentAt">[],
+  remindersEnabledForUser: boolean = true
 ): ReminderPresentation {
+  if (!remindersEnabledForUser) {
+    return { eligible: false, reason: "You've turned off subscription reminders in Settings.", items: [] };
+  }
+
   const evaluation = evaluateReminderEligibility(subscription, now, timezone);
   if (!evaluation.eligible) {
     return { eligible: false, reason: describeIneligibleReason(subscription), items: [] };

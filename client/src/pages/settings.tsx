@@ -134,6 +134,24 @@ export default function SettingsPage() {
     },
   });
 
+  // Phase 4.4: separate from toggleAiScanningMutation/subscriptionIntelligenceEnabled
+  // by design -- reminders can be turned off independent of both AI scanning
+  // and controlled-beta access.
+  const toggleSubscriptionRemindersMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("PATCH", "/api/user/settings", { subscriptionRemindersEnabled: enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      // The Subscription Vault detail Sheet's Reminders section reflects
+      // this preference -- refetch so it's never stale after a toggle.
+      queryClient.invalidateQueries({ queryKey: ["/api/subscriptions"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to update reminder preference", description: err.message, variant: "destructive" });
+    },
+  });
+
   const purchaseAiCreditsMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/billing/purchase-ai-credits", { pack: "1000" });
@@ -472,6 +490,34 @@ export default function SettingsPage() {
                 </Button>
               </div>
             )}
+          </CardContent>
+        </Card>
+
+        <Card data-testid="card-subscription-reminders">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Bell className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-base">Subscription reminders</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="switch-subscription-reminders" className="text-sm font-normal">
+                {user.subscriptionRemindersEnabled ? "On" : "Off"}
+              </Label>
+              <Switch
+                id="switch-subscription-reminders"
+                checked={!!user.subscriptionRemindersEnabled}
+                onCheckedChange={(v) => toggleSubscriptionRemindersMutation.mutate(v)}
+                disabled={toggleSubscriptionRemindersMutation.isPending}
+                data-testid="switch-subscription-reminders"
+              />
+            </div>
+            <p className="text-sm text-muted-foreground" data-testid="text-subscription-reminders-description">
+              {user.subscriptionRemindersEnabled
+                ? "We'll send reminders before eligible subscription renewals."
+                : "Subscription renewal reminders are disabled."}
+            </p>
           </CardContent>
         </Card>
 

@@ -17,6 +17,7 @@ type AuthUser = {
   emailScanningEnabled: boolean;
   aiScanningEnabled: boolean;
   subscriptionIntelligenceEnabled: boolean;
+  subscriptionRemindersEnabled: boolean;
   aiCreditsIncluded: number;
   aiCreditsPurchased: number;
   aiCreditsTotal: number;

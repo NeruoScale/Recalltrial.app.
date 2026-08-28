@@ -215,3 +215,40 @@ describe("buildReminderPresentation — real row state mapping (Phase 4.3 Test 9
     expect(a).toEqual(b);
   });
 });
+
+describe("buildReminderPresentation — Phase 4.4 global reminder preference honesty", () => {
+  it("remindersEnabledForUser=false overrides everything else -- never shows 'scheduled' for a reminder that cannot actually be delivered", () => {
+    const sub = makeSub();
+    const row = makeReminderRow({ type: "THREE_DAYS", status: "PENDING", remindAt: new Date("2026-08-19T12:00:00.000Z") });
+    const result = buildReminderPresentation(sub, NOW, "UTC", [row], false);
+    expect(result.eligible).toBe(false);
+    if (!result.eligible) {
+      expect(result.reason).toBe("You've turned off subscription reminders in Settings.");
+      expect(result.items).toEqual([]);
+    }
+  });
+
+  it("the disabled-preference override takes priority even over an otherwise-perfectly-eligible subscription with a real PENDING row", () => {
+    const sub = makeSub({ subscriptionStatus: "active", nextBillingDate: "2026-08-22" });
+    const rows = [
+      makeReminderRow({ type: "THREE_DAYS", status: "PENDING" }),
+      makeReminderRow({ type: "TWO_DAYS", status: "PENDING" }),
+      makeReminderRow({ type: "ONE_DAY", status: "PENDING" }),
+    ];
+    const result = buildReminderPresentation(sub, NOW, "UTC", rows, false);
+    expect(result.eligible).toBe(false);
+  });
+
+  it("omitting remindersEnabledForUser defaults to true (backward compatible with every pre-Phase-4.4 call site)", () => {
+    const sub = makeSub();
+    const withDefault = buildReminderPresentation(sub, NOW, "UTC", []);
+    const explicitTrue = buildReminderPresentation(sub, NOW, "UTC", [], true);
+    expect(withDefault).toEqual(explicitTrue);
+  });
+
+  it("enabled (true) does not change any existing behavior -- eligible subscription still shows its real items", () => {
+    const sub = makeSub();
+    const result = buildReminderPresentation(sub, NOW, "UTC", [], true);
+    expect(result.eligible).toBe(true);
+  });
+});

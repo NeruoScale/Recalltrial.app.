@@ -26,16 +26,42 @@
 import type { ShadowSubscription } from "@shared/schema";
 import { evaluateReminderEligibility } from "./subscriptionLifecycle";
 
+// Phase 4.4: the exact, stable marker used BOTH when a reminder is skipped
+// because the user turned subscription reminders off (here, and in
+// storage.ts's skipPendingRemindersForDisabledUser()) AND when deciding
+// whether a SKIPPED row is safe to revive on re-enable
+// (storage.ts's reviveSkippedRemindersForUser()) — an exact-string match,
+// never a fragile parse of a dynamic reason, so re-enabling can never
+// accidentally resurrect a reminder that was skipped for an unrelated cause
+// (dismissed subscription, hidden by connection isolation, etc).
+export const REMINDERS_DISABLED_SKIP_REASON = "reminders disabled by user";
+
 export type ReminderDeliveryDecision =
   | { action: "skip"; reason: string }
   | { action: "attempt" };
+
+// Phase 4.4: the cutoff computation for stale-SENDING recovery, extracted
+// as its own pure function for the same reason getTimezoneOffsetMs() was
+// extracted earlier in this project — small, easy-to-get-subtly-wrong
+// arithmetic deserves a direct unit test, independent of the SQL query
+// (storage.ts's recoverStaleSendingReminders) that actually selects rows
+// against it. A claimedAt exactly AT the cutoff is intentionally NOT stale
+// (matches the SQL's strict `<` comparison) — only strictly older claims
+// are recovered.
+export function computeStaleSendingCutoff(now: Date, timeoutMinutes: number): Date {
+  return new Date(now.getTime() - timeoutMinutes * 60 * 1000);
+}
 
 export function decideReminderDeliveryAction(
   subscription: ShadowSubscription,
   isCurrentlyActive: boolean,
   now: Date,
-  timezone: string
+  timezone: string,
+  remindersEnabledForUser: boolean = true
 ): ReminderDeliveryDecision {
+  if (!remindersEnabledForUser) {
+    return { action: "skip", reason: REMINDERS_DISABLED_SKIP_REASON };
+  }
   const evaluation = evaluateReminderEligibility(subscription, now, timezone);
   if (!evaluation.eligible) {
     return { action: "skip", reason: `no longer eligible: ${evaluation.reason}` };

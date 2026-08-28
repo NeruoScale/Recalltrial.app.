@@ -192,11 +192,12 @@ export function buildSubscriptionVaultResponse(
   paymentProcessor: string | null,
   reminderRows: SubscriptionReminder[] = [],
   now: Date = new Date(),
-  timezone: string = "UTC"
+  timezone: string = "UTC",
+  remindersEnabledForUser: boolean = true
 ): SubscriptionVaultResponse {
   const { subscriptions: withCosts } = calculateSubscriptionCosts(subscription.userId, [subscription]);
   const costed: SubscriptionWithCost = withCosts[0];
-  const reminders = buildReminderPresentation(subscription, now, timezone, reminderRows);
+  const reminders = buildReminderPresentation(subscription, now, timezone, reminderRows, remindersEnabledForUser);
 
   const history = buildHistory(events);
   const priceHistory = buildPriceHistory(events);

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, isNull, lte, sql, count, desc, inArray, type SQLWrapper } from "drizzle-orm";
+import { eq, and, isNull, lte, lt, sql, count, desc, inArray, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
 import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, emailConnections, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder, type EmailConnection, type InsertEmailConnection } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
@@ -10,6 +10,7 @@ import { buildPriceHistory } from "./priceHistory";
 import { detectPriceChanges } from "./priceChangeDetector";
 import { buildGmailDisconnectUpdate } from "./gmail";
 import { isSubscriptionVisibleForActiveConnection } from "./activeConnectionScope";
+import { REMINDERS_DISABLED_SKIP_REASON, computeStaleSendingCutoff } from "./reminderDelivery";
 import { resolveEntity, isEligibleForShadowSubscription, deriveShadowSubscription } from "./entityResolver";
 
 // ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
@@ -184,6 +185,10 @@ export interface IStorage {
   markSubscriptionReminderSkipped(reminderId: string, reason: string): Promise<void>;
   isSubscriptionCurrentlyActive(subscription: ShadowSubscription): Promise<boolean>;
   getRemindersForSubscription(subscriptionId: string, userId: string): Promise<SubscriptionReminder[]>;
+  toggleSubscriptionReminders(userId: string, enabled: boolean): Promise<User>;
+  skipPendingRemindersForDisabledUser(userId: string): Promise<number>;
+  reviveSkippedRemindersForUser(userId: string, now: Date): Promise<number>;
+  recoverStaleSendingReminders(timeoutMinutes: number, now: Date): Promise<number>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -1847,7 +1852,19 @@ export class DatabaseStorage implements IStorage {
       }
 
       const user = await db.select().from(users).where(eq(users.id, sub.userId)).limit(1);
-      const timezone = user[0]?.timezone || "UTC";
+      const owner = user[0];
+
+      // Phase 4.4: the reminder preference is a separate concept from the
+      // Subscription Intelligence beta gate (checked above via
+      // filterByActiveConnection's own subscriptionIntelligenceEnabled
+      // branch) — a user with reminders turned off must never accumulate
+      // new PENDING rows, regardless of beta status.
+      if (owner && !owner.subscriptionRemindersEnabled) {
+        skipped++;
+        continue;
+      }
+
+      const timezone = owner?.timezone || "UTC";
       const evaluation = evaluateReminderEligibility(sub, new Date(), timezone);
       if (!evaluation.eligible) {
         skipped++;
@@ -1930,7 +1947,7 @@ export class DatabaseStorage implements IStorage {
   // caller's WHERE clause matches zero rows and gets back undefined.
   async claimSubscriptionReminderForSending(reminderId: string): Promise<SubscriptionReminder | undefined> {
     const [row] = await db.update(subscriptionReminders)
-      .set({ status: "SENDING" })
+      .set({ status: "SENDING", claimedAt: new Date() })
       .where(and(
         eq(subscriptionReminders.id, reminderId),
         inArray(subscriptionReminders.status, ["PENDING", "FAILED"])
@@ -1946,6 +1963,7 @@ export class DatabaseStorage implements IStorage {
         sentAt: new Date(),
         providerMessageId: providerMessageId || null,
         lastError: null,
+        claimedAt: null,
       })
       .where(eq(subscriptionReminders.id, reminderId));
   }
@@ -1955,6 +1973,7 @@ export class DatabaseStorage implements IStorage {
       .set({
         status: "FAILED",
         lastError: error,
+        claimedAt: null,
       })
       .where(eq(subscriptionReminders.id, reminderId));
   }
@@ -1971,8 +1990,126 @@ export class DatabaseStorage implements IStorage {
       .set({
         status: "SKIPPED",
         lastError: reason,
+        claimedAt: null,
       })
       .where(eq(subscriptionReminders.id, reminderId));
+  }
+
+  // ── Phase 4.4: reminder preference ─────────────────────────────────────
+  //
+  // Separate from subscriptionIntelligenceEnabled by design (the task's own
+  // explicit instruction) — a reminder preference and controlled-beta
+  // access are different concepts. Defaults true (see shared/schema.ts's
+  // column comment).
+  async toggleSubscriptionReminders(userId: string, enabled: boolean): Promise<User> {
+    const [user] = await db.update(users).set({ subscriptionRemindersEnabled: enabled }).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  // Called immediately when a user turns reminders OFF — the delivery-time
+  // re-check (decideReminderDeliveryAction) is the truly authoritative
+  // enforcement (it runs on every attempt regardless), but this makes the
+  // change visible immediately (the detail Sheet, and any due-but-unclaimed
+  // reminder) instead of waiting for the next delivery pass to discover it.
+  // Never touches SENT (already delivered, historical) or SENDING (already
+  // in-flight — let that attempt finish, the stale-recovery path handles it
+  // if it never does). Reuses the SKIPPED status and the exact
+  // REMINDERS_DISABLED_SKIP_REASON marker — never a raw delete.
+  async skipPendingRemindersForDisabledUser(userId: string): Promise<number> {
+    const result = await db.update(subscriptionReminders)
+      .set({ status: "SKIPPED", lastError: REMINDERS_DISABLED_SKIP_REASON, claimedAt: null })
+      .where(and(
+        eq(subscriptionReminders.userId, userId),
+        inArray(subscriptionReminders.status, ["PENDING", "FAILED"])
+      ))
+      .returning({ id: subscriptionReminders.id });
+    return result.length;
+  }
+
+  // Called immediately when a user turns reminders back ON. Only ever
+  // touches rows this exact mechanism skipped (matched by the EXACT
+  // REMINDERS_DISABLED_SKIP_REASON string, never a fuzzy/partial match) —
+  // a row skipped for any other reason (dismissed subscription, hidden by
+  // active-connection isolation, an invalid date) is left untouched, since
+  // turning reminders back on doesn't change any of those other facts.
+  // Recomputes remindAt fresh via evaluateReminderEligibility()'s own plan
+  // (Phase 4.1) rather than reusing the row's old, now-stale remindAt — an
+  // offset whose window has already fully passed while reminders were off
+  // is correctly left SKIPPED, not resurrected with a backdated time.
+  async reviveSkippedRemindersForUser(userId: string, now: Date): Promise<number> {
+    const candidates = await db
+      .select({ reminder: subscriptionReminders, subscription: subscriptions })
+      .from(subscriptionReminders)
+      .innerJoin(subscriptions, eq(subscriptionReminders.subscriptionId, subscriptions.id))
+      .where(and(
+        eq(subscriptionReminders.userId, userId),
+        eq(subscriptionReminders.status, "SKIPPED"),
+        eq(subscriptionReminders.lastError, REMINDERS_DISABLED_SKIP_REASON)
+      ));
+
+    if (candidates.length === 0) return 0;
+
+    const owner = await this.getUserById(userId);
+    const timezone = owner?.timezone || "UTC";
+    let revived = 0;
+
+    for (const { reminder, subscription } of candidates) {
+      const isActive = await this.isSubscriptionCurrentlyActive(subscription);
+      if (!isActive) continue; // still hidden -- leave it skipped, let the normal pipeline pick it up once visible again
+
+      const evaluation = evaluateReminderEligibility(subscription, now, timezone);
+      if (!evaluation.eligible) continue;
+      const freshPlan = evaluation.plans.find((p) => p.type === reminder.type);
+      if (!freshPlan) continue; // this specific offset's window has already passed
+
+      await db.update(subscriptionReminders)
+        .set({ status: "PENDING", remindAt: freshPlan.remindAt, lastError: null })
+        .where(eq(subscriptionReminders.id, reminder.id));
+      revived++;
+    }
+
+    return revived;
+  }
+
+  // ── Phase 4.4: stale-SENDING recovery ───────────────────────────────────
+  //
+  // A single atomic UPDATE: any row still SENDING after `timeoutMinutes`
+  // (configured via SUBSCRIPTION_REMINDER_SENDING_TIMEOUT_MINUTES, read by
+  // the caller in routes.ts) is treated as an abandoned claim — the process
+  // that claimed it almost certainly crashed or was killed before it could
+  // call the provider. Recovered rows go back to PENDING so the NORMAL
+  // delivery pipeline (which re-checks eligibility, active-connection
+  // ownership, and the reminder preference on every attempt) picks them up
+  // on its very next pass within the SAME cron invocation — no duplicate
+  // ownership/eligibility logic is implemented here.
+  //
+  // Honest tradeoff (documented per the task's explicit requirement): this
+  // is an AT-LEAST-ONCE recovery, not exactly-once. If the original process
+  // is somehow still alive and completes its send AFTER this recovery marks
+  // the row PENDING again, a duplicate email is possible — the installed
+  // Resend SDK has no idempotency-key support (verified in Phase 4.2), so
+  // there is no provider-level guard against this. This is judged
+  // acceptable because: (1) the cron that claims reminders is a one-shot
+  // HTTP-triggered process with restartPolicyType: NEVER (see
+  // railway.cron-reminders.json), not a long-lived daemon, so a claim still
+  // "in flight" past a conservative multi-minute timeout is overwhelmingly
+  // more likely dead than genuinely slow; (2) the cron itself only runs
+  // once per day (0 9 * * *), so the realistic duplicate-window is between
+  // one day's run and the next, not between rapid retries.
+  async recoverStaleSendingReminders(timeoutMinutes: number, now: Date): Promise<number> {
+    const cutoff = computeStaleSendingCutoff(now, timeoutMinutes);
+    const result = await db.update(subscriptionReminders)
+      .set({
+        status: "PENDING",
+        claimedAt: null,
+        lastError: "recovered from a stale SENDING state (previous delivery attempt never completed)",
+      })
+      .where(and(
+        eq(subscriptionReminders.status, "SENDING"),
+        lt(subscriptionReminders.claimedAt, cutoff)
+      ))
+      .returning({ id: subscriptionReminders.id });
+    return result.length;
   }
 
   async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {
