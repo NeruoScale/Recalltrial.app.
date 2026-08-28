@@ -173,6 +173,17 @@ export interface IStorage {
   }>;
   generateRemindersForEligibleSubscriptions(subscriptionId?: string): Promise<{ created: number; skipped: number }>;
 
+  // Phase 4.2: subscription-reminder DELIVERY. Mirrors the shape of the
+  // legacy trial-reminder methods below (getDueReminders/claimAndSendReminder/
+  // markReminderSent/markReminderFailed) — same pattern, new table, no
+  // parallel mechanism invented.
+  getDueSubscriptionReminders(now: Date): Promise<(SubscriptionReminder & { subscription: ShadowSubscription; user: User })[]>;
+  claimSubscriptionReminderForSending(reminderId: string): Promise<SubscriptionReminder | undefined>;
+  markSubscriptionReminderSent(reminderId: string, providerMessageId?: string): Promise<void>;
+  markSubscriptionReminderFailed(reminderId: string, error: string): Promise<void>;
+  markSubscriptionReminderSkipped(reminderId: string, reason: string): Promise<void>;
+  isSubscriptionCurrentlyActive(subscription: ShadowSubscription): Promise<boolean>;
+
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
   getDueReminders(now: Date): Promise<(Reminder & { trial: Trial; user: User })[]>;
@@ -622,6 +633,18 @@ export class DatabaseStorage implements IStorage {
       r.lastEventEmailConnectionId ? ownerById.get(r.lastEventEmailConnectionId) : undefined,
       activeConnection
     ));
+  }
+
+  // Phase 4.2: a single-subscription public wrapper around
+  // filterByActiveConnection() — used by the reminder DELIVERY path to
+  // re-check ownership immediately before sending (the disconnect race
+  // condition: a subscription can become hidden between when its reminder
+  // row was created and when it becomes due). Same exact mechanism the
+  // vault/savings/recommendations/analyst already rely on — no second
+  // ownership check invented.
+  async isSubscriptionCurrentlyActive(subscription: ShadowSubscription): Promise<boolean> {
+    const [visible] = await this.filterByActiveConnection(subscription.userId, [subscription]);
+    return !!visible;
   }
 
   async toggleEmailScanning(userId: string, enabled: boolean): Promise<User> {
@@ -1808,13 +1831,14 @@ export class DatabaseStorage implements IStorage {
     let skipped = 0;
 
     for (const sub of candidates) {
-      // Active Connection Isolation safety fix: Phase 4 (actually SENDING
-      // subscription reminders) has not started — this method only ever
-      // creates dormant subscription_reminders rows, never emailed today —
-      // but a subscription no longer visible in the user's active
-      // Subscription Intelligence view (its owning connection isn't the
-      // currently active one) must not accumulate reminder rows for
-      // whenever Phase 4 does start reading from this table.
+      // Active Connection Isolation safety fix: this method only creates
+      // reminder ROWS — it never sends anything itself (see
+      // getDueSubscriptionReminders()/deliverDueSubscriptionReminders()-style
+      // delivery methods below for Phase 4.2's actual sending path, which
+      // re-checks this same ownership independently right before send). A
+      // subscription no longer visible in the user's active Subscription
+      // Intelligence view must not accumulate reminder rows in the first
+      // place.
       const [visible] = await this.filterByActiveConnection(sub.userId, [sub]);
       if (!visible) {
         skipped++;
@@ -1845,6 +1869,96 @@ export class DatabaseStorage implements IStorage {
     }
 
     return { created, skipped };
+  }
+
+  // ── Phase 4.2: subscription-reminder DELIVERY ──────────────────────────
+  //
+  // Mirrors the legacy trial-reminder delivery methods (getDueReminders/
+  // claimAndSendReminder/markReminderSent/markReminderFailed) exactly in
+  // spirit — same atomic-claim-via-conditional-UPDATE pattern, same
+  // separation between "load candidates," "claim," and "finalize." The one
+  // deliberate difference: claiming moves status to SENDING (not straight to
+  // SENT) — see shared/schema.ts's reminderStatusEnum comment and this
+  // phase's implementation report for why: it makes a crash between claim
+  // and the actual provider call an OBSERVABLE stuck state
+  // (status='SENDING') instead of a silent false-positive SENT with no
+  // email ever sent.
+  //
+  // Retry policy: FAILED rows are treated as due again on every subsequent
+  // cron tick (see the status filter below), forever, with no attempt
+  // counter, no backoff, no cap — the smallest mechanism that satisfies
+  // "a transient failure must not permanently lose the reminder." This is
+  // deliberately unable to distinguish a transient network blip from a
+  // permanently-broken address; both retry identically. lastError remains
+  // visible on the row throughout, so a persistently-FAILED reminder is
+  // still observable for manual follow-up. A smarter policy (attempt caps,
+  // backoff, permanent-vs-transient classification) is explicitly out of
+  // scope for this phase.
+  async getDueSubscriptionReminders(now: Date): Promise<(SubscriptionReminder & { subscription: ShadowSubscription; user: User })[]> {
+    const results = await db
+      .select({ reminder: subscriptionReminders, subscription: subscriptions, user: users })
+      .from(subscriptionReminders)
+      .innerJoin(subscriptions, eq(subscriptionReminders.subscriptionId, subscriptions.id))
+      .innerJoin(users, eq(subscriptionReminders.userId, users.id))
+      .where(and(
+        inArray(subscriptionReminders.status, ["PENDING", "FAILED"]),
+        lte(subscriptionReminders.remindAt, now)
+      ));
+
+    return results.map((r) => ({ ...r.reminder, subscription: r.subscription, user: r.user }));
+  }
+
+  // The atomic claim: a single conditional UPDATE is what actually prevents
+  // two concurrent cron workers from both sending the same reminder — the
+  // SELECT in getDueSubscriptionReminders() above is just candidate
+  // discovery and confers no ownership by itself. Whichever caller's UPDATE
+  // commits first flips status away from PENDING/FAILED, so the other
+  // caller's WHERE clause matches zero rows and gets back undefined.
+  async claimSubscriptionReminderForSending(reminderId: string): Promise<SubscriptionReminder | undefined> {
+    const [row] = await db.update(subscriptionReminders)
+      .set({ status: "SENDING" })
+      .where(and(
+        eq(subscriptionReminders.id, reminderId),
+        inArray(subscriptionReminders.status, ["PENDING", "FAILED"])
+      ))
+      .returning();
+    return row;
+  }
+
+  async markSubscriptionReminderSent(reminderId: string, providerMessageId?: string): Promise<void> {
+    await db.update(subscriptionReminders)
+      .set({
+        status: "SENT",
+        sentAt: new Date(),
+        providerMessageId: providerMessageId || null,
+        lastError: null,
+      })
+      .where(eq(subscriptionReminders.id, reminderId));
+  }
+
+  async markSubscriptionReminderFailed(reminderId: string, error: string): Promise<void> {
+    await db.update(subscriptionReminders)
+      .set({
+        status: "FAILED",
+        lastError: error,
+      })
+      .where(eq(subscriptionReminders.id, reminderId));
+  }
+
+  // SKIPPED is terminal (never retried) — distinct from FAILED, which IS
+  // retried. Used when a re-eligibility check at delivery time finds the
+  // reminder no longer applicable (dismissed, hidden by active-connection
+  // isolation, status no longer active/trial, date became invalid) — a
+  // deliberate decision not to send, not a delivery error. Reuses the
+  // existing lastError column for the human-readable reason rather than
+  // adding a new column.
+  async markSubscriptionReminderSkipped(reminderId: string, reason: string): Promise<void> {
+    await db.update(subscriptionReminders)
+      .set({
+        status: "SKIPPED",
+        lastError: reason,
+      })
+      .where(eq(subscriptionReminders.id, reminderId));
   }
 
   async getSuggestedTrials(userId: string): Promise<SuggestedTrial[]> {

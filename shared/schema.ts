@@ -5,7 +5,13 @@ import { z } from "zod";
 
 export const trialStatusEnum = pgEnum("trial_status", ["ACTIVE", "CANCELED"]);
 export const reminderTypeEnum = pgEnum("reminder_type", ["THREE_DAYS", "TWO_DAYS", "ONE_DAY", "TWENTY_FOUR_HOURS", "THREE_HOURS", "SIX_HOURS", "ONE_HOUR"]);
-export const reminderStatusEnum = pgEnum("reminder_status", ["PENDING", "SENT", "SKIPPED", "FAILED"]);
+// SENDING (Phase 4.2): the atomic claim state for subscription_reminders
+// delivery — a row transitions PENDING -> SENDING via a single conditional
+// UPDATE ... WHERE status='PENDING', which is what makes the claim atomic
+// under concurrent cron workers. Added here (not a separate enum) because
+// this type is shared with the legacy `reminders` (trial) table; the trial
+// delivery path is untouched and never produces this value.
+export const reminderStatusEnum = pgEnum("reminder_status", ["PENDING", "SENDING", "SENT", "SKIPPED", "FAILED"]);
 export const planEnum = pgEnum("plan", ["FREE", "PLUS", "PRO", "PREMIUM"]);
 export const userSubStatusEnum = pgEnum("user_sub_status", ["ACTIVE", "CANCELED", "PAST_DUE", "INCOMPLETE"]);
 

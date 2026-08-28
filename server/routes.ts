@@ -4,7 +4,8 @@ import session from "express-session";
 import { storage } from "./storage";
 import { signupSchema, loginSchema, insertTrialSchema } from "@shared/schema";
 import { extractDomain, getIconUrl } from "./icon";
-import { sendReminderEmail, sendTestEmail, sendPasswordResetEmail } from "./email";
+import { sendReminderEmail, sendTestEmail, sendPasswordResetEmail, sendSubscriptionReminderEmail } from "./email";
+import { decideReminderDeliveryAction } from "./reminderDelivery";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
@@ -1392,6 +1393,62 @@ export async function registerRoutes(
     };
   }
 
+  // Phase 4.2: subscription-native reminder DELIVERY. Mirrors
+  // processRemindersNow() above exactly in shape (load due -> claim ->
+  // send -> mark), with two additions the legacy trial path doesn't need:
+  // a re-eligibility check (evaluateReminderEligibility — Phase 4.1) and an
+  // active-connection-isolation re-check (storage.isSubscriptionCurrentlyActive
+  // — Phase 3D/Active Connection Isolation), both run BEFORE claiming, since
+  // a subscription can become ineligible or hidden any time between when its
+  // reminder row was created and when remindAt actually arrives (the
+  // disconnect race condition). Neither check is a new mechanism — both
+  // reuse the exact same functions the vault/reminder-generation paths do.
+  async function processSubscriptionReminderDeliveryNow() {
+    const now = new Date();
+    const dueReminders = await storage.getDueSubscriptionReminders(now);
+    console.log(`[Cron] processSubscriptionReminderDeliveryNow triggered at ${now.toISOString()} — ${dueReminders.length} due reminder(s) found`);
+
+    let attempted = 0;
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    const failures: { reminderId: string; subscriptionId: string; reason: string }[] = [];
+
+    for (const reminder of dueReminders) {
+      const timezone = reminder.user.timezone || "UTC";
+      const stillActive = await storage.isSubscriptionCurrentlyActive(reminder.subscription);
+      const decision = decideReminderDeliveryAction(reminder.subscription, stillActive, now, timezone);
+      if (decision.action === "skip") {
+        await storage.markSubscriptionReminderSkipped(reminder.id, decision.reason);
+        skipped++;
+        continue;
+      }
+
+      const claimed = await storage.claimSubscriptionReminderForSending(reminder.id);
+      if (!claimed) continue; // lost the race to another worker, or already handled
+
+      attempted++;
+      const result = await sendSubscriptionReminderEmail(reminder, reminder.subscription, reminder.user);
+      if (result.success) {
+        await storage.markSubscriptionReminderSent(reminder.id, result.messageId);
+        sent++;
+      } else {
+        await storage.markSubscriptionReminderFailed(reminder.id, result.error || "Unknown error");
+        failed++;
+        failures.push({ reminderId: reminder.id, subscriptionId: reminder.subscriptionId, reason: result.error || "Unknown error" });
+      }
+    }
+
+    return {
+      remindersProcessedCount: dueReminders.length,
+      emailsAttemptedCount: attempted,
+      emailsSentCount: sent,
+      failedCount: failed,
+      skippedCount: skipped,
+      failures,
+    };
+  }
+
   // ===== REVIEWS ROUTES =====
 
   app.get("/api/reviews", async (_req: Request, res: Response) => {
@@ -1551,6 +1608,19 @@ export async function registerRoutes(
       subscriptionReminders = { error: err.message || "Internal error" };
     }
 
+    // Step 2.5 (Phase 4.2): subscription-reminder DELIVERY — runs in the
+    // same cron tick, immediately after generation, matching this task's
+    // "generate missing reminder rows -> load due PENDING reminders" flow.
+    // Isolated in its own try/catch like every other step here.
+    let subscriptionReminderDelivery: Awaited<ReturnType<typeof processSubscriptionReminderDeliveryNow>> | { error: string };
+    try {
+      subscriptionReminderDelivery = await processSubscriptionReminderDeliveryNow();
+      console.log(`[Cron] subscription reminder delivery: ${JSON.stringify(subscriptionReminderDelivery)}`);
+    } catch (err: any) {
+      console.error("[Cron] subscription reminder delivery failed:", err);
+      subscriptionReminderDelivery = { error: err.message || "Internal error" };
+    }
+
     // Step 3 (Phase 3B.9.10): monthly AI-credit grant — a third isolated
     // step, same reasoning again: a failure here must never affect the two
     // reminder steps above. grantMonthlyCredits() is itself idempotent
@@ -1570,7 +1640,7 @@ export async function registerRoutes(
       aiCreditGrants = { granted: 0, error: err.message || "Internal error" };
     }
 
-    return res.json({ trialReminders, subscriptionReminders, aiCreditGrants });
+    return res.json({ trialReminders, subscriptionReminders, subscriptionReminderDelivery, aiCreditGrants });
   });
 
   app.post("/api/cron/email-scan", async (req: Request, res: Response) => {

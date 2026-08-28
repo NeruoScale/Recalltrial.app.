@@ -734,5 +734,19 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscriptions lastEventEmailConnectionId/crossAccountConflict columns:", err.message);
   }
 
+  // Phase 4.2: additive enum value for the atomic subscription-reminder
+  // delivery claim (PENDING -> SENDING -> SENT/FAILED). Shared reminder_status
+  // enum with the legacy `reminders` (trial) table — that table's delivery
+  // code is untouched and never writes this value, so this is a pure
+  // additive change with zero effect on existing data/behavior.
+  try {
+    await db.execute(sql`
+      ALTER TYPE reminder_status ADD VALUE IF NOT EXISTS 'SENDING';
+    `);
+    console.log("[migrate] reminder_status.SENDING OK");
+  } catch (err: any) {
+    console.error("[migrate] reminder_status.SENDING:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

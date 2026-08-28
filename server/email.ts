@@ -1,5 +1,5 @@
 import { Resend } from "resend";
-import type { Trial, User } from "@shared/schema";
+import type { Trial, User, ShadowSubscription, SubscriptionReminder } from "@shared/schema";
 import { format, parseISO } from "date-fns";
 
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -100,6 +100,113 @@ export async function sendReminderEmail(trial: Trial, user: User, reminderType: 
   } catch (err: any) {
     const errorMessage = err?.message || String(err);
     console.error(`[Email] Failed to send to ${user.email}:`, errorMessage);
+    return { success: false, error: errorMessage };
+  }
+}
+
+// Phase 4.2: subscription-native reminder email — a SEPARATE template from
+// buildReminderEmail() above (which is trial-specific: it assumes a
+// cancelUrl/serviceUrl and a fixed reminderType vocabulary). Shadow
+// subscriptions have neither a cancel link nor a serviceUrl, and their
+// amount/currency/nextBillingDate can legitimately be null — this template
+// is built around that reality instead of reusing the trial one and
+// patching around its assumptions.
+const SUBSCRIPTION_REMINDER_DAYS_MAP: Record<string, number> = { THREE_DAYS: 3, TWO_DAYS: 2, ONE_DAY: 1 };
+
+// Never fabricates a value: a null amount always reads as "we don't have
+// the billing amount yet," never $0 or a guessed figure. A known amount
+// with an unknown currency still shows the number (never invents a
+// currency to pair it with).
+function formatSubscriptionAmountLine(amount: string | null, currency: string | null): string {
+  if (amount === null) return "We don't have the billing amount yet.";
+  if (currency === null) return `Amount: ${amount} (currency not confirmed)`;
+  return `Amount: ${amount} ${currency}`;
+}
+
+export function buildSubscriptionReminderEmail(
+  reminder: SubscriptionReminder,
+  subscription: ShadowSubscription
+): { subject: string; html: string } {
+  const daysRemaining = SUBSCRIPTION_REMINDER_DAYS_MAP[reminder.type] ?? 1;
+  const merchantName = subscription.canonicalMerchantName;
+  // Re-checked eligibility (server/storage.ts's delivery path) already
+  // guarantees nextBillingDate is present and parseable by the time this
+  // is called — still guarding defensively rather than assuming.
+  const renewalDateFormatted = subscription.nextBillingDate
+    ? format(parseISO(subscription.nextBillingDate), "MMMM d, yyyy")
+    : "an upcoming date we don't have confirmed";
+  const amountLine = formatSubscriptionAmountLine(subscription.amount, subscription.currency);
+  const appUrl = process.env.APP_URL || "https://recalltrial.app";
+
+  const subject = `[RecallTrial] ${merchantName} renews in ${daysRemaining} day${daysRemaining !== 1 ? "s" : ""}`;
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;padding:20px;color:#111827;line-height:1.5;">
+  <div style="max-width:500px;margin:0 auto;">
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:24px;">Reminder: ${merchantName} renews in ${daysRemaining} day${daysRemaining !== 1 ? "s" : ""}</h1>
+
+    <p style="margin-bottom:8px;">Your ${merchantName} subscription renews on:</p>
+    <p style="font-size:18px;font-weight:600;margin-bottom:16px;">${renewalDateFormatted}</p>
+
+    <p style="margin:16px 0;font-size:16px;color:#374151;">${amountLine}</p>
+
+    <a href="${appUrl}/subscriptions" style="display:inline-block;background:#2563eb;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;font-size:16px;">
+      View in RecallTrial
+    </a>
+
+    <div style="margin-top:48px;padding-top:24px;border-top:1px solid #e5e7eb;color:#6b7280;font-size:13px;">
+      <p style="margin-bottom:8px;">You're receiving this because RecallTrial detected this subscription from your connected Gmail account.</p>
+      <p>We never access your inbox without your permission.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  return { subject, html };
+}
+
+export async function sendSubscriptionReminderEmail(
+  reminder: SubscriptionReminder,
+  subscription: ShadowSubscription,
+  user: User
+): Promise<EmailSendResult> {
+  const { subject, html } = buildSubscriptionReminderEmail(reminder, subscription);
+
+  if (!resend) {
+    console.log(`[Email] Would send to ${user.email}: ${subject}`);
+    console.log(`[Email] Resend API key not configured — skipping actual send`);
+    return { success: true, messageId: "console-only" };
+  }
+
+  const fromEmail = getFromEmail();
+  const replyTo = getReplyToEmail();
+
+  try {
+    const sendOptions: any = {
+      from: fromEmail,
+      to: user.email,
+      subject,
+      html,
+    };
+    if (replyTo) {
+      sendOptions.replyTo = replyTo;
+    }
+
+    const result = await resend.emails.send(sendOptions);
+    if (result?.error) {
+      const errorMessage = result.error.message || JSON.stringify(result.error);
+      console.error(`[Email] Resend rejected subscription reminder to ${user.email}:`, errorMessage);
+      return { success: false, error: errorMessage };
+    }
+    const messageId = result?.data?.id || undefined;
+    console.log(`[Email] Sent subscription reminder to ${user.email}: ${subject} (id: ${messageId})`);
+    return { success: true, messageId };
+  } catch (err: any) {
+    const errorMessage = err?.message || String(err);
+    console.error(`[Email] Failed to send subscription reminder to ${user.email}:`, errorMessage);
     return { success: false, error: errorMessage };
   }
 }
