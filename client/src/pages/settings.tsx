@@ -20,7 +20,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Bell, ArrowLeft, Loader2, Save, Star, CreditCard, Sparkles, Mail, Link, Unlink, ScanLine, Lock, Bot } from "lucide-react";
+import { Bell, ArrowLeft, Loader2, Save, Star, CreditCard, Sparkles, Mail, Link, Unlink, ScanLine, Lock, Bot, TrendingUp } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const TIMEZONES = [
@@ -149,6 +149,21 @@ export default function SettingsPage() {
     },
     onError: (err: any) => {
       toast({ title: "Failed to update reminder preference", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // Price Increase Notification: a separate preference from
+  // toggleSubscriptionRemindersMutation, same reasoning that mutation
+  // itself is separate from AI scanning / controlled-beta access.
+  const togglePriceIncreaseNotificationsMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("PATCH", "/api/user/settings", { priceIncreaseNotificationsEnabled: enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to update price-increase alert preference", description: err.message, variant: "destructive" });
     },
   });
 
@@ -517,6 +532,34 @@ export default function SettingsPage() {
               {user.subscriptionRemindersEnabled
                 ? "We'll send reminders before eligible subscription renewals."
                 : "Subscription renewal reminders are disabled."}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card data-testid="card-price-increase-notifications">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-base">Price increase alerts</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="switch-price-increase-notifications" className="text-sm font-normal">
+                {user.priceIncreaseNotificationsEnabled ? "On" : "Off"}
+              </Label>
+              <Switch
+                id="switch-price-increase-notifications"
+                checked={!!user.priceIncreaseNotificationsEnabled}
+                onCheckedChange={(v) => togglePriceIncreaseNotificationsMutation.mutate(v)}
+                disabled={togglePriceIncreaseNotificationsMutation.isPending}
+                data-testid="switch-price-increase-notifications"
+              />
+            </div>
+            <p className="text-sm text-muted-foreground" data-testid="text-price-increase-notifications-description">
+              {user.priceIncreaseNotificationsEnabled
+                ? "Get an email when RecallTrial detects that a subscription's price has increased."
+                : "Price increase alerts are disabled."}
             </p>
           </CardContent>
         </Card>

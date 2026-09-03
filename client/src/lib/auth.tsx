@@ -18,6 +18,7 @@ type AuthUser = {
   aiScanningEnabled: boolean;
   subscriptionIntelligenceEnabled: boolean;
   subscriptionRemindersEnabled: boolean;
+  priceIncreaseNotificationsEnabled: boolean;
   aiCreditsIncluded: number;
   aiCreditsPurchased: number;
   aiCreditsTotal: number;

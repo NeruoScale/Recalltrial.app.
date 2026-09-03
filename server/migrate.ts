@@ -769,5 +769,48 @@ export async function runMigrations(): Promise<void> {
     console.error("[migrate] subscription_reminders.claimed_at:", err.message);
   }
 
+  // ── Price Increase Notification: completes 3B.9.8's remaining "Notify
+  // user" piece. Additive only — reuses the existing reminder_status enum,
+  // no existing table/column touched or altered.
+  try {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS price_increase_notifications_enabled boolean NOT NULL DEFAULT true;
+    `);
+    console.log("[migrate] users.price_increase_notifications_enabled OK");
+  } catch (err: any) {
+    console.error("[migrate] users.price_increase_notifications_enabled:", err.message);
+  }
+
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS price_increase_notifications (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        subscription_id varchar NOT NULL REFERENCES subscriptions(id),
+        user_id varchar NOT NULL REFERENCES users(id),
+        detected_at date NOT NULL,
+        previous_amount decimal(10,2) NOT NULL,
+        previous_currency text NOT NULL,
+        previous_interval text,
+        new_amount decimal(10,2) NOT NULL,
+        new_currency text NOT NULL,
+        new_interval text,
+        percentage_change decimal(6,2) NOT NULL,
+        monthly_impact decimal(10,2) NOT NULL,
+        annual_impact decimal(10,2) NOT NULL,
+        status reminder_status NOT NULL DEFAULT 'PENDING',
+        sent_at timestamp,
+        provider text DEFAULT 'resend',
+        provider_message_id text,
+        last_error text,
+        claimed_at timestamp,
+        created_at timestamp DEFAULT now() NOT NULL,
+        CONSTRAINT price_increase_notifications_occurrence_unique UNIQUE (subscription_id, detected_at, previous_amount, new_amount)
+      );
+    `);
+    console.log("[migrate] price_increase_notifications table OK");
+  } catch (err: any) {
+    console.error("[migrate] price_increase_notifications table:", err.message);
+  }
+
   console.log("[migrate] Done.");
 }

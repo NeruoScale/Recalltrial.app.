@@ -4,8 +4,9 @@ import session from "express-session";
 import { storage } from "./storage";
 import { signupSchema, loginSchema, insertTrialSchema } from "@shared/schema";
 import { extractDomain, getIconUrl } from "./icon";
-import { sendReminderEmail, sendTestEmail, sendPasswordResetEmail, sendSubscriptionReminderEmail } from "./email";
+import { sendReminderEmail, sendTestEmail, sendPasswordResetEmail, sendSubscriptionReminderEmail, sendPriceIncreaseNotificationEmail } from "./email";
 import { decideReminderDeliveryAction } from "./reminderDelivery";
+import { decidePriceIncreaseNotificationAction } from "./priceIncreaseNotification";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import connectPgSimple from "connect-pg-simple";
@@ -238,6 +239,7 @@ export async function registerRoutes(
       aiScanningEnabled: user.aiScanningEnabled,
       subscriptionIntelligenceEnabled: user.subscriptionIntelligenceEnabled,
       subscriptionRemindersEnabled: user.subscriptionRemindersEnabled,
+      priceIncreaseNotificationsEnabled: user.priceIncreaseNotificationsEnabled,
       aiCreditsIncluded: user.aiCreditsIncluded,
       aiCreditsPurchased: user.aiCreditsPurchased,
       aiCreditsTotal: user.aiCreditsIncluded + user.aiCreditsPurchased,
@@ -286,7 +288,7 @@ export async function registerRoutes(
     try {
       const user = await storage.getUserById(req.session.userId!);
       if (!user) return res.status(401).json({ message: "User not found" });
-      return res.json({ aiScanningEnabled: user.aiScanningEnabled, subscriptionRemindersEnabled: user.subscriptionRemindersEnabled });
+      return res.json({ aiScanningEnabled: user.aiScanningEnabled, subscriptionRemindersEnabled: user.subscriptionRemindersEnabled, priceIncreaseNotificationsEnabled: user.priceIncreaseNotificationsEnabled });
     } catch (err) {
       console.error("Get user settings error:", err);
       return res.status(500).json({ message: "Internal error" });
@@ -296,7 +298,7 @@ export async function registerRoutes(
   app.patch("/api/user/settings", requireAuth, async (req: Request, res: Response) => {
     try {
       const userId = req.session.userId!;
-      const { aiScanningEnabled, subscriptionRemindersEnabled } = req.body;
+      const { aiScanningEnabled, subscriptionRemindersEnabled, priceIncreaseNotificationsEnabled } = req.body;
 
       // Phase 4.4: a separate concept from aiScanningEnabled and from
       // subscriptionIntelligenceEnabled (the controlled-beta gate) — never
@@ -321,6 +323,24 @@ export async function registerRoutes(
           await storage.skipPendingRemindersForDisabledUser(userId);
         }
         return res.json({ subscriptionRemindersEnabled: updated.subscriptionRemindersEnabled });
+      }
+
+      // Price Increase Notification: a separate preference from
+      // subscriptionRemindersEnabled — same "distinct notification concept"
+      // reasoning subscriptionRemindersEnabled itself was split out from
+      // subscriptionIntelligenceEnabled for. No revival call on re-enable
+      // (unlike subscriptionRemindersEnabled) — see
+      // markPriceIncreaseNotificationSkipped's comment in storage.ts for why
+      // this table deliberately has no revival path.
+      if (priceIncreaseNotificationsEnabled !== undefined) {
+        if (typeof priceIncreaseNotificationsEnabled !== "boolean") {
+          return res.status(400).json({ message: "priceIncreaseNotificationsEnabled must be a boolean" });
+        }
+        const updated = await storage.togglePriceIncreaseNotifications(userId, priceIncreaseNotificationsEnabled);
+        if (!priceIncreaseNotificationsEnabled) {
+          await storage.skipPendingPriceIncreaseNotificationsForDisabledUser(userId);
+        }
+        return res.json({ priceIncreaseNotificationsEnabled: updated.priceIncreaseNotificationsEnabled });
       }
 
       if (typeof aiScanningEnabled !== "boolean") {
@@ -1482,6 +1502,55 @@ export async function registerRoutes(
     };
   }
 
+  // Price Increase Notification: mirrors processSubscriptionReminderDeliveryNow()
+  // above exactly in shape (load pending -> re-check active-connection
+  // isolation + preference -> claim -> send -> mark). No date-due filter —
+  // getPendingPriceIncreaseNotifications() already returns exactly the rows
+  // worth attempting.
+  async function processPriceIncreaseNotificationDeliveryNow() {
+    const pending = await storage.getPendingPriceIncreaseNotifications();
+    console.log(`[Cron] processPriceIncreaseNotificationDeliveryNow triggered — ${pending.length} pending notification(s) found`);
+
+    let attempted = 0;
+    let sent = 0;
+    let failed = 0;
+    let skipped = 0;
+    const failures: { notificationId: string; subscriptionId: string; reason: string }[] = [];
+
+    for (const notification of pending) {
+      const stillActive = await storage.isSubscriptionCurrentlyActive(notification.subscription);
+      const decision = decidePriceIncreaseNotificationAction(notification.user.priceIncreaseNotificationsEnabled, stillActive);
+      if (decision.action === "skip") {
+        await storage.markPriceIncreaseNotificationSkipped(notification.id, decision.reason);
+        skipped++;
+        continue;
+      }
+
+      const claimed = await storage.claimPriceIncreaseNotificationForSending(notification.id);
+      if (!claimed) continue; // lost the race to another worker, or already handled
+
+      attempted++;
+      const result = await sendPriceIncreaseNotificationEmail(notification, notification.subscription, notification.user);
+      if (result.success) {
+        await storage.markPriceIncreaseNotificationSent(notification.id, result.messageId);
+        sent++;
+      } else {
+        await storage.markPriceIncreaseNotificationFailed(notification.id, result.error || "Unknown error");
+        failed++;
+        failures.push({ notificationId: notification.id, subscriptionId: notification.subscriptionId, reason: result.error || "Unknown error" });
+      }
+    }
+
+    return {
+      notificationsProcessedCount: pending.length,
+      emailsAttemptedCount: attempted,
+      emailsSentCount: sent,
+      failedCount: failed,
+      skippedCount: skipped,
+      failures,
+    };
+  }
+
   // ===== REVIEWS ROUTES =====
 
   app.get("/api/reviews", async (_req: Request, res: Response) => {
@@ -1673,6 +1742,30 @@ export async function registerRoutes(
       subscriptionReminderDelivery = { error: err.message || "Internal error" };
     }
 
+    // Step 2.6 (Price Increase Notification): stale-SENDING recovery for
+    // this table, then delivery — same two-part shape as Step 2.4/2.5
+    // above, same isolated try/catch convention, reusing the SAME cron
+    // trigger/schedule/auth rather than a new cron endpoint.
+    let priceIncreaseStaleSendingRecovery: { recoveredCount: number } | { error: string };
+    try {
+      const timeoutMinutes = Number(process.env.SUBSCRIPTION_REMINDER_SENDING_TIMEOUT_MINUTES) || 30;
+      const recoveredCount = await storage.recoverStalePriceIncreaseNotificationSending(timeoutMinutes, new Date());
+      priceIncreaseStaleSendingRecovery = { recoveredCount };
+      console.log(`[Cron] price-increase notification stale SENDING recovery (timeout=${timeoutMinutes}min): recovered ${recoveredCount}`);
+    } catch (err: any) {
+      console.error("[Cron] price-increase notification stale SENDING recovery failed:", err);
+      priceIncreaseStaleSendingRecovery = { error: err.message || "Internal error" };
+    }
+
+    let priceIncreaseNotificationDelivery: Awaited<ReturnType<typeof processPriceIncreaseNotificationDeliveryNow>> | { error: string };
+    try {
+      priceIncreaseNotificationDelivery = await processPriceIncreaseNotificationDeliveryNow();
+      console.log(`[Cron] price-increase notification delivery: ${JSON.stringify(priceIncreaseNotificationDelivery)}`);
+    } catch (err: any) {
+      console.error("[Cron] price-increase notification delivery failed:", err);
+      priceIncreaseNotificationDelivery = { error: err.message || "Internal error" };
+    }
+
     // Step 3 (Phase 3B.9.10): monthly AI-credit grant — a third isolated
     // step, same reasoning again: a failure here must never affect the two
     // reminder steps above. grantMonthlyCredits() is itself idempotent
@@ -1692,7 +1785,7 @@ export async function registerRoutes(
       aiCreditGrants = { granted: 0, error: err.message || "Internal error" };
     }
 
-    return res.json({ trialReminders, subscriptionReminders, staleSendingRecovery, subscriptionReminderDelivery, aiCreditGrants });
+    return res.json({ trialReminders, subscriptionReminders, staleSendingRecovery, subscriptionReminderDelivery, priceIncreaseStaleSendingRecovery, priceIncreaseNotificationDelivery, aiCreditGrants });
   });
 
   app.post("/api/cron/email-scan", async (req: Request, res: Response) => {

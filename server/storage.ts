@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, isNull, lte, lt, sql, count, desc, inArray, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
-import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, emailConnections, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder, type EmailConnection, type InsertEmailConnection } from "@shared/schema";
+import { users, trials, reminders, analyticsEvents, reviews, suggestedTrials, passwordResetTokens, processedPurchaseEvents, subscriptionEvents, entityResolutionCandidates, subscriptions, subscriptionReminders, aiEnrichmentJobs, emailConnections, priceIncreaseNotifications, type User, type Trial, type Reminder, type Review, type SuggestedTrial, type PasswordResetToken, type InsertSubscriptionEvent, type SubscriptionEvent, type InsertEntityResolutionCandidate, type InsertShadowSubscription, type ShadowSubscription, type SubscriptionReminder, type EmailConnection, type InsertEmailConnection, type PriceIncreaseNotification } from "@shared/schema";
 import { decideCanonicalization } from "./canonicalEvents";
 import { applyEventToSubscription, evaluateReminderEligibility, type LifecycleRelevantEvent, type LifecycleTransitionResult } from "./subscriptionLifecycle";
 import { inferBillingInterval, shouldUpdateBillingIntelligence, type BillingIntervalSource, type BillingIntervalConfidence } from "./billingIntelligence";
@@ -11,6 +11,7 @@ import { detectPriceChanges } from "./priceChangeDetector";
 import { buildGmailDisconnectUpdate } from "./gmail";
 import { isSubscriptionVisibleForActiveConnection } from "./activeConnectionScope";
 import { REMINDERS_DISABLED_SKIP_REASON, computeStaleSendingCutoff } from "./reminderDelivery";
+import { buildPriceIncreaseNotificationRecord, PRICE_INCREASE_NOTIFICATIONS_DISABLED_SKIP_REASON } from "./priceIncreaseNotification";
 import { resolveEntity, isEligibleForShadowSubscription, deriveShadowSubscription } from "./entityResolver";
 
 // ─── Phase 3B.9.7-PATCH: source-aware conflict resolution ──────────────────────
@@ -189,6 +190,22 @@ export interface IStorage {
   skipPendingRemindersForDisabledUser(userId: string): Promise<number>;
   reviveSkippedRemindersForUser(userId: string, now: Date): Promise<number>;
   recoverStaleSendingReminders(timeoutMinutes: number, now: Date): Promise<number>;
+
+  // Price Increase Notification: mirrors the subscription-reminder delivery
+  // methods immediately above exactly in shape (same atomic-claim pattern,
+  // same PENDING/SENDING/SENT/FAILED/SKIPPED vocabulary via the reused
+  // reminder_status enum) — a separate table, not a parallel mechanism.
+  // No "due at a future time" concept here (unlike remindAt) — a row is
+  // notification-worthy the moment it's created, so there's no date filter,
+  // only a status filter.
+  getPendingPriceIncreaseNotifications(): Promise<(PriceIncreaseNotification & { subscription: ShadowSubscription; user: User })[]>;
+  claimPriceIncreaseNotificationForSending(id: string): Promise<PriceIncreaseNotification | undefined>;
+  markPriceIncreaseNotificationSent(id: string, providerMessageId?: string): Promise<void>;
+  markPriceIncreaseNotificationFailed(id: string, error: string): Promise<void>;
+  markPriceIncreaseNotificationSkipped(id: string, reason: string): Promise<void>;
+  recoverStalePriceIncreaseNotificationSending(timeoutMinutes: number, now: Date): Promise<number>;
+  togglePriceIncreaseNotifications(userId: string, enabled: boolean): Promise<User>;
+  skipPendingPriceIncreaseNotificationsForDisabledUser(userId: string): Promise<number>;
 
   getRemindersByTrial(trialId: string, userId: string): Promise<Reminder[]>;
   createReminder(data: { trialId: string; userId: string; remindAt: Date; type: string }): Promise<Reminder>;
@@ -1811,6 +1828,32 @@ export class DatabaseStorage implements IStorage {
       `${change.previousAmount}${change.previousCurrency} -> ${change.newAmount}${change.newCurrency} (${change.percentageChange}%)`
     );
 
+    // Price Increase Notification: creates an idempotent notification
+    // record for a genuine increase only (buildPriceIncreaseNotificationRecord
+    // returns null for decrease/currency_change/interval_change — the same
+    // classification priceChangeDetector.ts already made, never
+    // re-derived). Isolated in its own try/catch, same convention as the
+    // AI-enrichment queueing in gmail.ts: a failure here must never affect
+    // the price-change detection/persistence above, which has already
+    // committed by this point. onConflictDoNothing on the occurrence's
+    // unique constraint is what makes this safe to call every time
+    // runPriceChangeDetection() re-runs for the same underlying event data.
+    try {
+      const record = buildPriceIncreaseNotificationRecord(change, subscription.id, subscription.userId);
+      if (record) {
+        await db.insert(priceIncreaseNotifications).values(record).onConflictDoNothing({
+          target: [
+            priceIncreaseNotifications.subscriptionId,
+            priceIncreaseNotifications.detectedAt,
+            priceIncreaseNotifications.previousAmount,
+            priceIncreaseNotifications.newAmount,
+          ],
+        });
+      }
+    } catch (err) {
+      console.error(`[PriceIncreaseNotification] failed to create notification record for ${subscription.canonicalMerchantName}:`, err);
+    }
+
     return updated ?? subscription;
   }
 
@@ -2109,6 +2152,119 @@ export class DatabaseStorage implements IStorage {
         lt(subscriptionReminders.claimedAt, cutoff)
       ))
       .returning({ id: subscriptionReminders.id });
+    return result.length;
+  }
+
+  // ── Price Increase Notification: DELIVERY ──────────────────────────────
+  //
+  // Mirrors the subscription-reminder delivery methods immediately above,
+  // method-for-method — same atomic-claim-via-conditional-UPDATE pattern
+  // (claimSubscriptionReminderForSending), same PENDING/SENDING/SENT/FAILED
+  // vocabulary, same stale-SENDING recovery shape
+  // (recoverStaleSendingReminders). No parallel delivery mechanism
+  // invented; only the table and the notification-specific content differ.
+  async getPendingPriceIncreaseNotifications(): Promise<(PriceIncreaseNotification & { subscription: ShadowSubscription; user: User })[]> {
+    const results = await db
+      .select({ notification: priceIncreaseNotifications, subscription: subscriptions, user: users })
+      .from(priceIncreaseNotifications)
+      .innerJoin(subscriptions, eq(priceIncreaseNotifications.subscriptionId, subscriptions.id))
+      .innerJoin(users, eq(priceIncreaseNotifications.userId, users.id))
+      .where(inArray(priceIncreaseNotifications.status, ["PENDING", "FAILED"]));
+
+    return results.map((r) => ({ ...r.notification, subscription: r.subscription, user: r.user }));
+  }
+
+  // The atomic claim: identical reasoning to claimSubscriptionReminderForSending
+  // — a single conditional UPDATE is what actually prevents two concurrent
+  // cron workers from both sending the same notification.
+  async claimPriceIncreaseNotificationForSending(id: string): Promise<PriceIncreaseNotification | undefined> {
+    const [row] = await db.update(priceIncreaseNotifications)
+      .set({ status: "SENDING", claimedAt: new Date() })
+      .where(and(
+        eq(priceIncreaseNotifications.id, id),
+        inArray(priceIncreaseNotifications.status, ["PENDING", "FAILED"])
+      ))
+      .returning();
+    return row;
+  }
+
+  async markPriceIncreaseNotificationSent(id: string, providerMessageId?: string): Promise<void> {
+    await db.update(priceIncreaseNotifications)
+      .set({
+        status: "SENT",
+        sentAt: new Date(),
+        providerMessageId: providerMessageId || null,
+        lastError: null,
+        claimedAt: null,
+      })
+      .where(eq(priceIncreaseNotifications.id, id));
+  }
+
+  async markPriceIncreaseNotificationFailed(id: string, error: string): Promise<void> {
+    await db.update(priceIncreaseNotifications)
+      .set({
+        status: "FAILED",
+        lastError: error,
+        claimedAt: null,
+      })
+      .where(eq(priceIncreaseNotifications.id, id));
+  }
+
+  // SKIPPED is terminal here — deliberately, unlike subscription reminders'
+  // SKIPPED-for-disabled-preference rows (which reviveSkippedRemindersForUser
+  // resurrects on re-enable). A subscription reminder is about a FUTURE
+  // date whose relevance survives the preference being off temporarily; a
+  // price-increase notification is about a specific PAST detected event —
+  // silently emailing a backlog of old increases when a user re-enables the
+  // preference later would be surprising and stale, not helpful. No revival
+  // path exists for this table, by design.
+  async markPriceIncreaseNotificationSkipped(id: string, reason: string): Promise<void> {
+    await db.update(priceIncreaseNotifications)
+      .set({
+        status: "SKIPPED",
+        lastError: reason,
+        claimedAt: null,
+      })
+      .where(eq(priceIncreaseNotifications.id, id));
+  }
+
+  async recoverStalePriceIncreaseNotificationSending(timeoutMinutes: number, now: Date): Promise<number> {
+    const cutoff = computeStaleSendingCutoff(now, timeoutMinutes);
+    const result = await db.update(priceIncreaseNotifications)
+      .set({
+        status: "PENDING",
+        claimedAt: null,
+        lastError: "recovered from a stale SENDING state (previous delivery attempt never completed)",
+      })
+      .where(and(
+        eq(priceIncreaseNotifications.status, "SENDING"),
+        lt(priceIncreaseNotifications.claimedAt, cutoff)
+      ))
+      .returning({ id: priceIncreaseNotifications.id });
+    return result.length;
+  }
+
+  // Separate preference from subscriptionRemindersEnabled — same precedent
+  // toggleSubscriptionReminders itself follows.
+  async togglePriceIncreaseNotifications(userId: string, enabled: boolean): Promise<User> {
+    const [user] = await db.update(users).set({ priceIncreaseNotificationsEnabled: enabled }).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  // Called immediately when a user turns this preference OFF — makes the
+  // change visible immediately for any already-created PENDING/FAILED
+  // notification, rather than waiting for the next delivery pass. Never
+  // touches SENT or SENDING (already delivered, or already in-flight — let
+  // that attempt finish). Reuses the SKIPPED status and the exact
+  // PRICE_INCREASE_NOTIFICATIONS_DISABLED_SKIP_REASON marker.
+  async skipPendingPriceIncreaseNotificationsForDisabledUser(userId: string): Promise<number> {
+    const result = await db.update(priceIncreaseNotifications)
+      .set({ status: "SKIPPED", lastError: PRICE_INCREASE_NOTIFICATIONS_DISABLED_SKIP_REASON, claimedAt: null })
+      .where(and(
+        eq(priceIncreaseNotifications.userId, userId),
+        inArray(priceIncreaseNotifications.status, ["PENDING", "FAILED"])
+      ))
+      .returning({ id: priceIncreaseNotifications.id });
     return result.length;
   }
 

@@ -86,6 +86,18 @@ export const users = pgTable("users", {
   // 4.1/4.2 predate this column) — defaulting false would silently take
   // reminders away from existing users the moment this column exists.
   subscriptionRemindersEnabled: boolean("subscription_reminders_enabled").notNull().default(true),
+  // Phase — Price Increase Notification: a SEPARATE preference from
+  // subscriptionRemindersEnabled (renewal-date reminders) and from
+  // subscriptionIntelligenceEnabled (the controlled-beta gate) — a distinct
+  // notification concept, same precedent as Phase 4.4's own reminder
+  // preference. Defaults true: unlike aiScanningEnabled (an explicit
+  // consent decision about sending content to a third-party AI provider),
+  // this is an ordinary "email me about my subscriptions" preference —
+  // exactly the same category as subscriptionRemindersEnabled, which
+  // already defaults true for that reason. Defaulting false would silently
+  // withhold the notification from every user unless they found this
+  // toggle first.
+  priceIncreaseNotificationsEnabled: boolean("price_increase_notifications_enabled").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -608,6 +620,57 @@ export const subscriptionReminders = pgTable("subscription_reminders", {
 
 export type SubscriptionReminder = typeof subscriptionReminders.$inferSelect;
 export type InsertSubscriptionReminder = typeof subscriptionReminders.$inferInsert;
+
+// ─── Price increase notification (3B.9.8's remaining "Notify user" piece) ──
+//
+// A SEPARATE table from `subscription_reminders`, deliberately — same
+// reasoning subscription_reminders itself gave for not reusing `reminders`:
+// a distinct notification type must never collide/double-send with an
+// unrelated one. Reuses `reminder_status` (PENDING/SENDING/SENT/SKIPPED/
+// FAILED) rather than inventing a parallel enum — the delivery-state
+// vocabulary is identical, only "what this notification is about" differs.
+//
+// Idempotency: detectPriceChanges()/runPriceChangeDetection() (storage.ts)
+// re-run on every lifecycle event, including ones that don't change the
+// "latest" price observation — the SAME genuine increase would otherwise be
+// detected repeatedly. The unique constraint below gives each detected
+// occurrence a deterministic identity (which subscription, which date it
+// was observed, and the exact previous/new amounts), so a repeat detection
+// of the identical occurrence is a harmless onConflictDoNothing no-op,
+// while a LATER, genuinely different increase for the same subscription
+// (a different detectedAt and/or different amounts) still gets its own row.
+export const priceIncreaseNotifications = pgTable("price_increase_notifications", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  subscriptionId: varchar("subscription_id").notNull().references(() => subscriptions.id),
+  userId: varchar("user_id").notNull().references(() => users.id),
+  // Mirrors priceChangeDetector.ts's PriceChange.detectedAt — the NEW
+  // observation's date (an ISO YYYY-MM-DD string), never a guessed/backfilled
+  // value.
+  detectedAt: date("detected_at").notNull(),
+  previousAmount: decimal("previous_amount", { precision: 10, scale: 2 }).notNull(),
+  previousCurrency: text("previous_currency").notNull(),
+  previousInterval: text("previous_interval"),
+  newAmount: decimal("new_amount", { precision: 10, scale: 2 }).notNull(),
+  newCurrency: text("new_currency").notNull(),
+  newInterval: text("new_interval"),
+  percentageChange: decimal("percentage_change", { precision: 6, scale: 2 }).notNull(),
+  monthlyImpact: decimal("monthly_impact", { precision: 10, scale: 2 }).notNull(),
+  annualImpact: decimal("annual_impact", { precision: 10, scale: 2 }).notNull(),
+  status: reminderStatusEnum("status").notNull().default("PENDING"),
+  sentAt: timestamp("sent_at"),
+  provider: text("provider").default("resend"),
+  providerMessageId: text("provider_message_id"),
+  lastError: text("last_error"),
+  claimedAt: timestamp("claimed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  unique("price_increase_notifications_occurrence_unique").on(
+    table.subscriptionId, table.detectedAt, table.previousAmount, table.newAmount
+  ),
+]);
+
+export type PriceIncreaseNotification = typeof priceIncreaseNotifications.$inferSelect;
+export type InsertPriceIncreaseNotification = typeof priceIncreaseNotifications.$inferInsert;
 
 export const reviewSourceEnum = pgEnum("review_source", ["manual", "in_app", "import"]);
 
