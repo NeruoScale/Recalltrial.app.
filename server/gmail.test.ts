@@ -1369,6 +1369,61 @@ describe("Phase 3B.9.7: full Gmail body extraction (Layer 2)", () => {
     });
   });
 
+  // Phase 5.1A: resolveFutureCalendarDate() used to roll ANY resolved date
+  // forward a year once it fell before "today" — even one with an EXPLICIT
+  // year stated in the source text. That meant "Sep 1, 2026" silently became
+  // "2027-09-01" the moment the real wall clock passed Sep 1, 2026 (exactly
+  // what broke the two tests above, transiently, until this fix). The fix:
+  // an explicit year is now authoritative and never rolled forward; only a
+  // YEARLESS date (inferred from "today") still rolls forward when it's
+  // already passed — unchanged from before. vi.setSystemTime() pins "today"
+  // so these are deterministic regardless of the real wall clock.
+  describe("explicit-year authority in date resolution (Phase 5.1A)", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("Test 1 — explicit year, one day in the past: returns the explicit date, never rolled into next year", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
+      expect(extractNextBillingDate("Next billing date: Sep 1, 2026")).toBe("2026-09-01");
+    });
+
+    it("Test 2 — explicit year, still in the future: returned as-is", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
+      expect(extractNextBillingDate("Next billing date: Sep 14, 2026")).toBe("2026-09-14");
+    });
+
+    it("Test 3 — yearless date already passed this year: still rolls forward to next year (pre-existing behavior, unchanged)", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
+      const { date, source } = extractDate("your trial ends Sep 1", RECEIVED);
+      expect(source).toBe("explicit");
+      expect(date).toBe("2027-09-01");
+    });
+
+    it("Test 4 — yearless date still upcoming this year: resolves to this year, no rollover", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
+      const { date, source } = extractDate("your trial ends Sep 14", RECEIVED);
+      expect(source).toBe("explicit");
+      expect(date).toBe("2026-09-14");
+    });
+
+    it("Test 5 — explicit year at a year boundary: authoritative even though it's now in a prior calendar year", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2027-01-02T12:00:00.000Z"));
+      expect(extractNextBillingDate("Next billing date: Dec 31, 2026")).toBe("2026-12-31");
+    });
+
+    it("Test 6 — invalid/overflow calendar date still returns null even with an explicit year (parsing was never loosened)", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
+      expect(extractNextBillingDate("Next billing date: Feb 30, 2026")).toBeNull();
+    });
+  });
+
   describe("extractSubscriptionId()", () => {
     it("extracts an explicit subscription/account identifier", () => {
       expect(extractSubscriptionId("Your Subscription ID: SUB-88421-XZ")).toBe("SUB-88421-XZ");

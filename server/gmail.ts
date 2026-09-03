@@ -274,12 +274,25 @@ function isBeforeUTC(a: CalendarDate, b: CalendarDate): boolean {
 }
 
 /**
- * Resolves an explicit-or-inferred year against `today` the same way the
- * original code did: reject years before today's (a clearly past date isn't
- * a usable renewal/trial-end date), and if the resulting date has already
- * passed this year, assume it refers to next year's occurrence.
+ * Resolves a calendar date against `today`. `yearWasExplicit` distinguishes
+ * two genuinely different situations that used to be conflated:
+ *
+ *  - explicit year (the source text said "Sep 1, 2026"): that year is
+ *    authoritative. Returned as-is, even if it's in the past relative to
+ *    `today` — an email that explicitly states a date gets reported exactly
+ *    as stated, never silently bumped to "next year" just because today
+ *    happens to be a day (or a year) later. (Phase 5.1A: this used to roll
+ *    "Sep 1, 2026" forward to 2027-09-01 the moment today passed Sep 1,
+ *    2026 — wrong, since the year was never ambiguous in the first place.)
+ *  - inferred year (the source only said "Sep 1", no year — `today.year` is
+ *    filled in by the caller before this function ever sees it): the
+ *    original rollover behavior is unchanged — if that date has already
+ *    passed this year, assume it refers to next year's occurrence.
  */
-function resolveFutureCalendarDate(year: number, month: number, day: number, today: CalendarDate): string | null {
+function resolveFutureCalendarDate(year: number, month: number, day: number, today: CalendarDate, yearWasExplicit: boolean): string | null {
+  if (yearWasExplicit) {
+    return formatCalendarDate(year, month, day);
+  }
   if (year < today.year) return null;
   const candidate: CalendarDate = { year, month, day };
   const resolved = isBeforeUTC(candidate, today) ? { year: year + 1, month, day } : candidate;
@@ -307,8 +320,9 @@ function extractDateFromSingleText(
     if (match?.[1]) {
       const components = parseCalendarDateComponents(match[1]);
       if (components) {
+        const yearWasExplicit = components.year !== null;
         const year = components.year ?? today.year;
-        const formatted = resolveFutureCalendarDate(year, components.month, components.day, today);
+        const formatted = resolveFutureCalendarDate(year, components.month, components.day, today, yearWasExplicit);
         if (formatted) return { date: formatted, source: "explicit" };
       }
     }
@@ -325,7 +339,8 @@ function extractDateFromSingleText(
     const day = parseInt(bareMonthName[2]);
     const year = parseInt(bareMonthName[3]);
     if (month) {
-      const formatted = resolveFutureCalendarDate(year, month, day, today);
+      // Explicit year: matched directly by the regex's `(\d{4})` group above.
+      const formatted = resolveFutureCalendarDate(year, month, day, today, true);
       if (formatted) return { date: formatted, source: "explicit" };
     }
   }
@@ -335,7 +350,7 @@ function extractDateFromSingleText(
     const month = parseInt(bareSlash[1]);
     const day = parseInt(bareSlash[2]);
     const year = parseInt(bareSlash[3]);
-    const formatted = resolveFutureCalendarDate(year, month, day, today);
+    const formatted = resolveFutureCalendarDate(year, month, day, today, true);
     if (formatted) return { date: formatted, source: "explicit" };
   }
 
@@ -344,7 +359,7 @@ function extractDateFromSingleText(
     const year = parseInt(bareIso[1]);
     const month = parseInt(bareIso[2]);
     const day = parseInt(bareIso[3]);
-    const formatted = resolveFutureCalendarDate(year, month, day, today);
+    const formatted = resolveFutureCalendarDate(year, month, day, today, true);
     if (formatted) return { date: formatted, source: "explicit" };
   }
 
@@ -411,7 +426,9 @@ function extractDateFromSingleText(
     const month = MONTH_NAMES[shortMatch[1].slice(0, 3).toLowerCase()];
     const day = parseInt(shortMatch[2]);
     if (month) {
-      const formatted = resolveFutureCalendarDate(today.year, month, day, today);
+      // No year in the source text at all — inferred from today.year, so
+      // the rollover-if-already-passed behavior still applies here.
+      const formatted = resolveFutureCalendarDate(today.year, month, day, today, false);
       if (formatted) return { date: formatted, source: "explicit" };
     }
   }
@@ -716,7 +733,12 @@ function findNextBillingDateInText(text: string): string | null {
   const components = parseCalendarDateComponents(match[1]);
   if (!components) return null;
   const today = utcDateParts(new Date());
-  return resolveFutureCalendarDate(components.year ?? today.year, components.month, components.day, today);
+  // NEXT_BILLING_DATE_PATTERN's every alternative requires a 4-digit year,
+  // so components.year is always non-null here in practice — still computed
+  // explicitly (not hardcoded `true`) so this stays correct if the pattern
+  // is ever loosened to allow a yearless match.
+  const yearWasExplicit = components.year !== null;
+  return resolveFutureCalendarDate(components.year ?? today.year, components.month, components.day, today, yearWasExplicit);
 }
 
 /** extractNextBillingDate(): narrower than extractDate() — only matches explicit "next billing/renewal date" phrasing, not any lifecycle date. */
